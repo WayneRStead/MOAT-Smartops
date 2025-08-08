@@ -1,0 +1,17 @@
+[
+    {
+      "userId": "U001",
+      "name": "Wayne Stead",
+      "role": "Admin",
+      "clockIn": "2025-08-08T07:00:00Z",
+      "location": "Cape Town"
+    },
+    {
+      "userId": "U002",
+      "name": "Sarah Moyo",
+      "role": "Field Worker",
+      "clockIn": "2025-08-08T07:15:00Z",
+      "location": "Johannesburg"
+    }
+  ]
+  
