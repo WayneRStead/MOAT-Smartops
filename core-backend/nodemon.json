@@ -1,0 +1,26 @@
+{
+  "watch": [
+    "index.js",
+    "routes",
+    "models",
+    "lib",
+    "services"
+  ],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "node_modules/**",
+    "logs/**",
+    "*.log",
+    "*.md",
+    "**/data/**",
+    "**/uploads/**",
+    "**/documents/**",
+    "C:\\\\MOAT-Smartops\\\\data\\\\**",
+    "C:/MOAT-Smartops/data/**",
+    "../frontend/**",
+    "../**/dist/**",
+    "../**/build/**"
+  ],
+  "delay": "200ms",
+  "verbose": false
+}

@@ -1,0 +1,209 @@
+/* ===========================
+   Global + Theme Tokens
+   =========================== */
+
+:root {
+  --accent: #2a7fff;        /* updated live from Admin: Org */
+  --radius: 10px;
+
+  /* base typography */
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dark theme tokens (default) */
+:root[data-theme="dark"] {
+  --bg: #121212;
+  --text: #e0e0e0;
+  --muted: #b7b7c2;
+  --panel: #1e1e2f;
+  --border: #2b2b3a;
+  --thead: #24243a;
+  --hover: rgba(255,255,255,0.05);
+  --link: var(--accent);
+}
+
+/* Light theme tokens */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --text: #213547;
+  --muted: #546172;
+  --panel: #ffffff;
+  --border: #ddd;
+  --thead: #f5f5f5;
+  --hover: #f6f8fa;
+  --link: var(--accent);
+}
+
+/* Apply tokens */
+html, body, #root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* ===========================
+   Headings & Text
+   =========================== */
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text);
+  font-weight: 600;
+  margin: 0 0 .5em 0;
+}
+
+p, small, label {
+  color: var(--text);
+}
+
+small, .muted { color: var(--muted); }
+
+/* Links pick up accent */
+a {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 500;
+}
+a:hover { text-decoration: underline; }
+
+/* ===========================
+   Controls (buttons, inputs)
+   =========================== */
+
+button {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 0.6em 1.2em;
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  transition: box-shadow .15s ease, transform .02s ease, border-color .15s ease, background .15s ease;
+}
+button:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent);
+}
+button:active { transform: translateY(1px); }
+
+/* Primary style via utility class */
+button.primary, .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover, .btn-primary:hover {
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 25%, transparent);
+}
+
+/* Inputs */
+input, select, textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.7rem;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent);
+}
+
+/* Checkbox/radio accent */
+input[type="checkbox"], input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+/* ===========================
+   Layout Blocks
+   =========================== */
+
+.navbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.navbar a { color: var(--text); }
+.navbar .right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+
+/* Card / panel */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin: 1rem 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+}
+
+/* ===========================
+   Tables
+   =========================== */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.table th, .table td {
+  padding: 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.table th {
+  background: var(--thead);
+  color: var(--text);
+  font-weight: 700;
+}
+.table tr:hover {
+  background: var(--hover);
+}
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ===========================
+   Utilities
+   =========================== */
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+.row { display: flex; gap: 8px; align-items: center; }
+.right { margin-left: auto; }
+.mt-1 { margin-top: .25rem; }
+.mt-2 { margin-top: .5rem; }
+.mt-3 { margin-top: 1rem; }

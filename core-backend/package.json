@@ -1,4 +1,38 @@
 {
   "name": "moat-backend",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "description": "MOAT-SmartOps backend API service",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon --config nodemon.json index.js",
+    "seed": "node seed.js",
+    "seed:clean": "node seed.js --clean",
+    "seed:billing": "node scripts/seed-billing-usage.js"
+  },
+  "dependencies": {
+    "@tmcw/togeojson": "^7.1.2",
+    "adm-zip": "^0.5.16",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
+    "mongoose": "^7.6.1",
+    "multer": "^2.0.2",
+    "xlsx": "^0.18.5",
+    "xmldom": "^0.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [],
+  "author": "Wayne Stead",
+  "license": "MIT"
 }
