@@ -1,22 +1,25 @@
 // src/App.jsx
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
+
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
-import Navbar from "./components/Navbar.jsx";
 import FeatureGate from "./components/FeatureGate.jsx";
+import Navbar from "./components/Navbar.jsx";
+
 import NotFound from "./pages/NotFound.jsx";
 import Forbidden from "./pages/Forbidden.jsx";
 
 import Projects from "./pages/Projects.jsx";
 import ProjectDetail from "./pages/ProjectDetail.jsx";
 import Users from "./pages/Users.jsx";
+import Groups from "./pages/Groups.jsx"; // End-user group view (optional)
 import Clockings from "./pages/Clockings.jsx";
 import Assets from "./pages/Assets.jsx";
 import AssetDetail from "./pages/AssetDetail.jsx";
 import Vehicles from "./pages/Vehicles.jsx";
 import VehicleDetail from "./pages/VehicleDetail.jsx";
 import Invoices from "./pages/Invoices.jsx";
-import Inspections from "./pages/Inspections.jsx";
+import Inspections from "./pages/Inspections.jsx"; // viewer for /inspections/:id
 import AdminUsers from "./pages/AdminUsers.jsx";
 import AdminOrg from "./pages/AdminOrg.jsx";
 import Login from "./pages/Login.jsx";
@@ -25,6 +28,13 @@ import Vault from "./pages/Vault.jsx";
 import DocumentDetail from "./pages/DocumentDetail.jsx";
 import Tasks from "./pages/Tasks.jsx";
 import TaskDetail from "./pages/TaskDetail.jsx";
+import AdminGroups from "./pages/AdminGroups.jsx";
+import Trips from "./pages/Trips";
+import AdminInspectionForms from "./pages/AdminInspectionForms.jsx";
+import AdminInspectionFormBuilder from "./pages/AdminInspectionFormBuilder.jsx";
+import InspectionsIndex from "./pages/InspectionsIndex.jsx";
+import InspectionRun from "./pages/InspectionRun.jsx";
+import InspectionSubmissionView from "./pages/InspectionSubmissionView.jsx";
 
 function isAuthed() {
   return Boolean(localStorage.getItem("token"));
@@ -60,6 +70,9 @@ export default function App() {
             </ProtectedRoute>
           }
         >
+          {/* Optional: /admin base redirect */}
+          <Route path="/admin" element={<Navigate to="/admin/users" replace />} />
+
           {/* Projects */}
           <Route
             path="/projects"
@@ -88,6 +101,16 @@ export default function App() {
             }
           />
 
+          {/* End-user Groups (optional, gated under 'users') */}
+          <Route
+            path="/groups"
+            element={
+              <FeatureGate feature="users">
+                <Groups />
+              </FeatureGate>
+            }
+          />
+
           {/* Clockings */}
           <Route
             path="/clockings"
@@ -95,6 +118,16 @@ export default function App() {
               <FeatureGate feature="clockings">
                 <Clockings />
               </FeatureGate>
+            }
+          />
+
+          {/* Admin: Groups (CRUD) */}
+          <Route
+            path="/admin/groups"
+            element={
+              <ProtectedRoute roles={["admin", "superadmin"]}>
+                <AdminGroups />
+              </ProtectedRoute>
             }
           />
 
@@ -133,6 +166,14 @@ export default function App() {
               </FeatureGate>
             }
           />
+          <Route
+            path="/trips"
+            element={
+              <FeatureGate feature="vehicles">{/* or "trips" if you add that flag */}
+                <Trips />
+              </FeatureGate>
+            }
+          />
 
           {/* Invoices */}
           <Route
@@ -149,7 +190,31 @@ export default function App() {
             path="/inspections"
             element={
               <FeatureGate feature="inspections">
+                <InspectionsIndex />
+              </FeatureGate>
+            }
+          />
+          <Route
+            path="/inspections/:id"
+            element={
+              <FeatureGate feature="inspections">
                 <Inspections />
+              </FeatureGate>
+            }
+          />
+          <Route
+            path="/inspections/forms/:formId/open"
+            element={
+              <FeatureGate feature="inspections">
+                <InspectionRun />
+              </FeatureGate>
+            }
+          />
+          <Route
+            path="/inspections/submissions/:subId"
+            element={
+              <FeatureGate feature="inspections">
+                <InspectionSubmissionView />
               </FeatureGate>
             }
           />
@@ -197,28 +262,55 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+
+          {/* Admin: Inspection Form Builder */}
+          <Route
+            path="/admin/inspections/forms"
+            element={
+              <ProtectedRoute roles={["admin", "superadmin"]}>
+                <AdminInspectionForms />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/inspections/forms/new"
+            element={
+              <ProtectedRoute roles={["admin", "superadmin"]}>
+                <AdminInspectionFormBuilder mode="create" />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/inspections/forms/:formId"
+            element={
+              <ProtectedRoute roles={["admin", "superadmin"]}>
+                <AdminInspectionFormBuilder mode="edit" />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Tasks */}
           <Route
             path="/tasks"
             element={
               <FeatureGate feature="tasks">
-                 <Tasks />
+                <Tasks />
               </FeatureGate>
-  }
-/>
+            }
+          />
           <Route
             path="/tasks/:id"
             element={
               <FeatureGate feature="tasks">
                 <TaskDetail />
               </FeatureGate>
-  }
-/>
+            }
+          />
         </Route>
 
         {/* Fallbacks */}
-        <Route path="*" element={<div className="p-6">Not found</div>} />
-        <Route path="*" element={<NotFound />} />
         <Route path="/forbidden" element={<Forbidden />} />
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
   );

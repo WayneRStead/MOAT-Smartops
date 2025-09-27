@@ -5,7 +5,7 @@ const { Schema, Types } = mongoose;
 
 /**
  * Version schema (with legacy field compatibility)
- * Canonical fields: filename, url, mime, size, uploadedBy, uploadedAt, deletedAt, deletedBy, sha256
+ * Canonical fields: filename, url, mime, size, uploadedBy, uploadedAt, deletedAt, deletedBy, sha256, thumbUrl
  * Legacy mirrors: fileName, path, mimeType
  */
 const VersionSchema = new Schema(
@@ -16,6 +16,7 @@ const VersionSchema = new Schema(
     mime: String,
     size: Number,              // bytes
     sha256: String,            // optional checksum
+    thumbUrl: String,          // optional small preview thumbnail
     uploadedAt: { type: Date, default: Date.now },
 
     // Accept either ObjectId or string (e.g., "admin@smartops")
@@ -28,34 +29,43 @@ const VersionSchema = new Schema(
     path: String,              // mirror of url
     mimeType: String,          // mirror of mime
   },
-  { _id: false }
+  { _id: false, strict: true }
 );
 
-// Keep canonical <-> legacy fields in sync when saving
-VersionSchema.pre('save', function syncLegacy(next) {
-  if (this.filename && !this.fileName) this.fileName = this.filename;
-  if (!this.filename && this.fileName) this.filename = this.fileName;
+// Keep canonical <-> legacy fields in sync
+function syncVersionLegacyFields(v) {
+  if (!v) return;
+  if (v.filename && !v.fileName) v.fileName = v.filename;
+  if (!v.filename && v.fileName) v.filename = v.fileName;
 
-  if (this.url && !this.path) this.path = this.url;
-  if (!this.url && this.path) this.url = this.path;
+  if (v.url && !v.path) v.path = v.url;
+  if (!v.url && v.path) v.url = v.path;
 
-  if (this.mime && !this.mimeType) this.mimeType = this.mime;
-  if (!this.mime && this.mimeType) this.mime = this.mimeType;
+  if (v.mime && !v.mimeType) v.mimeType = v.mime;
+  if (!v.mime && v.mimeType) v.mime = v.mimeType;
+}
 
+VersionSchema.pre('validate', function (next) {
+  syncVersionLegacyFields(this);
+  next();
+});
+VersionSchema.pre('save', function (next) {
+  syncVersionLegacyFields(this);
   next();
 });
 
 /**
  * Link schema
- * Store both `type` and `module` for compatibility (values like 'project','inspection','asset','vehicle','user')
+ * Store both `type` and `module` for compatibility (values like 'project','inspection','asset','vehicle','user','task','clocking')
+ * NOTE: refId is Mixed so we can store either ObjectId or string IDs consistently.
  */
 const LinkSchema = new Schema(
   {
-    type: { type: String },             // canonical
-    module: { type: String },           // legacy/canonical alias
-    refId: { type: Types.ObjectId, required: true },
+    type: { type: String },              // canonical
+    module: { type: String },            // legacy/canonical alias
+    refId: { type: Schema.Types.Mixed, required: true }, // ObjectId or String
   },
-  { _id: false }
+  { _id: false, strict: true }
 );
 
 const DocumentSchema = new Schema(
@@ -90,6 +100,25 @@ const DocumentSchema = new Schema(
   },
   {
     timestamps: false, // we manage createdAt/updatedAt ourselves
+    strict: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = String(ret._id);
+        delete ret._id;
+        delete ret.__v;
+        return ret;
+      },
+    },
+    toObject: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = String(ret._id);
+        delete ret._id;
+        delete ret.__v;
+        return ret;
+      },
+    },
   }
 );
 
@@ -103,6 +132,74 @@ DocumentSchema.index({ 'latest.filename': 1 });
 DocumentSchema.index({ 'latest.uploadedBy': 1 });
 DocumentSchema.index({ deletedAt: 1 });
 
+/* --------------------------- Normalizers & hooks -------------------------- */
+function normalizeTag(t) {
+  if (typeof t !== 'string') return '';
+  return t.trim().toLowerCase();
+}
+
+function normalizeLink(l) {
+  if (!l) return null;
+  const out = {
+    type: typeof l.type === 'string' ? l.type.trim().toLowerCase() : l.type,
+    module: typeof l.module === 'string' ? l.module.trim().toLowerCase() : l.module,
+    refId: l.refId,
+  };
+  // keep type/module in sync if one missing
+  if (out.type && !out.module) out.module = out.type;
+  if (!out.type && out.module) out.type = out.module;
+  return out;
+}
+
+function dedupeLinks(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of arr || []) {
+    const l = normalizeLink(raw);
+    if (!l || l.refId == null) continue;
+    const key = `${String(l.type)}:${String(l.refId)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(l);
+  }
+  return out;
+}
+
+DocumentSchema.pre('validate', function normalizeFields(next) {
+  // Ensure title trimmed
+  if (typeof this.title === 'string') this.title = this.title.trim();
+
+  // Normalize folder (keep as-is but trim spaces)
+  if (typeof this.folder === 'string') this.folder = this.folder.trim();
+
+  // Normalize/dedupe tags
+  if (Array.isArray(this.tags)) {
+    const dedup = Array.from(
+      new Set(this.tags.map(normalizeTag).filter(Boolean))
+    );
+    this.tags = dedup;
+  }
+
+  // Normalize/dedupe links
+  if (Array.isArray(this.links)) {
+    this.links = dedupeLinks(this.links);
+  }
+
+  // Keep versions' legacy fields in sync (in case push used raw objects)
+  if (Array.isArray(this.versions)) {
+    this.versions.forEach((v) => syncVersionLegacyFields(v));
+  }
+  if (this.latest) syncVersionLegacyFields(this.latest);
+
+  next();
+});
+
+DocumentSchema.pre('save', function stampUpdatedAt(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+/* ------------------------------- Methods -------------------------------- */
 // Helper to recompute latest (most recent non-deleted version)
 DocumentSchema.methods.recomputeLatest = function recomputeLatest() {
   if (!this.versions || this.versions.length === 0) {
@@ -119,12 +216,110 @@ DocumentSchema.methods.recomputeLatest = function recomputeLatest() {
   this.latest = undefined;
 };
 
-// Safety net: if latest is missing while saving, recompute it
-DocumentSchema.pre('save', function ensureLatest(next) {
-  if (!this.latest && Array.isArray(this.versions) && this.versions.length > 0) {
-    this.recomputeLatest();
+// Add a new version and update latest; accepts canonical or legacy keys.
+DocumentSchema.methods.addVersion = function addVersion(file, actor) {
+  if (!file) return this;
+
+  const v = {
+    filename: file.filename || file.fileName,
+    fileName: file.fileName || file.filename,
+    url: file.url || file.path,
+    path: file.path || file.url,
+    mime: file.mime || file.mimeType,
+    mimeType: file.mimeType || file.mime,
+    size: typeof file.size === 'number' ? file.size : undefined,
+    sha256: file.sha256 || file.hash || undefined,
+    thumbUrl: file.thumbUrl || undefined,
+    uploadedAt: new Date(),
+    uploadedBy: actor ?? undefined,
+  };
+
+  // sync mirrors & push
+  syncVersionLegacyFields(v);
+  this.versions = Array.isArray(this.versions) ? this.versions : [];
+  this.versions.push(v);
+  this.latest = v;
+
+  // bump audit
+  this.updatedAt = new Date();
+  if (actor) this.updatedBy = actor;
+
+  return this;
+};
+
+// Soft delete entire document
+DocumentSchema.methods.softDelete = function softDelete(actor) {
+  this.deletedAt = new Date();
+  this.deletedBy = actor ?? undefined;
+  this.updatedAt = new Date();
+  if (actor) this.updatedBy = actor;
+  return this;
+};
+
+// Restore entire document
+DocumentSchema.methods.restore = function restore(actor) {
+  this.deletedAt = null;
+  this.deletedBy = null;
+  this.updatedAt = new Date();
+  if (actor) this.updatedBy = actor;
+  return this;
+};
+
+// Soft delete a specific version by array index; recompute latest
+DocumentSchema.methods.softDeleteVersion = function softDeleteVersion(index, actor) {
+  if (!Array.isArray(this.versions)) return this;
+  const i = Number(index);
+  if (Number.isInteger(i) && i >= 0 && i < this.versions.length) {
+    const v = this.versions[i];
+    if (v && !v.deletedAt) {
+      v.deletedAt = new Date();
+      v.deletedBy = actor ?? undefined;
+      syncVersionLegacyFields(v);
+      this.recomputeLatest();
+      this.updatedAt = new Date();
+      if (actor) this.updatedBy = actor;
+    }
   }
-  next();
-});
+  return this;
+};
+
+// Restore a soft-deleted version by index; recompute latest
+DocumentSchema.methods.restoreVersion = function restoreVersion(index, actor) {
+  if (!Array.isArray(this.versions)) return this;
+  const i = Number(index);
+  if (Number.isInteger(i) && i >= 0 && i < this.versions.length) {
+    const v = this.versions[i];
+    if (v && v.deletedAt) {
+      v.deletedAt = undefined;
+      v.deletedBy = undefined;
+      syncVersionLegacyFields(v);
+      this.recomputeLatest();
+      this.updatedAt = new Date();
+      if (actor) this.updatedBy = actor;
+    }
+  }
+  return this;
+};
+
+// Add a link (deduped by type+refId)
+DocumentSchema.methods.addLink = function addLink({ type, module, refId }) {
+  const norm = normalizeLink({ type, module, refId });
+  if (!norm || norm.refId == null) return this;
+  this.links = dedupeLinks([...(this.links || []), norm]);
+  this.updatedAt = new Date();
+  return this;
+};
+
+// Remove a link (by type+refId)
+DocumentSchema.methods.removeLink = function removeLink({ type, module, refId }) {
+  const t = (type || module || '').toString().toLowerCase();
+  const r = refId != null ? String(refId) : null;
+  if (!t || r == null) return this;
+  this.links = (this.links || []).filter(
+    (l) => !(String(l.type).toLowerCase() === t && String(l.refId) === r)
+  );
+  this.updatedAt = new Date();
+  return this;
+};
 
 module.exports = mongoose.model('Document', DocumentSchema);

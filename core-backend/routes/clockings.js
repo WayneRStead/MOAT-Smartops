@@ -5,6 +5,8 @@ const { requireAuth } = require('../middleware/auth');
 const Clocking = require('../models/Clocking');
 const { CLOCK_TYPES } = require('../models/Clocking');
 const User = require('../models/User');
+// Safe model reference (avoids OverwriteModelError if loaded elsewhere)
+const Group = mongoose.models.Group || require('../models/Group');
 
 const router = express.Router();
 
@@ -19,9 +21,70 @@ function asObjectId(x) {
   return new mongoose.Types.ObjectId(s);
 }
 
+const hasPath = (model, p) => !!(model && model.schema && model.schema.path && model.schema.path(p));
+const wantsObjectId = (model, p) => model?.schema?.path(p)?.instance === 'ObjectId';
+
+// org filter that respects a model's orgId type (String vs ObjectId)
+// IMPORTANT: treat token orgId === "root" as cross-org (no filter)
+function orgFilterForModel(model, req) {
+  if (!hasPath(model, 'orgId')) return {};
+  const raw = req.user?.orgId;
+  if (!raw) return {};
+  const s = String(raw);
+  if (s.toLowerCase() === 'root') return {}; // superadmin cross-org
+  const asOid = wantsObjectId(model, 'orgId') && mongoose.Types.ObjectId.isValid(s)
+    ? new mongoose.Types.ObjectId(s)
+    : null;
+  return wantsObjectId(model, 'orgId') ? (asOid ? { orgId: asOid } : {}) : { orgId: s };
+}
+
+// org filter for Clocking (uses function above)
+function orgFilterFromReq(req) {
+  return orgFilterForModel(Clocking, req);
+}
+
+// Try to assign doc.orgId using:
+// 1) token orgId if it's concrete (and not "root")
+// 2) otherwise, infer from the target user (if available)
+// 3) otherwise, leave unset (do NOT write "root")
+async function assignDocOrgId(doc, reqUser, targetUserId) {
+  const path = Clocking.schema.path('orgId');
+  if (!path) return; // schema might not have orgId in some forks
+
+  // 1) concrete token orgId
+  const tOrg = String(reqUser?.orgId || '');
+  if (tOrg && tOrg.toLowerCase() !== 'root') {
+    if (path.instance === 'ObjectId') {
+      if (mongoose.Types.ObjectId.isValid(tOrg)) {
+        doc.orgId = new mongoose.Types.ObjectId(tOrg);
+      }
+    } else {
+      doc.orgId = tOrg;
+    }
+    return;
+  }
+
+  // 2) infer from target user
+  const uid = asObjectId(targetUserId);
+  if (uid) {
+    const u = await User.findById(uid).select('orgId').lean();
+    if (u && u.orgId != null) {
+      if (path.instance === 'ObjectId') {
+        if (mongoose.Types.ObjectId.isValid(String(u.orgId))) {
+          doc.orgId = new mongoose.Types.ObjectId(String(u.orgId));
+        }
+      } else {
+        doc.orgId = String(u.orgId);
+      }
+    }
+  }
+
+  // 3) else leave doc.orgId unset intentionally
+}
+
 // try to get an editor ObjectId from req.user directly
 function editorObjectIdQuick(req) {
-  const candidates = [req.user?._id, req.user?.id, req.user?.userId].filter(Boolean).map(String);
+  const candidates = [req.user?._id, req.user?.id, req.user?.userId, req.user?.sub].filter(Boolean).map(String);
   for (const c of candidates) {
     if (mongoose.Types.ObjectId.isValid(c)) return new mongoose.Types.ObjectId(c);
   }
@@ -31,7 +94,6 @@ function editorObjectIdQuick(req) {
 // async fallback: resolve editor id by looking up the user by email/username/etc.
 const _editorCache = new Map(); // cache by key (email/username) -> ObjectId
 async function resolveEditorId(req) {
-  // First, any quick ObjectId on the token?
   const fast = editorObjectIdQuick(req);
   if (fast) return fast;
 
@@ -40,7 +102,6 @@ async function resolveEditorId(req) {
   for (const key of keys) {
     if (_editorCache.has(key)) return _editorCache.get(key);
 
-    // Try find by email OR username
     const u = await User.findOne({ $or: [{ email: key }, { username: key }] }, { _id: 1 }).lean();
     if (u?._id) {
       const oid = new mongoose.Types.ObjectId(String(u._id));
@@ -109,7 +170,8 @@ function collectChanges(beforeDoc, afterDoc) {
 
 // visibility helpers
 function isAdmin(req) {
-  return String(req.user?.role || '').toLowerCase() === 'admin';
+  const r = String(req.user?.role || '').toLowerCase();
+  return r === 'admin' || r === 'superadmin';
 }
 
 function getAccessibleSet(req) {
@@ -132,13 +194,18 @@ function assertVisibleOr403(req, targetUserId, res) {
   return true;
 }
 
+function intersectIds(a, b) {
+  const A = new Set((a || []).map(String));
+  const out = [];
+  for (const id of (b || [])) if (A.has(String(id))) out.push(id);
+  return out;
+}
+
 /* ------------------------------- LIST ------------------------------- */
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { projectId, userId, from, to, q, limit, type } = req.query;
-    const find = {
-      orgId: req.user?.orgId, // org scoping
-    };
+    const { projectId, userId, groupId, groupIds, from, to, q, limit, type } = req.query;
+    const find = { ...orgFilterFromReq(req) };
 
     const pid = asObjectId(projectId);
     if (pid) find.projectId = pid;
@@ -148,23 +215,71 @@ router.get('/', requireAuth, async (req, res) => {
     if (type) find.type = type;
 
     if (from || to) {
+      const fromDate = from ? new Date(from) : undefined;
+      const toDate = to ? new Date(to) : undefined;
       find.at = {
-        ...(from ? { $gte: new Date(from) } : {}),
-        ...(to ? { $lte: new Date(to) } : {}),
+        ...(fromDate ? { $gte: fromDate } : {}),
+        ...(toDate ? { $lte: toDate } : {}),
       };
     }
     if (q) {
       find.$or = [{ notes: new RegExp(q, 'i') }];
     }
 
+    // Build a restriction set of userIds we’re allowed/requesting to see
+    let restrictIds = undefined;
+
     if (uid) {
       // If a specific userId is requested, enforce visibility for non-admins
       if (!assertVisibleOr403(req, uid, res)) return;
-      find.userId = uid;
+      restrictIds = [uid];
     } else if (!isAdmin(req)) {
       // Non-admins: restrict to accessibleUserIds
-      const ids = Array.from(getAccessibleSet(req)).map((s) => new mongoose.Types.ObjectId(s));
-      find.userId = { $in: ids };
+      const ids = Array.from(getAccessibleSet(req))
+        .map((s) => (mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null))
+        .filter(Boolean);
+      restrictIds = ids;
+    }
+    // Admins: no user restriction (org filter only)
+
+    // --- Group filter (supports ?groupId=... OR ?groupIds=a,b,c) ---
+    const rawGroupParam = String(groupIds ?? groupId ?? '').trim();
+    if (rawGroupParam) {
+      const scope = orgFilterForModel(Group, req);
+      const gids = rawGroupParam
+        .split(',')
+        .map((s) => asObjectId(s))
+        .filter(Boolean);
+
+      let memberIds = [];
+      if (gids.length) {
+        const groups = await Group.find({ _id: { $in: gids }, ...scope })
+          .select('memberUserIds')
+          .lean();
+
+        const all = [];
+        for (const g of groups) for (const uid2 of (g.memberUserIds || [])) all.push(uid2);
+
+        // de-dupe
+        const uniq = Array.from(new Set(all.map((x) => String(x)))).map(
+          (s) => new mongoose.Types.ObjectId(s)
+        );
+        memberIds = uniq;
+      }
+
+      if (!memberIds.length) return res.json([]); // no members in selected group(s)
+
+      // Intersect with visibility for non-admins or with requested uid
+      if (restrictIds) {
+        restrictIds = intersectIds(restrictIds, memberIds);
+        if (!restrictIds.length) return res.json([]);
+      } else {
+        restrictIds = memberIds;
+      }
+    }
+
+    if (restrictIds) {
+      find.userId = { $in: restrictIds };
     }
 
     const lim = Math.min(parseInt(limit || '200', 10) || 200, 1000);
@@ -184,7 +299,7 @@ router.get('/', requireAuth, async (req, res) => {
 /* ------------------------------- READ ------------------------------ */
 router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const doc = await Clocking.findOne({ _id: req.params.id, orgId: req.user?.orgId })
+    const doc = await Clocking.findOne({ _id: req.params.id, ...orgFilterFromReq(req) })
       .populate('lastEditedBy', 'name email')
       .lean();
     if (!doc) return res.status(404).json({ error: 'Not found' });
@@ -202,7 +317,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 router.get('/:id/audit', requireAuth, async (req, res) => {
   try {
     const doc = await Clocking.findOne(
-      { _id: req.params.id, orgId: req.user?.orgId },
+      { _id: req.params.id, ...orgFilterFromReq(req) },
       { editLog: 1, lastEditedAt: 1, lastEditedBy: 1, userId: 1 }
     )
       .populate('editLog.editedBy', 'name email')
@@ -224,7 +339,7 @@ router.get('/:id/audit', requireAuth, async (req, res) => {
 });
 
 /* -------- helper: build one clocking doc (used for single or bulk) -------- */
-function buildClockDoc(body, userIdValue, reqUser, fallbackUserId) {
+async function buildClockDoc(body, userIdValue, reqUser, fallbackUserId) {
   const {
     projectId, type, at, notes,
     lat, lng, acc,
@@ -240,8 +355,10 @@ function buildClockDoc(body, userIdValue, reqUser, fallbackUserId) {
     at: at ? new Date(at) : new Date(),
     notes: notes || '',
     createdBy: reqUser?.sub || 'system',
-    orgId: reqUser?.orgId || 'root',
   });
+
+  // orgId (prefer token if concrete; else infer from resolved user)
+  await assignDocOrgId(doc, reqUser, resolvedUserId);
 
   const nLat = lat !== undefined ? Number(lat) : undefined;
   const nLng = lng !== undefined ? Number(lng) : undefined;
@@ -289,7 +406,7 @@ router.post('/', requireAuth, async (req, res) => {
         }
       }
 
-      const docs = userIds.map((uid) => buildClockDoc(req.body, uid, req.user, currentUserId));
+      const docs = await Promise.all(userIds.map(async (uid) => buildClockDoc(req.body, uid, req.user, currentUserId)));
       const saved = await Clocking.insertMany(docs);
       return res.status(201).json(saved);
     }
@@ -301,7 +418,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     if (!isAdmin(req) && !assertVisibleOr403(req, effectiveUserId, res)) return;
 
-    const one = buildClockDoc(req.body, effectiveUserId, req.user, currentUserId);
+    const one = await buildClockDoc(req.body, effectiveUserId, req.user, currentUserId);
     await one.save();
     return res.status(201).json(one);
   } catch (e) {
@@ -313,7 +430,7 @@ router.post('/', requireAuth, async (req, res) => {
 /* ---------------- UPDATE (audited; enforces visibility) ---------------- */
 router.put('/:id', requireAuth, async (req, res) => {
   try {
-    const doc = await Clocking.findOne({ _id: req.params.id, orgId: req.user?.orgId });
+    const doc = await Clocking.findOne({ _id: req.params.id, ...orgFilterFromReq(req) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
     // Non-admin must be able to see this clocking
@@ -340,7 +457,9 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (userId !== undefined) {
       const newUid = asObjectId(userId);
       if (!isAdmin(req) && newUid && !assertVisibleOr403(req, newUid, res)) return;
-      doc.userId = newUid;
+      doc.userId = newUid || doc.userId;
+      // If switching user as superadmin (root), try to align orgId to the new user's org
+      await assignDocOrgId(doc, req.user, newUid || doc.userId);
     }
 
     const hasLocInput = ['lat', 'lng', 'acc'].some((k) => Object.prototype.hasOwnProperty.call(req.body, k));
@@ -399,20 +518,17 @@ router.put('/:id', requireAuth, async (req, res) => {
           changes,
         });
       } else {
-        // no editor id available — optionally enforce failure
         if (String(process.env.ALLOW_CLOCKING_UPDATE_WITHOUT_EDITOR || '1') !== '1') {
           return res
             .status(400)
             .json({ error: 'editedBy missing — cannot audit update (auth user id not available)' });
         }
-        // otherwise, skip audit but save changes
         res.setHeader('X-Audit', 'skipped-no-editor');
       }
     }
 
     await doc.save();
 
-    // respond with populated doc so UI can show Edited by
     const saved = await Clocking.findById(doc._id).populate('lastEditedBy', 'name email').lean();
 
     res.json(saved);
@@ -425,7 +541,7 @@ router.put('/:id', requireAuth, async (req, res) => {
 /* ------------------------------- DELETE ------------------------------ */
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
-    const doc = await Clocking.findOne({ _id: req.params.id, orgId: req.user?.orgId }).lean();
+    const doc = await Clocking.findOne({ _id: req.params.id, ...orgFilterFromReq(req) }).lean();
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
     if (!isAdmin(req) && !assertVisibleOr403(req, doc.userId, res)) return;

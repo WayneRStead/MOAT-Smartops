@@ -1,9 +1,9 @@
 // core-backend/models/Task.js
 const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
 /* -------------------- Attachments -------------------- */
-// now supports note + optional geo (for photo EXIF / device location)
-const AttachmentGeoSchema = new mongoose.Schema(
+const AttachmentGeoSchema = new Schema(
   {
     lat: Number,
     lng: Number,
@@ -12,7 +12,7 @@ const AttachmentGeoSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const AttachmentSchema = new mongoose.Schema(
+const AttachmentSchema = new Schema(
   {
     filename: String,
     url: String,
@@ -27,8 +27,7 @@ const AttachmentSchema = new mongoose.Schema(
 );
 
 /* ----------------- Progress / Duration Log ----------------- */
-// includes "photo" entry + edit audit + actor info
-const DurationLogSchema = new mongoose.Schema(
+const DurationLogSchema = new Schema(
   {
     action: {
       type: String,
@@ -36,7 +35,7 @@ const DurationLogSchema = new mongoose.Schema(
       required: true,
     },
     at: { type: Date, default: Date.now },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    userId: { type: Schema.Types.ObjectId, ref: "User" },
 
     // Optional metadata (populated by routes)
     note: { type: String, default: "" },
@@ -46,14 +45,27 @@ const DurationLogSchema = new mongoose.Schema(
 
     // Edit audit
     editedAt: { type: Date },
-    editedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    editedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   { _id: true }
 );
 
+/* ----------------------- Milestones ----------------------- */
+const MilestoneSchema = new Schema(
+  {
+    title: { type: String, required: true, trim: true },
+    dueAt: { type: Date },
+    status: { type: String, enum: ["open", "done"], default: "open" },
+    completedAt: { type: Date },
+    assignee: { type: Schema.Types.ObjectId, ref: "User" },
+    notes: { type: String },
+    order: { type: Number, default: 0 },
+  },
+  { _id: true, timestamps: true }
+);
+
 /* ----------------------- Geo-fencing ----------------------- */
-// Backward-compatible circle fence (what you already had)
-const GeoFenceSchema = new mongoose.Schema(
+const GeoFenceSchema = new Schema(
   {
     lat: Number,
     lng: Number,
@@ -62,16 +74,12 @@ const GeoFenceSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// Optional polygon fence (simple lat/lng ring). Use either this OR GeoJSON below.
-// Kept simple for easy rendering/editing; if you prefer GeoJSON only, you can remove this.
-const GeoPointSchema = new mongoose.Schema(
+const GeoPointSchema = new Schema(
   { lat: Number, lng: Number },
   { _id: false }
 );
 
-// Optional GeoJSON geometry (Polygon/MultiPolygon/Point) for map libs & 2dsphere queries
-// Not required; kept flexible so you can store KML-converted geometry later.
-const GeoJSONSchema = new mongoose.Schema(
+const GeoJSONSchema = new Schema(
   {
     type: { type: String }, // "Point" | "Polygon" | "MultiPolygon"
     coordinates: { type: Array }, // follows GeoJSON spec
@@ -79,8 +87,7 @@ const GeoJSONSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// Optional KML reference (if you store uploaded KML somewhere)
-const KmlRefSchema = new mongoose.Schema(
+const KmlRefSchema = new Schema(
   {
     url: String,   // storage URL to the KML file
     name: String,  // display name
@@ -89,21 +96,27 @@ const KmlRefSchema = new mongoose.Schema(
 );
 
 /* ------------------------- Task ------------------------- */
-const TaskSchema = new mongoose.Schema(
+const TaskSchema = new Schema(
   {
-    // ORG SCOPE (NEW)
-    orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", required: true, index: true },
+    // ORG SCOPE — allow string OR ObjectId; not required to avoid legacy data crashes
+    orgId: { type: Schema.Types.Mixed, index: true },
 
     title: { type: String, required: true, index: "text" },
     description: { type: String, default: "" },
 
-    projectId: { type: mongoose.Schema.Types.ObjectId, ref: "Project", index: true },
-    groupId: { type: mongoose.Schema.Types.ObjectId, ref: "Group", index: true }, // owning/primary group (kept)
+    projectId: { type: Schema.Types.ObjectId, ref: "Project", index: true },
+    groupId:   { type: Schema.Types.ObjectId, ref: "Group", index: true }, // owning/primary group (kept)
 
     // Business assignment list (kept as-is)
-    assignedTo: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
+    assignedTo: [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
 
-    dueDate: { type: Date, index: true },
+    // NEW: singular mirror of first assignee for UI compatibility
+    assignee: { type: Schema.Types.ObjectId, ref: "User", index: true, default: null },
+
+    // --- Timeline dates ---
+    startDate: { type: Date, index: true },               // NEW: optional task start
+    dueDate:   { type: Date, index: true },               // legacy mirror
+    dueAt:     { type: Date, index: true },               // primary due used by UI
 
     status: {
       type: String,
@@ -118,81 +131,154 @@ const TaskSchema = new mongoose.Schema(
       default: "medium",
       index: true,
     },
+
     tags: [{ type: String, index: true }],
 
     // dependencies & enforcement
-    dependentTaskIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Task" }],
+    dependentTaskIds: [{ type: Schema.Types.ObjectId, ref: "Task" }],
 
     // QR / geofence enforcement (existing flags retained)
     enforceQRScan: { type: Boolean, default: false },
     enforceLocationCheck: { type: Boolean, default: false },
 
-    // LEGACY / SIMPLE CIRCLE FENCE (kept for compatibility)
+    // LEGACY / SIMPLE CIRCLE FENCE
     locationGeoFence: { type: GeoFenceSchema, default: undefined },
 
-    // NEW: richer geofence mode declaration (optional)
-    // - "off"       : no geofence
-    // - "circle"    : use locationGeoFence (backward-compatible)
-    // - "polygon"   : use geoPolygon or geoJSON
-    // - "kml"       : use kmlRef (optionally also write its geometry to geoJSON)
+    // richer geofence mode declaration
     geoMode: {
       type: String,
       enum: ["off", "circle", "polygon", "kml"],
       default: "off",
     },
 
-    // NEW: polygon (array of {lat,lng}) — easier to edit on simple UIs
+    // polygon ring
     geoPolygon: { type: [GeoPointSchema], default: undefined },
 
-    // NEW: optional GeoJSON geometry for map libs / precise queries
+    // GeoJSON geometry (optional)
     geoJSON: { type: GeoJSONSchema, default: undefined },
 
-    // NEW: optional KML reference (if you upload KML files)
+    // KML reference (optional)
     kmlRef: { type: KmlRefSchema, default: undefined },
 
-    // NEW: behavior flags (purely optional)
-    // - when true, mobile UIs can auto-enable the Start button if the user is within the fence
-    // - enforceLocationCheck still guards the server-side "action" endpoint
+    // behavior flags
     triggerOnEnterFence: { type: Boolean, default: false },
 
     estimatedDuration: { type: Number },              // minutes
     actualDurationLog: [DurationLogSchema],           // start/pause/resume/complete/photo sequence
 
+    // NEW: milestones
+    milestones: { type: [MilestoneSchema], default: [] },
+
     attachments: [AttachmentSchema],                  // now includes note + geo
 
-    /* ------------ Visibility Model (NEW) ------------ */
-    // Visibility semantics:
-    // - 'org'        : visible to all users in the same org
-    // - 'restricted' : visible to admins OR users in assignedUserIds OR members of assignedGroupIds
-    // - 'admins'     : visible to admins only
+    /* ------------ Visibility Model ------------ */
+    // - 'org'                      : everyone in org
+    // - 'assignees'                : assigned users only
+    // - 'groups'                   : assigned groups only
+    // - 'assignees+groups'         : user OR group
+    // - 'restricted'               : (legacy) admins OR assigned users/groups
+    // - 'admins'                   : admins only
     visibilityMode: {
       type: String,
-      enum: ["org", "restricted", "admins"],
+      enum: ["org", "assignees", "groups", "assignees+groups", "restricted", "admins"],
       default: "org",
       index: true,
     },
 
     // For visibility checks (separate from business `assignedTo`)
-    assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
-    assignedGroupIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Group", index: true }],
+    assignedUserIds:  [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
+    assignedGroupIds: [{ type: Schema.Types.ObjectId, ref: "Group", index: true }],
 
     // Soft delete (optional)
     isDeleted: { type: Boolean, default: false, index: true },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = String(ret._id);
+
+        // Ensure UI consumers always see these mirrors:
+        if (!ret.dueAt && ret.dueDate) ret.dueAt = ret.dueDate;
+
+        // Mirror assignee from assignedTo[0] if needed
+        if (!ret.assignee && Array.isArray(ret.assignedTo) && ret.assignedTo.length) {
+          ret.assignee = ret.assignedTo[0];
+        }
+
+        delete ret.__v;
+        return ret;
+      },
+    },
+    toObject: { virtuals: true },
+  }
 );
 
-// Handy compound index for common list queries
+/* ---------------------- Virtuals & Validators ---------------------- */
+
+// Friendly alias for start date (lets old clients use startAt)
+TaskSchema.virtual('startAt')
+  .get(function () { return this.startDate; })
+  .set(function (v) { this.startDate = v; });
+
+// Keep dueAt <-> dueDate mirrored (prefer dueAt from API) + tag normalization + assignee mirroring
+function normalizeTag(t) { return typeof t === "string" ? t.trim().toLowerCase() : ""; }
+
+TaskSchema.pre("validate", function normalize(next) {
+  // Trim title/description
+  if (typeof this.title === "string") this.title = this.title.trim();
+  if (typeof this.description === "string") this.description = this.description.trim();
+
+  // Tags: normalize & dedupe
+  if (Array.isArray(this.tags)) {
+    const dedup = Array.from(new Set(this.tags.map(normalizeTag).filter(Boolean)));
+    this.tags = dedup;
+  }
+
+  // Keep assignee <-> assignedTo[0] mirrored
+  if (this.assignee && (!this.assignedTo || !this.assignedTo.length)) {
+    this.assignedTo = [this.assignee];
+  } else if (!this.assignee && Array.isArray(this.assignedTo) && this.assignedTo.length) {
+    this.assignee = this.assignedTo[0];
+  } else if (this.assignee && Array.isArray(this.assignedTo) && this.assignedTo.length) {
+    const a = String(this.assignee);
+    if (String(this.assignedTo[0]) !== a) this.assignedTo[0] = this.assignee;
+  }
+
+  // Keep dueAt <-> dueDate mirrored (prefer dueAt from API)
+  if (this.dueAt && !this.dueDate) this.dueDate = this.dueAt;
+  if (!this.dueAt && this.dueDate) this.dueAt = this.dueDate;
+  if (this.dueAt && this.dueDate && +this.dueAt !== +this.dueDate) {
+    this.dueDate = this.dueAt;
+  }
+
+  next();
+});
+
+// Guard: startDate must not be after dueAt (if both provided)
+TaskSchema.path('startDate').validate(function (value) {
+  if (!value) return true;
+  const due = this.dueAt || this.dueDate;
+  if (due && value > due) return false;
+  return true;
+}, 'startDate cannot be after due date');
+
+/* --------------------------- Indexes --------------------------- */
+// Handy compound indexes for common list queries and timelines
 TaskSchema.index({ projectId: 1, groupId: 1, status: 1, dueDate: 1, updatedAt: -1 });
+TaskSchema.index({ projectId: 1, startDate: 1, dueAt: 1 }); // NEW: timeline-friendly
 
 // Org + visibility fast-paths
 TaskSchema.index({ orgId: 1, visibilityMode: 1 });
-TaskSchema.index({ orgId: 1, "assignedUserIds": 1 });
-TaskSchema.index({ orgId: 1, "assignedGroupIds": 1 });
+TaskSchema.index({ orgId: 1, assignedUserIds: 1 });
+TaskSchema.index({ orgId: 1, assignedGroupIds: 1 });
 
-// Optional: enable geospatial index if you plan to store Point/Polygon in geoJSON
-// (safe even if many docs don't have geoJSON yet)
-// NOTE: 2dsphere supports Point/LineString/Polygon/MultiPolygon etc.
+// Optional 2dsphere index (sparse) if you store geoJSON
 TaskSchema.index({ geoJSON: "2dsphere" }, { sparse: true });
 
-module.exports = mongoose.model("Task", TaskSchema);
+// Helpful queries for milestones (optional)
+TaskSchema.index({ "milestones.status": 1 });
+TaskSchema.index({ "milestones.dueAt": 1 });
+
+module.exports = mongoose.models.Task || mongoose.model("Task", TaskSchema);

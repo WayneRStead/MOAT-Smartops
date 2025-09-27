@@ -149,11 +149,13 @@ export default function Clockings() {
   // reference data
   const [users, setUsers] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [groups, setGroups] = useState([]);            // ✅ groups list
 
   // filters for history
   const [q, setQ] = useState("");
   const [filterProjectId, setFilterProjectId] = useState("");
   const [filterUserId, setFilterUserId] = useState("");
+  const [filterGroupId, setFilterGroupId] = useState(""); // ✅ group filter
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -231,6 +233,12 @@ export default function Clockings() {
       setProjects(Array.isArray(data) ? data : []);
     } catch { setProjects([]); }
   }
+  async function loadGroups() {                       // ✅ load groups
+    try {
+      const { data } = await api.get("/groups", { params: { limit: 1000 } });
+      setGroups(Array.isArray(data) ? data : []);
+    } catch { setGroups([]); }
+  }
 
   // build params from current filters
   function getSearchParams() {
@@ -238,6 +246,7 @@ export default function Clockings() {
     if (q) params.q = q;
     if (filterProjectId) params.projectId = filterProjectId;
     if (filterUserId) params.userId = filterUserId;
+    if (filterGroupId) params.groupId = filterGroupId;   // ✅ include group
     if (from) params.from = from; // server accepts YYYY-MM-DD per current code
     if (to) params.to = to;
     if (typeFilter) params.type = typeFilter;
@@ -260,6 +269,7 @@ export default function Clockings() {
   useEffect(() => {
     loadUsers();
     loadProjects();
+    loadGroups();     // ✅
     load();
   }, []);
 
@@ -606,6 +616,13 @@ export default function Clockings() {
             <option value="">User (any)</option>
             {users.map(u => <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>)}
           </select>
+
+          {/* ✅ NEW: Group filter */}
+          <select className="border p-2" value={filterGroupId} onChange={e => setFilterGroupId(e.target.value)}>
+            <option value="">Group (any)</option>
+            {groups.map(g => <option key={g._id} value={g._id}>{g.name}</option>)}
+          </select>
+
           <select className="border p-2" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
             <option value="">Type (any)</option>
             {ATTENDANCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}

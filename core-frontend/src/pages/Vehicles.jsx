@@ -1,8 +1,9 @@
 // src/pages/Vehicles.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 
+/* --- Reuse the same StatusBadge look as VehicleDetail --- */
 function StatusBadge({ value }) {
   const map = {
     active: "bg-green-100 text-green-800",
@@ -10,52 +11,81 @@ function StatusBadge({ value }) {
     retired: "bg-gray-200 text-gray-800",
   };
   const cls = map[value] || "bg-gray-100 text-gray-800";
-  return <span className={`text-xs px-2 py-1 rounded ${cls}`}>{value}</span>;
+  return <span className={`text-xs px-2 py-1 rounded ${cls}`}>{value || "—"}</span>;
+}
+
+/* --- Label helpers --- */
+function userLabelFrom(users, uidOrObj) {
+  if (!uidOrObj) return "—";
+  if (typeof uidOrObj === "object" && (uidOrObj.name || uidOrObj.email)) {
+    return uidOrObj.name || uidOrObj.email;
+  }
+  const uid = String(uidOrObj);
+  const u = users.find((x) => String(x._id) === uid);
+  return u ? (u.name || u.email || u.username || uid) : uid;
+}
+function projectLabelFrom(projects, pid) {
+  if (!pid) return "—";
+  const p = projects.find((pr) => String(pr._id) === String(pid));
+  return p?.name || String(pid);
+}
+
+/* --- Small utility for CSV escaping --- */
+function csvEscape(s) {
+  const str = String(s ?? "");
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
 
 export default function Vehicles() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [q, setQ] = useState(searchParams.get("q") || "");
-  const [projectId, setProjectId] = useState(searchParams.get("projectId") || "");
-  const [status, setStatus] = useState(searchParams.get("status") || "");
+  const navigate = useNavigate();
 
-  const [rows, setRows] = useState([]);
+  const [vehicles, setVehicles] = useState([]);
   const [projects, setProjects] = useState([]);
   const [users, setUsers] = useState([]);
-  const [tasks, setTasks] = useState([]);
 
+  const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
-  const [form, setForm] = useState({
-    reg: "", make: "", model: "", year: "", status: "active", projectId: ""
+  // Inline save state (per-row)
+  const [saving, setSaving] = useState({}); // { [vehicleId]: true }
+
+  // Filters
+  const [q, setQ] = useState(""); // search
+  const [statusFilter, setStatusFilter] = useState("");
+  const [projectFilter, setProjectFilter] = useState("");
+  const [driverFilter, setDriverFilter] = useState("");
+
+  // Create-new inline panel
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    reg: "",
+    make: "",
+    model: "",
+    year: "",
+    status: "active",
+    projectId: "",
+    driverId: "",
   });
+  const [createSaving, setCreateSaving] = useState(false);
+  const [createErr, setCreateErr] = useState("");
 
-  function syncUrl(next = {}) {
-    const u = new URLSearchParams();
-    const qv = next.q ?? q;
-    const pv = next.projectId ?? projectId;
-    const sv = next.status ?? status;
-    if (qv) u.set("q", qv);
-    if (pv) u.set("projectId", pv);
-    if (sv) u.set("status", sv);
-    setSearchParams(u);
-  }
-
-  async function load() {
-    setErr(""); setInfo("");
+  // ---- Loaders ----
+  async function loadVehicles() {
+    setErr("");
+    setLoading(true);
     try {
-      const params = { limit: 500 };
-      if (q) params.q = q;
-      if (projectId) params.projectId = projectId;
-      if (status) params.status = status;
-      const { data } = await api.get("/vehicles", { params });
-      setRows(Array.isArray(data) ? data : []);
+      const { data } = await api.get("/vehicles", { params: { limit: 1000 } });
+      const arr = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+      // sort by updated desc
+      arr.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+      setVehicles(arr);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
+    } finally {
+      setLoading(false);
     }
   }
-
   async function loadProjects() {
     try {
       const { data } = await api.get("/projects", { params: { limit: 1000 } });
@@ -64,7 +94,6 @@ export default function Vehicles() {
       setProjects([]);
     }
   }
-
   async function loadUsers() {
     try {
       const { data } = await api.get("/users", { params: { limit: 1000 } });
@@ -74,231 +103,479 @@ export default function Vehicles() {
     }
   }
 
-  async function loadTasks() {
+  useEffect(() => {
+    loadVehicles();
+    loadProjects();
+    loadUsers();
+  }, []);
+
+  // ---- Derived labels ----
+  const userLabel = (x) => userLabelFrom(users, x);
+  const projectLabel = (x) => projectLabelFrom(projects, x);
+
+  // ---- Filtering ----
+  const filtered = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return vehicles.filter((v) => {
+      if (statusFilter && (v.status || "") !== statusFilter) return false;
+      if (projectFilter && String(v.projectId || "") !== String(projectFilter)) return false;
+      const drvId = v?.driver?._id || v?.driverId || "";
+      if (driverFilter && String(drvId) !== String(driverFilter)) return false;
+      if (term) {
+        const hay = [
+          v.reg, v.make, v.model, v.year,
+          userLabel(drvId),
+          projectLabel(v.projectId),
+        ].map((x) => String(x ?? "").toLowerCase());
+        if (!hay.some((s) => s.includes(term))) return false;
+      }
+      return true;
+    });
+  }, [vehicles, statusFilter, projectFilter, driverFilter, q, users, projects]);
+
+  // ---- Inline update: status ----
+  async function updateStatus(vehicleId, nextStatus) {
+    if (!vehicleId) return;
+    setErr("");
+    setInfo("");
+    setSaving((m) => ({ ...m, [vehicleId]: true }));
     try {
-      // Pull a broad set so labels work across the table.
-      const { data } = await api.get("/tasks", { params: { limit: 1000 } });
-      setTasks(Array.isArray(data) ? data : []);
-    } catch {
-      setTasks([]);
+      const { data } = await api.put(`/vehicles/${vehicleId}`, { status: nextStatus });
+      setVehicles((prev) => prev.map((x) => (String(x._id) === String(vehicleId) ? data : x)));
+      setInfo("Status updated.");
+      setTimeout(() => setInfo(""), 1200);
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    } finally {
+      setSaving((m) => ({ ...m, [vehicleId]: false }));
     }
   }
 
-  useEffect(() => { loadProjects(); loadUsers(); loadTasks(); }, []);
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [searchParams]);
+  // ---- Export CSV (filtered rows) ----
+  function exportCsv() {
+    const rows = [
+      [
+        "Registration",
+        "Make",
+        "Model",
+        "Year",
+        "Status",
+        "Driver",
+        "Project",
+        "Created",
+        "Updated",
+      ],
+      ...filtered.map((v) => [
+        v.reg ?? "",
+        v.make ?? "",
+        v.model ?? "",
+        v.year ?? "",
+        v.status ?? "",
+        userLabel(v.driver || v.driverId),
+        projectLabel(v.projectId),
+        v.createdAt ? new Date(v.createdAt).toISOString() : "",
+        v.updatedAt ? new Date(v.updatedAt).toISOString() : "",
+      ]),
+    ];
+    const csv = rows.map((r) => r.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "vehicles.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
-  async function create(e) {
-    e.preventDefault();
-    setErr(""); setInfo("");
+  // ---- Filter chips (badges) ----
+  const activeChips = useMemo(() => {
+    const chips = [];
+    if (q.trim()) chips.push({ k: "q", label: `Search: "${q.trim()}"` });
+    if (statusFilter) chips.push({ k: "status", label: `Status: ${statusFilter}` });
+    if (projectFilter) chips.push({ k: "project", label: `Project: ${projectLabel(projectFilter)}` });
+    if (driverFilter) chips.push({ k: "driver", label: `Driver: ${userLabel(driverFilter)}` });
+    return chips;
+  }, [q, statusFilter, projectFilter, driverFilter, users, projects]);
+
+  function clearChip(k) {
+    if (k === "q") setQ("");
+    if (k === "status") setStatusFilter("");
+    if (k === "project") setProjectFilter("");
+    if (k === "driver") setDriverFilter("");
+  }
+  function clearAllFilters() {
+    setQ("");
+    setStatusFilter("");
+    setProjectFilter("");
+    setDriverFilter("");
+  }
+
+  // ---- Create New Vehicle ----
+  async function handleCreate(e) {
+    e?.preventDefault?.();
+    if (createSaving) return;
+    setCreateErr("");
+    setErr("");
+    setInfo("");
+    setCreateSaving(true);
     try {
       const payload = {
-        reg: (form.reg || "").trim(),
-        make: form.make || undefined,
-        model: form.model || undefined,
-        year: form.year ? Number(form.year) : undefined,
-        status: form.status || "active",
-        projectId: form.projectId || undefined,
+        reg: createForm.reg || undefined,
+        make: createForm.make || undefined,
+        model: createForm.model || undefined,
+        year: createForm.year ? Number(createForm.year) : undefined,
+        status: createForm.status || "active",
+        projectId: createForm.projectId || undefined,
+        driverId: createForm.driverId || undefined,
       };
-      if (!payload.reg) return setErr("Registration is required");
       const { data } = await api.post("/vehicles", payload);
-      setRows(prev => [data, ...prev]);
-      setForm({ reg: "", make: "", model: "", year: "", status: "active", projectId: projectId || "" });
-      setInfo("Vehicle created.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+      // Option A: jump to the new vehicle detail (most convenient to continue editing)
+      navigate(`/vehicles/${data._id || data.id}`);
+      // Option B (commented): stay on list and refresh
+      // await loadVehicles();
+      // setShowCreate(false);
+      // setInfo("Vehicle created.");
+      // setTimeout(() => setInfo(""), 1200);
+    } catch (e2) {
+      setCreateErr(e2?.response?.data?.error || String(e2));
+    } finally {
+      setCreateSaving(false);
     }
   }
 
-  async function setRowStatus(id, newStatus) {
-    setErr("");
-    try {
-      const { data } = await api.put(`/vehicles/${id}`, { status: newStatus });
-      setRows(prev => prev.map(r => (r._id === id ? data : r)));
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
-    }
+  function toggleCreate() {
+    setShowCreate((s) => !s);
+    setCreateErr("");
   }
-
-  async function del(id) {
-    if (!confirm("Delete this vehicle?")) return;
-    setErr(""); setInfo("");
-    try {
-      await api.delete(`/vehicles/${id}`);
-      setRows(prev => prev.filter(r => r._id !== id));
-      setInfo("Vehicle deleted.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
-    }
-  }
-
-  const projectName = (id) =>
-    projects.find(p => String(p._id) === String(id))?.name || "—";
-
-  // quick maps for labels
-  const userMap = useMemo(() => {
-    const m = new Map();
-    users.forEach(u => m.set(String(u._id), u.name || u.email || u.username || String(u._id)));
-    return m;
-  }, [users]);
-
-  const taskMap = useMemo(() => {
-    const m = new Map();
-    tasks.forEach(t => m.set(String(t._id), t.title || String(t._id)));
-    return m;
-  }, [tasks]);
-
-  const driverLabel = (driver) => {
-    if (!driver) return "—";
-    if (typeof driver === "object" && (driver.name || driver.email)) {
-      return driver.name || driver.email;
-    }
-    return userMap.get(String(driver)) || String(driver);
-  };
-
-  const taskCell = (task) => {
-    if (!task) return "—";
-    if (typeof task === "object" && task._id) {
-      return <Link className="underline" to={`/tasks/${task._id}`}>{task.title || task._id}</Link>;
-    }
-    const id = String(task);
-    const label = taskMap.get(id) || id;
-    return <Link className="underline" to={`/tasks/${id}`}>{label}</Link>;
-  };
 
   return (
     <div className="p-4 space-y-4">
-      <h1 className="text-xl font-semibold">Vehicles</h1>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Vehicles</h1>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={exportCsv}
+            disabled={!filtered.length}
+            className="px-3 py-2 border rounded"
+            title={!filtered.length ? "No rows to export" : "Export filtered vehicles to CSV"}
+          >
+            Export CSV
+          </button>
+          <button
+            type="button"
+            className="px-3 py-2 border rounded"
+            onClick={toggleCreate}
+            aria-expanded={showCreate ? "true" : "false"}
+            aria-controls="create-vehicle-panel"
+          >
+            {showCreate ? "Close" : "New Vehicle"}
+          </button>
+        </div>
+      </div>
+
       {err && <div className="text-red-600">{err}</div>}
       {info && <div className="text-green-700">{info}</div>}
 
+      {/* Create new panel */}
+      {showCreate && (
+        <form
+          id="create-vehicle-panel"
+          onSubmit={handleCreate}
+          className="border rounded p-3 space-y-2 bg-gray-50"
+        >
+          <div className="text-sm font-semibold">Create Vehicle</div>
+          {createErr && <div className="text-red-600 text-sm">{createErr}</div>}
+
+          <div className="grid gap-2 md:grid-cols-4">
+            <label className="text-sm">
+              Registration
+              <input
+                className="border p-2 w-full"
+                value={createForm.reg}
+                onChange={(e) => setCreateForm((f) => ({ ...f, reg: e.target.value }))}
+                placeholder="e.g. ABC123"
+              />
+            </label>
+            <label className="text-sm">
+              Make
+              <input
+                className="border p-2 w-full"
+                value={createForm.make}
+                onChange={(e) => setCreateForm((f) => ({ ...f, make: e.target.value }))}
+                placeholder="e.g. Toyota"
+              />
+            </label>
+            <label className="text-sm">
+              Model
+              <input
+                className="border p-2 w-full"
+                value={createForm.model}
+                onChange={(e) => setCreateForm((f) => ({ ...f, model: e.target.value }))}
+                placeholder="e.g. Hilux"
+              />
+            </label>
+            <label className="text-sm">
+              Year
+              <input
+                className="border p-2 w-full"
+                type="number"
+                inputMode="numeric"
+                min="1900"
+                max="2100"
+                value={createForm.year}
+                onChange={(e) => setCreateForm((f) => ({ ...f, year: e.target.value }))}
+                placeholder="e.g. 2020"
+              />
+            </label>
+
+            <label className="text-sm">
+              Status
+              <select
+                className="border p-2 w-full"
+                value={createForm.status}
+                onChange={(e) => setCreateForm((f) => ({ ...f, status: e.target.value }))}
+              >
+                <option value="active">active</option>
+                <option value="workshop">workshop</option>
+                <option value="retired">retired</option>
+              </select>
+            </label>
+
+            <label className="text-sm">
+              Project
+              <select
+                className="border p-2 w-full"
+                value={createForm.projectId}
+                onChange={(e) => setCreateForm((f) => ({ ...f, projectId: e.target.value }))}
+              >
+                <option value="">— none —</option>
+                {projects.map((p) => (
+                  <option key={p._id} value={p._id}>{p.name}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-sm">
+              Driver
+              <select
+                className="border p-2 w-full"
+                value={createForm.driverId}
+                onChange={(e) => setCreateForm((f) => ({ ...f, driverId: e.target.value }))}
+              >
+                <option value="">— none —</option>
+                {users.map((u) => (
+                  <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              className="px-3 py-2 bg-black text-white rounded disabled:opacity-60"
+              disabled={createSaving}
+              type="submit"
+              title={createSaving ? "Creating…" : "Create and open"}
+            >
+              {createSaving ? "Creating…" : "Create & Open"}
+            </button>
+            <button
+              type="button"
+              className="px-3 py-2 border rounded"
+              onClick={() => {
+                setShowCreate(false);
+                setCreateErr("");
+              }}
+            >
+              Cancel
+            </button>
+            <div className="text-xs text-gray-500 ml-auto">
+              Tip: You can leave most fields blank and fill them later.
+            </div>
+          </div>
+        </form>
+      )}
+
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          className="border p-2"
-          placeholder="Search reg/make/model…"
-          value={q}
-          onChange={e=>setQ(e.target.value)}
-          onKeyDown={e=>{ if(e.key==='Enter') syncUrl({ q }); }}
-          style={{ minWidth: 240 }}
-        />
-        <select
-          className="border p-2"
-          value={projectId}
-          onChange={e=>{ setProjectId(e.target.value); syncUrl({ projectId: e.target.value }); }}
-        >
-          <option value="">Project (any)</option>
-          {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-        </select>
-        <select
-          className="border p-2"
-          value={status}
-          onChange={e=>{ setStatus(e.target.value); syncUrl({ status: e.target.value }); }}
-        >
-          <option value="">Status (any)</option>
-          <option value="active">active</option>
-          <option value="workshop">workshop</option>
-          <option value="retired">retired</option>
-        </select>
-        <button className="px-3 py-2 border rounded" onClick={()=>syncUrl({ q, projectId, status })}>Apply</button>
+      <fieldset className="border rounded p-3">
+        <legend className="px-2 text-xs uppercase tracking-wide text-gray-600">Filters</legend>
+
+        <div className="grid gap-2 md:grid-cols-4">
+          <label className="text-sm">
+            Search
+            <input
+              className="border p-2 w-full"
+              placeholder="Reg, make, model, driver, project…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </label>
+
+          <label className="text-sm">
+            Status
+            <select
+              className="border p-2 w-full"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="">Any</option>
+              <option value="active">active</option>
+              <option value="workshop">workshop</option>
+              <option value="retired">retired</option>
+            </select>
+          </label>
+
+          <label className="text-sm">
+            Project
+            <select
+              className="border p-2 w-full"
+              value={projectFilter}
+              onChange={(e) => setProjectFilter(e.target.value)}
+            >
+              <option value="">Any</option>
+              {projects.map((p) => (
+                <option key={p._id} value={p._id}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="text-sm">
+            Driver
+            <select
+              className="border p-2 w-full"
+              value={driverFilter}
+              onChange={(e) => setDriverFilter(e.target.value)}
+            >
+              <option value="">Any</option>
+              {users.map((u) => (
+                <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {/* Active filter chips */}
+        <div className="flex flex-wrap items-center gap-2 mt-3">
+          {activeChips.length === 0 ? (
+            <span className="text-xs text-gray-500">No filters applied</span>
+          ) : (
+            activeChips.map((chip) => (
+              <span
+                key={chip.k}
+                className="inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-800 rounded-full pl-2 pr-1 py-1"
+                title="Click × to remove"
+              >
+                {chip.label}
+                <button
+                  type="button"
+                  className="w-5 h-5 leading-none text-gray-600 hover:text-black"
+                  onClick={() => clearChip(chip.k)}
+                >
+                  ×
+                </button>
+              </span>
+            ))
+          )}
+
+          <div className="ml-auto">
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              disabled={activeChips.length === 0}
+              className="px-3 py-1 border rounded text-sm"
+              title={activeChips.length === 0 ? "Nothing to clear" : "Clear all filters"}
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+      </fieldset>
+
+      {/* Counts */}
+      <div className="text-sm text-gray-700">
+        Showing <b>{filtered.length}</b> of {vehicles.length} {loading ? "(loading…)" : ""}
       </div>
 
-      {/* Create */}
-      <form onSubmit={create} className="grid md:grid-cols-6 gap-2 border rounded p-3">
-        <label className="text-sm">Registration
-          <input className="border p-2 w-full" value={form.reg} onChange={e=>setForm({...form, reg: e.target.value})} required />
-        </label>
-        <label className="text-sm">Make
-          <input className="border p-2 w-full" value={form.make} onChange={e=>setForm({...form, make: e.target.value})} />
-        </label>
-        <label className="text-sm">Model
-          <input className="border p-2 w-full" value={form.model} onChange={e=>setForm({...form, model: e.target.value})} />
-        </label>
-        <label className="text-sm">Year
-          <input className="border p-2 w-full" type="number" inputMode="numeric" min="1900" max="2100"
-                 value={form.year} onChange={e=>setForm({...form, year: e.target.value})} />
-        </label>
-        <label className="text-sm">Project
-          <select className="border p-2 w-full" value={form.projectId || projectId} onChange={e=>setForm({...form, projectId: e.target.value})}>
-            <option value="">— none —</option>
-            {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-          </select>
-        </label>
-        <label className="text-sm">Status
-          <select className="border p-2 w-full" value={form.status} onChange={e=>setForm({...form, status: e.target.value})}>
-            <option value="active">active</option>
-            <option value="workshop">workshop</option>
-            <option value="retired">retired</option>
-          </select>
-        </label>
-        <div className="md:col-span-6">
-          <button className="px-3 py-2 bg-black text-white rounded">Create</button>
-        </div>
-      </form>
-
       {/* Table */}
-      <table className="w-full border text-sm">
-        <thead>
-          <tr className="bg-gray-50">
-            <th className="border p-2 text-left">Registration</th>
-            <th className="border p-2 text-left">Make/Model</th>
-            <th className="border p-2 text-left">Year</th>
-            <th className="border p-2 text-left">Project</th>
-            {/* NEW */}
-            <th className="border p-2 text-left">Driver</th>
-            <th className="border p-2 text-left">Task</th>
-            <th className="border p-2 text-left">Status</th>
-            <th className="border p-2 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(r => (
-            <tr key={r._id}>
-              <td className="border p-2">
-                <div className="font-medium">
-                  <Link to={`/vehicles/${r._id}`} className="underline">{r.reg}</Link>
-                </div>
-              </td>
-              <td className="border p-2">{[r.make, r.model].filter(Boolean).join(" ") || "—"}</td>
-              <td className="border p-2">{r.year || "—"}</td>
-              <td className="border p-2">
-                {r.projectId
-                  ? <Link className="underline" to={`/projects/${r.projectId}`}>{projectName(r.projectId)}</Link>
-                  : "—"}
-              </td>
-              {/* NEW driver cell */}
-              <td className="border p-2">
-                {r.driver?.name || r.driver?.email
-                  ? (r.driver.name || r.driver.email)
-                  : driverLabel(r.driverId)}
-              </td>
-              {/* NEW task cell */}
-              <td className="border p-2">
-                {r.task?.title
-                  ? <Link className="underline" to={`/tasks/${r.task._id}`}>{r.task.title}</Link>
-                  : taskCell(r.taskId)}
-              </td>
-              <td className="border p-2">
-                <div className="flex items-center gap-2">
-                  <StatusBadge value={r.status || "active"} />
-                  <select
-                    className="border p-1"
-                    value={r.status || "active"}
-                    onChange={e=>setRowStatus(r._id, e.target.value)}
-                  >
-                    <option value="active">active</option>
-                    <option value="workshop">workshop</option>
-                    <option value="retired">retired</option>
-                  </select>
-                </div>
-              </td>
-              <td className="border p-2 text-right">
-                <button className="px-2 py-1 border rounded" onClick={()=>del(r._id)}>Delete</button>
-              </td>
+      <div className="border rounded overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 sticky top-0 z-10">
+            <tr>
+              <th className="p-2 text-left">Registration</th>
+              <th className="p-2 text-left">Vehicle</th>
+              <th className="p-2 text-left">Status</th>
+              <th className="p-2 text-left">Driver</th>
+              <th className="p-2 text-left">Project</th>
+              <th className="p-2 text-left">Updated</th>
+              <th className="p-2 text-right">Actions</th>
             </tr>
-          ))}
-          {!rows.length && <tr><td colSpan={8} className="p-4 text-center">No vehicles</td></tr>}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {filtered.length ? (
+              filtered.map((v) => {
+                const drvId = v?.driver?._id || v?.driverId || "";
+                const isSaving = !!saving[v._id];
+                return (
+                  <tr key={v._id} className="border-t">
+                    <td className="p-2 align-top">
+                      <Link className="underline" to={`/vehicles/${v._id}`}>{v.reg || "—"}</Link>
+                    </td>
+                    <td className="p-2 align-top">
+                      <div className="font-medium">
+                        {(v.make || "—")}{v.model ? ` ${v.model}` : ""}{v.year ? ` · ${v.year}` : ""}
+                      </div>
+                      <div className="text-xs text-gray-600">
+                        Created {v.createdAt ? new Date(v.createdAt).toLocaleDateString() : "—"}
+                      </div>
+                    </td>
+                    <td className="p-2 align-top">
+                      <div className="flex items-center gap-2">
+                        <StatusBadge value={v.status || "active"} />
+                        <select
+                          className="border p-1 text-xs"
+                          value={v.status || "active"}
+                          onChange={(e) => updateStatus(v._id, e.target.value)}
+                          disabled={isSaving}
+                          title={isSaving ? "Saving…" : "Change status"}
+                        >
+                          <option value="active">active</option>
+                          <option value="workshop">workshop</option>
+                          <option value="retired">retired</option>
+                        </select>
+                        {isSaving && <span className="text-xs text-gray-500">Saving…</span>}
+                      </div>
+                    </td>
+                    <td className="p-2 align-top">{userLabel(drvId)}</td>
+                    <td className="p-2 align-top">
+                      {v.projectId ? (
+                        <Link className="underline" to={`/projects/${v.projectId}`}>
+                          {projectLabel(v.projectId)}
+                        </Link>
+                      ) : "—"}
+                    </td>
+                    <td className="p-2 align-top">
+                      {v.updatedAt ? new Date(v.updatedAt).toLocaleString() : "—"}
+                    </td>
+                    <td className="p-2 align-top text-right">
+                      <Link className="px-2 py-1 border rounded" to={`/vehicles/${v._id}`}>
+                        Open
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })
+            ) : (
+              <tr>
+                <td className="p-4 text-center text-gray-600" colSpan={7}>
+                  {loading ? "Loading vehicles…" : "No vehicles match your filters"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

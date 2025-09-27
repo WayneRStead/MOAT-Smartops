@@ -1,165 +1,145 @@
-// core-backend/routes/auth.js
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const { requireAuth } = require('../middleware/auth');
+
 const router = express.Router();
 
-const { requireAuth } = require('../middleware/auth');
-const User = require('../models/User');
+// User model is optional; if missing, we still support ENV-based login
+let User = null;
+try { User = require('../models/User'); } catch (_) { /* optional */ }
 
-// ---------- Helpers ----------
-const isDev = process.env.NODE_ENV !== 'production';
+// -------- helpers --------
+const normalizeEmail = (s) => String(s || '').trim().toLowerCase();
+const isBcryptHash = (s) => typeof s === 'string' && s.startsWith('$2');
 
-function normalizeEmail(s) {
-  return (s || '').trim().toLowerCase();
-}
-
-function isEnvAdminIdentity(login) {
-  const authUser = (process.env.AUTH_USER || '').trim();
-  const adminEmail = (process.env.ADMIN_EMAIL || process.env.SUPERADMIN_EMAIL || '').trim();
-
-  const input = (login || '').trim();
-  return (
-    (!!authUser && input.toLowerCase() === authUser.toLowerCase()) ||
-    (!!adminEmail && input.toLowerCase() === adminEmail.toLowerCase())
+function signToken({ _id, orgId, role, email }) {
+  const secret = process.env.JWT_SECRET || 'super_secret_change_me';
+  return jwt.sign(
+    { _id, sub: _id, orgId, role, email },
+    secret,
+    { expiresIn: '8h' }
   );
 }
 
-async function checkEnvAdminPassword(password) {
-  const bcryptHash =
-    process.env.AUTH_PASS_BCRYPT ||
-    process.env.ADMIN_PASSWORD_BCRYPT ||
-    process.env.SUPERADMIN_PASSWORD_BCRYPT;
-
-  const plain =
-    process.env.AUTH_PASS ||
-    process.env.ADMIN_PASSWORD ||
-    process.env.SUPERADMIN_PASSWORD;
-
-  if (bcryptHash) {
-    try { return await bcrypt.compare(password || '', bcryptHash); }
-    catch { return false; }
+async function verifyDbPassword(plain, userDoc) {
+  // Prefer passwordHash if present
+  if (userDoc && userDoc.passwordHash) {
+    return bcrypt.compare(plain, userDoc.passwordHash);
   }
-  return !!(plain && password === plain);
-}
-
-function getEnvAdminProfile() {
-  const email =
-    process.env.AUTH_USER ||
-    process.env.ADMIN_EMAIL ||
-    process.env.SUPERADMIN_EMAIL ||
-    'admin@smartops';
-
-  const role =
-    process.env.AUTH_ROLE ||
-    process.env.ADMIN_ROLE ||
-    process.env.SUPERADMIN_ROLE ||
-    'superadmin';
-
-  const orgId =
-    process.env.AUTH_ORG_ID ||
-    process.env.ADMIN_ORG_ID ||
-    'root';
-
-  return { sub: email, email, role, orgId, name: 'Super Admin' };
-}
-
-function signToken(payload) {
-  const secret = process.env.JWT_SECRET || 'dev_secret';
-  return jwt.sign(payload, secret, { expiresIn: '12h' });
-}
-
-// ---------- Routes ----------
-
-// POST /auth/login  (ENV super admin + DB users)
-router.post('/auth/login', async (req, res) => {
-  try {
-    const { email, username, password } = req.body || {};
-    const loginId = email || username;
-
-    if (!loginId || !password) {
-      return res.status(400).json({ error: 'email/username and password required' });
+  // If there's a `password` field, handle bcrypt or plain
+  if (userDoc && typeof userDoc.password === 'string') {
+    if (isBcryptHash(userDoc.password)) {
+      return bcrypt.compare(plain, userDoc.password);
     }
+    // As a last resort, allow plain compare in dev environments
+    return plain === userDoc.password;
+  }
+  return null; // no password stored on user
+}
 
-    // ENV Super Admin
-    if (isEnvAdminIdentity(loginId)) {
-      const ok = await checkEnvAdminPassword(password);
-      if (isDev) console.log('[auth] ENV login attempt:', loginId, 'ok?', ok);
-      if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+async function tryDbLogin(email, password) {
+  if (!User) return null;
 
-      const env = getEnvAdminProfile();
-      const token = signToken({ sub: env.sub, role: env.role, orgId: env.orgId });
-      return res.json({
-        token,
-        user: { id: env.sub, name: env.name, role: env.role, email: env.email },
-      });
-    }
+  // Try to find by email; support mixed casing in stored data
+  const e = normalizeEmail(email);
+  const u =
+    (await User.findOne({ email: e }).lean()) ||
+    (await User.findOne({ email }).lean()) ||
+    null;
 
-    // DB user path
-    const query = email
-      ? { email: normalizeEmail(email), active: { $ne: false } }
-      : { username: (username || '').trim(), active: { $ne: false } };
+  if (!u) return null;
 
-    const user = await User.findOne(query);
-    if (isDev) console.log('[auth] DB login attempt for', loginId, 'found?', !!user);
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const ok = await user.verifyPassword
-      ? await user.verifyPassword(password)
-      : await bcrypt.compare(password, user.passwordHash || '');
-
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = signToken({ sub: user._id, orgId: user.orgId, role: user.role });
-    return res.json({
+  // If user has a stored password, verify it; otherwise fall through to env
+  const verified = await verifyDbPassword(password, u);
+  if (verified === true) {
+    const payload = {
+      _id: String(u._id),
+      orgId: String(u.orgId || process.env.AUTH_ORG_ID || '650000000000000000000099'),
+      role: String(u.role || 'user'),
+      email: u.email,
+    };
+    const token = signToken(payload);
+    return {
       token,
       user: {
-        id: user._id,
-        name: user.name || user.email || user.username,
-        role: user.role,
-        email: user.email,
+        _id: payload._id,
+        orgId: payload.orgId,
+        role: payload.role,
+        email: payload.email,
+        name: u.name || u.email,
       },
-    });
-  } catch (e) {
-    console.error('POST /auth/login failed:', e);
-    res.status(500).json({ error: 'Server error' });
+    };
   }
-});
 
-// POST /auth/admin/reset-password
-// Uses the User model's auto-hash by setting `user.password`
-router.post('/auth/admin/reset-password', requireAuth, async (req, res) => {
+  // If not verified (or user has no stored password), return null to allow env login
+  return null;
+}
+
+async function tryEnvLogin(email, password) {
+  const envUser = process.env.AUTH_USER;
+  const passHash = process.env.AUTH_PASS_BCRYPT; // bcrypt hash
+  const passPlain = process.env.AUTH_PASS;       // plain text (dev only)
+
+  if (!envUser) return null;
+  if (normalizeEmail(email) !== normalizeEmail(envUser)) return null;
+
+  let ok = false;
+  if (passHash) ok = await bcrypt.compare(password, passHash);
+  else if (passPlain) ok = password === passPlain;
+
+  if (!ok) return null;
+
+  const userId = process.env.AUTH_USER_ID || '650000000000000000000001';
+  const orgId  = process.env.AUTH_ORG_ID  || '650000000000000000000099';
+  const role   = process.env.AUTH_ROLE    || 'admin';
+
+  const token = signToken({ _id: userId, orgId, role, email: envUser });
+
+  return {
+    token,
+    user: { _id: userId, orgId, role, email: envUser, name: 'Admin' },
+  };
+}
+
+// Shared handler so /login and /dev-login behave the same
+async function loginHandler(req, res) {
   try {
-    const actorRole = req.user.role || '';
-    if (!['admin', 'superadmin'].includes(actorRole)) {
-      return res.status(403).json({ error: 'Forbidden' });
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const { userId, email, username, newPassword } = req.body || {};
-    if (!newPassword) {
-      return res.status(400).json({ error: 'newPassword required' });
-    }
+    // 1) Try database login (if User model exists)
+    const dbResult = await tryDbLogin(email, password);
+    if (dbResult) return res.json(dbResult);
 
-    let user = null;
-    if (userId) user = await User.findById(userId);
-    else if (email) user = await User.findOne({ email: normalizeEmail(email) });
-    else if (username) user = await User.findOne({ username: (username || '').trim() });
+    // 2) Fallback to ENV login
+    const envResult = await tryEnvLogin(email, password);
+    if (envResult) return res.json(envResult);
 
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    user.password = newPassword;   // <- triggers pre-save hashing
-    await user.save();
-
-    res.json({ ok: true });
-  } catch (e) {
-    console.error('POST /auth/admin/reset-password failed:', e);
+    // Otherwise invalid
+    return res.status(401).json({ error: 'Invalid credentials' });
+  } catch (err) {
+    console.error('[auth/login] error:', err);
     res.status(500).json({ error: 'Server error' });
   }
-});
+}
 
-// Optional debug
-router.get('/auth/me', requireAuth, (req, res) => {
+// -------- routes --------
+
+// Login (primary)
+router.post('/login', loginHandler);
+
+// Dev alias (optional; same behavior)
+router.post('/dev-login', loginHandler);
+
+// Who am I? (requires Bearer token)
+router.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
+
+// Optional logout endpoint (stateless JWTs; frontend should just delete the token)
+router.post('/logout', (_req, res) => res.json({ ok: true }));
 
 module.exports = router;

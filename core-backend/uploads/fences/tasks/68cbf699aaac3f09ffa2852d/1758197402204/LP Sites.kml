@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>LP Sites</name>
+    <NetworkLink>
+      <name>Untitled map</name>
+      <Link>
+        <href><![CDATA[https://www.google.com/maps/d/kml?forcekml=1&mid=1g6itb8N-mPUBHfaltvYechcRw7C1zlI&lid=lQyRi3o8GPo]]></href>
+      </Link>
+    </NetworkLink>
+  </Document>
+</kml>

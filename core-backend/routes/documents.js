@@ -3,23 +3,44 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const mongoose = require('mongoose'); // <-- added
-const { requireAuth, requireRole } = require('../middleware/auth');
-const { canReadDoc, canEditDoc, isAdmin } = require('../middleware/acl');
+const mongoose = require('mongoose');
+const { requireAuth } = require('../middleware/auth');
 const Document = require('../models/Document');
 
-// Optional usage emitter (guarded if not present)
-let emitUsage = () => {};
-try {
-  ({ emitUsage } = require('../utils/usage'));
-} catch (_) { /* no-op */ }
+const router = express.Router();
 
-// Files served by: app.use('/files', express.static(path.join(__dirname, 'uploads')))
+/* ------------------------ Optional ACL import (with fallbacks) ------------------------ */
+let canReadDoc, canEditDoc, isAdmin;
+try {
+  ({ canReadDoc, canEditDoc, isAdmin } = require('../middleware/acl'));
+} catch (_) {
+  const _isAdmin = (u) => {
+    const r = String(u?.role || '').toLowerCase();
+    return r === 'admin' || r === 'superadmin';
+  };
+  isAdmin = _isAdmin;
+  canReadDoc = (user, doc) => {
+    if (_isAdmin(user)) return true;
+    const owners = doc?.access?.owners || [];
+    const vis = doc?.access?.visibility || 'org';
+    const me = String(user?.sub || user?._id || '');
+    if (owners.map(String).includes(me)) return true;
+    if (vis === 'org' || !doc?.access) return true;
+    return false;
+  };
+  canEditDoc = (user, doc) => {
+    if (_isAdmin(user)) return true;
+    const owners = doc?.access?.owners || [];
+    const me = String(user?.sub || user?._id || '');
+    return owners.map(String).includes(me);
+  };
+}
+
+/* ---------------------------------- Uploads ---------------------------------- */
+// Files served by: app.use('/files', express.static(path.join(__dirname, '..', 'uploads')))
 const uploadsRoot = path.join(__dirname, '..', 'uploads');
 const baseDir = path.join(uploadsRoot, 'docs');
 fs.mkdirSync(baseDir, { recursive: true });
-
-const router = express.Router();
 
 // Multer storage per-document/version folder
 const storage = multer.diskStorage({
@@ -29,12 +50,11 @@ const storage = multer.diskStorage({
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  filename: (_req, file, cb) => cb(null, file.originalname),
+  filename: (_req, file, cb) => cb(null, path.basename(file.originalname || 'file')),
 });
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 
-/* ------------------------ Helpers ------------------------ */
-
+/* --------------------------------- Helpers ---------------------------------- */
 function computeLatest(doc) {
   if (!doc.versions || doc.versions.length === 0) return undefined;
   for (let i = doc.versions.length - 1; i >= 0; i--) {
@@ -43,13 +63,24 @@ function computeLatest(doc) {
   }
   return undefined;
 }
-
 function isValidObjectId(id) {
   return typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id);
 }
+function orgScope(orgId) {
+  if (!orgId) return {};
+  const s = String(orgId);
+  if (!mongoose.Types.ObjectId.isValid(s)) return {}; // tolerate "root" etc.
+  return { orgId: new mongoose.Types.ObjectId(s) };
+}
+function normalizeLinkInput(body = {}) {
+  const type = (body.type || body.module || '').trim();
+  const ref = String(body.refId || '').trim();
+  if (!type || !ref) return { error: 'type and refId required' };
+  if (!isValidObjectId(ref)) return { error: 'refId must be a 24-hex ObjectId' };
+  return { type, refId: new mongoose.Types.ObjectId(ref) };
+}
 
-/* ------------------------ Routes ------------------------ */
-
+/* ---------------------------------- LIST ------------------------------------ */
 /**
  * GET /documents
  * Filters: q, tag, folder, linkedTo (type:refId), module, uploader, from, to, includeDeleted
@@ -58,10 +89,10 @@ router.get('/', requireAuth, async (req, res, next) => {
   try {
     const { q, tag, folder, linkedTo, module, uploader, from, to, includeDeleted } = req.query;
 
-    const find = {};
-    if (!includeDeleted) {
-      find.deletedAt = { $exists: false };
-    }
+    const find = {
+      ...orgScope(req.user?.orgId),
+    };
+    if (!includeDeleted) find.deletedAt = { $exists: false };
 
     if (q) {
       const or = [
@@ -69,11 +100,7 @@ router.get('/', requireAuth, async (req, res, next) => {
         { 'latest.filename': new RegExp(q, 'i') },
         { tags: q },
       ];
-
-      // NEW: allow searching by exact _id if q looks like an ObjectId
-      if (isValidObjectId(q)) {
-        or.push({ _id: new mongoose.Types.ObjectId(q) });
-      }
+      if (isValidObjectId(q)) or.push({ _id: new mongoose.Types.ObjectId(q) });
       find.$or = or;
     }
 
@@ -87,7 +114,7 @@ router.get('/', requireAuth, async (req, res, next) => {
       };
     }
 
-    // Linking filters (supports both links.type and links.module for compatibility)
+    // linking filters (supports links.type or links.module)
     if (module) {
       find.$or = (find.$or || []).concat([
         { 'links.type': module },
@@ -95,51 +122,71 @@ router.get('/', requireAuth, async (req, res, next) => {
       ]);
     }
     if (linkedTo) {
-      const [type, refId] = String(linkedTo).split(':');
-      if (type && refId) {
-        find.$and = (find.$and || []).concat([
-          {
-            $or: [
-              { links: { $elemMatch: { type, refId } } },
-              { links: { $elemMatch: { module: type, refId } } },
-            ],
-          },
-        ]);
+      const [type, rawId] = String(linkedTo).split(':');
+      if (type && rawId) {
+        const clauses = [];
+        if (isValidObjectId(rawId)) {
+          const oid = new mongoose.Types.ObjectId(rawId);
+          clauses.push(
+            { links: { $elemMatch: { type, refId: oid } } },
+            { links: { $elemMatch: { module: type, refId: oid } } },
+          );
+        }
+        // Fallback for any legacy string refId data
+        clauses.push(
+          { links: { $elemMatch: { type, refId: rawId } } },
+          { links: { $elemMatch: { module: type, refId: rawId } } },
+        );
+        (find.$and ||= []).push({ $or: clauses });
       }
     }
 
     const docs = await Document.find(find).sort({ updatedAt: -1 }).lean();
     res.json(docs.filter((d) => canReadDoc(req.user, d)));
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/**
- * GET /documents/:id
- * NEW: direct fetch by id (fixes "Document not found" when navigating from links)
- */
+/* ---------------------------------- READ ------------------------------------ */
+/** GET /documents/:id */
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
 
-    const doc = await Document.findById(id).lean();
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) }).lean();
     if (!doc) return res.status(404).json({ error: 'Not found' });
     if (!canReadDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
-    return res.json(doc);
+    res.json(doc);
   } catch (e) {
     console.error('GET /documents/:id failed:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 
-/**
- * POST /documents
- * Create document metadata
- */
-router.post('/', requireAuth, requireRole('admin', 'manager', 'worker'), async (req, res, next) => {
+/* --------------- STREAM/REDIRECT LATEST FILE (preview fallback) -------------- */
+/** GET /documents/:id/file -> 302 to doc.latest.url (if readable) */
+router.get('/:id/file', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) }).lean();
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    if (!canReadDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
+
+    const latest = doc.latest || computeLatest(doc);
+    if (!latest?.url) return res.status(404).json({ error: 'No file for this document' });
+
+    return res.redirect(latest.url);
+  } catch (e) {
+    console.error('GET /documents/:id/file failed:', e);
+    res.status(500).json({ error: e.message || 'Server error' });
+  }
+});
+
+/* --------------------------------- CREATE ---------------------------------- */
+/** POST /documents */
+router.post('/', requireAuth, async (req, res, next) => {
   try {
     const { title, folder = '', tags = [], links = [], access } = req.body || {};
     if (!title) return res.status(400).json({ error: 'title required' });
@@ -150,50 +197,50 @@ router.post('/', requireAuth, requireRole('admin', 'manager', 'worker'), async (
     });
 
     const now = new Date();
-    const doc = await Document.create({
+    const body = {
       title,
       folder,
       tags,
       links: normLinks,
-      access: access || { visibility: 'org', owners: [req.user.sub] },
+      access: access || { visibility: 'org', owners: [req.user.sub || req.user._id] },
       createdAt: now,
       updatedAt: now,
-      createdBy: req.user.sub,
-      updatedBy: req.user.sub,
+      createdBy: req.user.sub || req.user._id,
+      updatedBy: req.user.sub || req.user._id,
       versions: [],
       latest: undefined,
-    });
+    };
 
+    if (mongoose.Types.ObjectId.isValid(String(req.user?.orgId))) {
+      body.orgId = new mongoose.Types.ObjectId(String(req.user.orgId));
+    } else if (req.user?.orgId) {
+      body.orgId = String(req.user.orgId);
+    }
+
+    const doc = await Document.create(body);
     res.status(201).json(doc);
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/**
- * POST /documents/:id/upload
- * Upload a new file version
- */
+/* --------------------------------- UPLOAD ---------------------------------- */
+/** POST /documents/:id/upload */
 router.post('/:id/upload', requireAuth, upload.single('file'), async (req, res, next) => {
   try {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
 
-    const doc = await Document.findById(id);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
-
     if (!req.file) return res.status(400).json({ error: 'file required' });
 
-    // Build public URL (served via /files)
     const rel = '/files/' + path.relative(uploadsRoot, req.file.path).replace(/\\/g, '/');
-
     const version = {
       filename: req.file.originalname,
       url: rel,
       mime: req.file.mimetype,
       size: req.file.size,
-      uploadedBy: req.user.sub,
+      uploadedBy: req.user.sub || req.user._id,
       uploadedAt: new Date(),
     };
 
@@ -201,28 +248,21 @@ router.post('/:id/upload', requireAuth, upload.single('file'), async (req, res, 
     doc.versions.push(version);
     doc.latest = version;
     doc.updatedAt = new Date();
-    doc.updatedBy = req.user.sub;
+    doc.updatedBy = req.user.sub || req.user._id;
 
     await doc.save();
-
-    try { emitUsage('doc.upload', { docId: String(doc._id), size: req.file.size }); } catch (_) {}
-
     res.status(201).json(doc);
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 });
 
-/**
- * PUT /documents/:id
- * Update metadata (title, folder, tags, links, access)
- */
-router.put('/:id', requireAuth, async (req, res, next) => {
+/* --------------------------------- UPDATE ---------------------------------- */
+/** PUT /documents/:id */
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
 
-    const doc = await Document.findById(id);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
@@ -240,35 +280,62 @@ router.put('/:id', requireAuth, async (req, res, next) => {
     if (access != null) doc.access = access;
 
     doc.updatedAt = new Date();
-    doc.updatedBy = req.user.sub;
+    doc.updatedBy = req.user.sub || req.user._id;
 
     await doc.save();
     res.json(doc);
   } catch (e) {
-    next(e);
+    console.error('PUT /documents/:id error:', e);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-/**
- * DELETE /documents/:id
- * Soft delete by default; hard delete with ?hard=1 (admin only)
- */
+/* --------------------------------- RESTORE --------------------------------- */
+/** PATCH /documents/:id/restore */
+router.patch('/:id/restore', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
+
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+
+    // Allow owner/editor or admin to restore
+    if (!canEditDoc(req.user, doc) && !isAdmin(req.user)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    doc.deletedAt = undefined;
+    doc.deletedBy = undefined;
+    if (!doc.latest) doc.latest = computeLatest(doc);
+
+    doc.updatedAt = new Date();
+    doc.updatedBy = req.user.sub || req.user._id || null;
+
+    await doc.save();
+    res.json(doc);
+  } catch (e) {
+    console.error('PATCH /documents/:id/restore failed:', e);
+    res.status(500).json({ error: e.message || 'Server error' });
+  }
+});
+
+/* --------------------------------- DELETE --------------------------------- */
+/** DELETE /documents/:id (soft by default; hard with ?hard=1 admin only) */
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
 
-    const doc = await Document.findById(id);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
-    if (!isAdmin(req.user) && !canEditDoc(req.user, doc)) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
+    const admin = isAdmin(req.user);
+    if (!admin && !canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
     const hard = String(req.query.hard) === '1';
     if (hard) {
-      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Hard delete requires admin' });
-      await Document.findByIdAndDelete(doc._id);
-      try { emitUsage('doc.delete.hard', { docId: String(doc._id) }); } catch (_) {}
+      if (!admin) return res.status(403).json({ error: 'Hard delete requires admin' });
+      await Document.deleteOne({ _id: doc._id });
       return res.json({ ok: true, hard: true });
     }
 
@@ -278,47 +345,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
     doc.updatedBy = req.user.sub || req.user._id || null;
 
     await doc.save();
-
-    try { emitUsage('doc.delete', { docId: String(doc._id) }); } catch (_) {}
-
-    return res.json({ ok: true, hard: false });
+    res.json({ ok: true, hard: false });
   } catch (e) {
     console.error('DELETE /documents/:id failed:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 
-/**
- * PATCH /documents/:id/restore
- * Restore a soft-deleted document
- */
-router.patch('/:id/restore', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
-
-    const doc = await Document.findById(id);
-    if (!doc) return res.sendStatus(404);
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
-
-    doc.deletedAt = undefined;
-    doc.deletedBy = undefined;
-    doc.updatedAt = new Date();
-    doc.updatedBy = req.user.sub || req.user._id || null;
-
-    await doc.save();
-
-    return res.json(doc);
-  } catch (e) {
-    console.error('PATCH /documents/:id/restore failed:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
-  }
-});
-
-/**
- * DELETE /documents/:id/versions/:index
- * Soft-delete a specific version; recompute latest if necessary
- */
+/* ------------------------------ VERSION DELETE ---------------------------- */
+/** DELETE /documents/:id/versions/:index */
 router.delete('/:id/versions/:index', requireAuth, async (req, res) => {
   try {
     const { id, index } = req.params;
@@ -326,19 +361,17 @@ router.delete('/:id/versions/:index', requireAuth, async (req, res) => {
     const i = Number(index);
     if (!Number.isInteger(i) || i < 0) return res.status(400).json({ error: 'Bad version index' });
 
-    const doc = await Document.findById(id);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.sendStatus(404);
     if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
     if (!doc.versions || !doc.versions[i]) {
       return res.status(400).json({ error: 'Bad version index' });
     }
-
     const v = doc.versions[i];
     v.deletedAt = new Date();
     v.deletedBy = req.user.sub || req.user._id || null;
 
-    // If current latest equals this version, recompute latest
     if (
       doc.latest &&
       v.uploadedAt &&
@@ -352,20 +385,15 @@ router.delete('/:id/versions/:index', requireAuth, async (req, res) => {
     doc.updatedBy = req.user.sub || req.user._id || null;
 
     await doc.save();
-
-    try { emitUsage('doc.version.delete', { docId: String(doc._id), versionIndex: i }); } catch (_) {}
-
-    return res.sendStatus(204);
+    res.sendStatus(204);
   } catch (e) {
     console.error('DELETE /documents/:id/versions/:index failed:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 
-/**
- * PATCH /documents/:id/versions/:index/restore
- * Restore a version; optionally set as latest with ?setLatest=1
- */
+/* ------------------------------ VERSION RESTORE --------------------------- */
+/** PATCH /documents/:id/versions/:index/restore */
 router.patch('/:id/versions/:index/restore', requireAuth, async (req, res) => {
   try {
     const { id, index } = req.params;
@@ -373,7 +401,7 @@ router.patch('/:id/versions/:index/restore', requireAuth, async (req, res) => {
     const i = Number(index);
     if (!Number.isInteger(i) || i < 0) return res.status(400).json({ error: 'Bad version index' });
 
-    const doc = await Document.findById(id);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.sendStatus(404);
     if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
@@ -395,77 +423,72 @@ router.patch('/:id/versions/:index/restore', requireAuth, async (req, res) => {
     doc.updatedBy = req.user.sub || req.user._id || null;
 
     await doc.save();
-
-    return res.json(doc);
+    res.json(doc);
   } catch (e) {
     console.error('PATCH /documents/:id/versions/:index/restore failed:', e);
-    return res.status(500).json({ error: e.message || 'Server error' });
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 
-/**
- * POST /documents/:id/links
- * Body: { type?: string, module?: string, refId: ObjectId }
- * Stores both .type and .module; prevents duplicates
- */
-router.post('/:id/links', requireAuth, async (req, res, next) => {
+/* ---------------------------------- LINKS ---------------------------------- */
+/** POST /documents/:id/links  -> body { type, refId } ; returns updated links array */
+router.post('/:id/links', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
-
-    const { type, module, refId } = req.body || {};
-    const t = type || module;
-    if (!t || !refId) return res.status(400).json({ error: 'type/module and refId required' });
-
-    const doc = await Document.findById(id);
-    if (!doc) return res.sendStatus(404);
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    if (!doc) return res.status(404).json({ error: 'Not found' });
     if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
 
-    doc.links = doc.links || [];
-    const exists = doc.links.some(
-      (l) => (l.type === t || l.module === t) && String(l.refId) === String(refId)
+    const parsed = normalizeLinkInput(req.body);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const { type, refId } = parsed;
+    const exists = (doc.links || []).some(
+      (l) => (l.type === type || l.module === type) && String(l.refId) === String(refId)
     );
     if (!exists) {
-      doc.links.push({ type: t, module: t, refId });
-      doc.updatedAt = new Date();
-      doc.updatedBy = req.user.sub || req.user._id || null;
-      await doc.save();
+      doc.links = doc.links || [];
+      doc.links.push({ type, module: type, refId });
     }
 
-    res.json(doc.links);
-  } catch (e) {
-    next(e);
-  }
-});
-
-/**
- * DELETE /documents/:id/links
- * Body: { type?: string, module?: string, refId }
- */
-router.delete('/:id/links', requireAuth, async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
-
-    const { type, module, refId } = req.body || {};
-    const t = type || module;
-    if (!t || !refId) return res.status(400).json({ error: 'type/module and refId required' });
-
-    const doc = await Document.findById(id);
-    if (!doc) return res.sendStatus(404);
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
-
-    doc.links = (doc.links || []).filter(
-      (l) => !((l.type === t || l.module === t) && String(l.refId) === String(refId))
-    );
     doc.updatedAt = new Date();
     doc.updatedBy = req.user.sub || req.user._id || null;
 
     await doc.save();
-
-    res.json(doc.links);
+    res.json(doc.links || []);
   } catch (e) {
-    next(e);
+    console.error('POST /documents/:id/links failed:', e);
+    res.status(500).json({ error: e.message || 'Server error' });
+  }
+});
+
+/** DELETE /documents/:id/links -> body { type, refId } ; returns updated links array */
+router.delete('/:id/links', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid document id' });
+    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: 'Forbidden' });
+
+    const parsed = normalizeLinkInput(req.body || {});
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+    const { type, refId } = parsed;
+    const before = doc.links || [];
+    doc.links = before.filter(
+      (l) => !((l.type === type || l.module === type) && String(l.refId) === String(refId))
+    );
+
+    doc.updatedAt = new Date();
+    doc.updatedBy = req.user.sub || req.user._id || null;
+
+    await doc.save();
+    res.json(doc.links || []);
+  } catch (e) {
+    console.error('DELETE /documents/:id/links failed:', e);
+    res.status(500).json({ error: e.message || 'Server error' });
   }
 });
 

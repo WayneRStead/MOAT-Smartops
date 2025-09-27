@@ -1,4 +1,4 @@
-// models/User.js
+// core-backend/models/User.js
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -11,19 +11,22 @@ const UserSchema = new Schema(
     orgId: { type: Schema.Types.ObjectId, ref: 'Org', required: true, index: true },
 
     name: { type: String, trim: true },
+
+    // We keep these globally unique+sparse by default.
+    // If you need org-scoped uniqueness, see the compound indexes below.
     email: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
     username: { type: String, unique: true, sparse: true, trim: true },
 
     role: { type: String, enum: ROLE_ENUM, default: 'worker', index: true },
     active: { type: Boolean, default: true, index: true },
 
-    // Soft-delete for consistency with other models (optional but useful)
+    // Soft-delete (keep historical refs consistent)
     isDeleted: { type: Boolean, default: false, index: true },
 
-    // Store hash here
+    // Store bcrypt hash here
     passwordHash: { type: String },
 
-    // Temporary plain password (not persisted, used only before save)
+    // Temporary plain password (only used to set passwordHash in hooks)
     password: { type: String, select: false },
   },
   {
@@ -40,17 +43,25 @@ const UserSchema = new Schema(
   }
 );
 
-// ---------- Indexes ----------
+/* ------------------------------ Indexes ------------------------------ */
+
 // Helpful org-scoped filters
 UserSchema.index({ orgId: 1, role: 1 });
 UserSchema.index({ orgId: 1, active: 1 });
-// If you prefer org-scoped uniqueness for email/username, replace the single-field uniques
-// above with these compound uniques (requires dropping existing unique indexes first):
-// UserSchema.index({ orgId: 1, email: 1 }, { unique: true, sparse: true, partialFilterExpression: { email: { $type: 'string' } } });
-// UserSchema.index({ orgId: 1, username: 1 }, { unique: true, sparse: true, partialFilterExpression: { username: { $type: 'string' } } });
 
-// ---------- Virtuals ----------
-// Virtual to populate all groups a user belongs to (source of truth: Group.memberUserIds)
+// If you prefer org-scoped uniqueness for email/username, use these INSTEAD of the single-field uniques above.
+// ⚠️ You must first drop existing unique indexes on email/username if they already exist.
+// UserSchema.index(
+//   { orgId: 1, email: 1 },
+//   { unique: true, sparse: true, partialFilterExpression: { email: { $type: 'string' } } }
+// );
+// UserSchema.index(
+//   { orgId: 1, username: 1 },
+//   { unique: true, sparse: true, partialFilterExpression: { username: { $type: 'string' } } }
+// );
+
+/* ------------------------------ Virtuals ------------------------------ */
+// All groups this user belongs to (source of truth: Group.memberUserIds)
 UserSchema.virtual('groups', {
   ref: 'Group',
   localField: '_id',
@@ -59,13 +70,13 @@ UserSchema.virtual('groups', {
   options: { match: { isDeleted: false } },
 });
 
-// ---------- Hooks ----------
-// Pre-save hook: hash plain `password` if provided
+/* ------------------------------- Hooks -------------------------------- */
+// Hash plain `password` on save
 UserSchema.pre('save', async function (next) {
   try {
     if (this.isModified('password') && this.password) {
       this.passwordHash = await bcrypt.hash(this.password, 12);
-      this.password = undefined; // don’t store the plain password
+      this.password = undefined; // don't persist the plain field
     }
     next();
   } catch (err) {
@@ -73,11 +84,10 @@ UserSchema.pre('save', async function (next) {
   }
 });
 
-// Handle password updates via findOneAndUpdate as well
+// Support password changes via findOneAndUpdate
 UserSchema.pre('findOneAndUpdate', async function (next) {
   try {
     const update = this.getUpdate() || {};
-    // Support both direct and $set usage
     const pwd = update.password ?? (update.$set && update.$set.password);
     if (pwd) {
       const hash = await bcrypt.hash(pwd, 12);
@@ -90,7 +100,7 @@ UserSchema.pre('findOneAndUpdate', async function (next) {
       }
       this.setUpdate(update);
     }
-    // Keep updatedAt fresh on updates
+    // Timestamps option usually handles updatedAt, but keep a belt-and-braces update:
     if (update.$set) {
       update.$set.updatedAt = new Date();
     } else {
@@ -102,15 +112,17 @@ UserSchema.pre('findOneAndUpdate', async function (next) {
   }
 });
 
-// ---------- Methods ----------
+/* ------------------------------ Methods ------------------------------- */
 UserSchema.methods.verifyPassword = async function (candidate) {
   if (!this.passwordHash) return false;
   return bcrypt.compare(candidate, this.passwordHash);
 };
 
-// Convenience: treat admin-like roles uniformly in guards/middleware
 UserSchema.methods.isAdminLike = function () {
   return this.role === 'admin' || this.role === 'superadmin';
 };
 
-module.exports = mongoose.model('User', UserSchema);
+/* ------------------------------- Export -------------------------------- */
+// Guard to prevent OverwriteModelError across hot reloads / mixed imports
+const modelName = 'User';
+module.exports = mongoose.models[modelName] || mongoose.model(modelName, UserSchema);

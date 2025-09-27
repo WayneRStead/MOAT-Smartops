@@ -2,6 +2,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 
+/** --- id helper (handles _id or id) --- **/
+const docIdOf = (d) => (d && (d._id || d.id)) ? String(d._id || d.id) : "";
+
 /** --- filetype helpers --- **/
 function guessMimeFromName(name = "") {
   const ext = String(name).toLowerCase().split(".").pop();
@@ -106,17 +109,19 @@ export default function Vault() {
   }
 
   async function doUpload(id) {
-    const f = pendingFile[id];
+    const safeId = String(id || "");
+    if (!safeId) return setErr("Missing document id for upload.");
+    const f = pendingFile[safeId];
     if (!f) return;
     setErr(""); setInfo("");
     try {
       const fd = new FormData();
       fd.append("file", f);
-      const { data: updated } = await api.post(`/documents/${id}/upload`, fd, {
+      const { data: updated } = await api.post(`/documents/${encodeURIComponent(safeId)}/upload`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setDocs((prev) => prev.map((d) => (d._id === id ? updated : d)));
-      setPendingFile((p) => ({ ...p, [id]: null }));
+      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
+      setPendingFile((p) => ({ ...p, [safeId]: null }));
       setInfo("Version uploaded.");
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
@@ -124,28 +129,48 @@ export default function Vault() {
   }
 
   async function doRename(id, title) {
+    const safeId = String(id || "");
+    if (!safeId) return;
     try {
-      const { data: updated } = await api.put(`/documents/${id}`, { title });
-      setDocs((prev) => prev.map((d) => (d._id === id ? updated : d)));
+      const { data: updated } = await api.put(`/documents/${encodeURIComponent(safeId)}`, { title });
+      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
 
   async function doDelete(id) {
+    const safeId = String(id || "");
+    if (!safeId) return;
     if (!confirm("Delete this document?")) return;
     try {
-      await api.delete(`/documents/${id}`);
+      await api.delete(`/documents/${encodeURIComponent(safeId)}`);
       await load();
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
 
-  async function doRestore(id) {
+  // Hard delete (admin/superadmin only; backend enforces)
+  async function doHardDelete(id) {
+    const safeId = String(id || "");
+    if (!safeId) return;
+    if (!confirm("Permanently delete this document and all its versions? This cannot be undone.")) return;
     try {
-      const { data: restored } = await api.patch(`/documents/${id}/restore`);
-      setDocs((prev) => prev.map((d) => (d._id === id ? restored : d)));
+      await api.delete(`/documents/${encodeURIComponent(safeId)}`, { params: { hard: 1 } });
+      await load();
+      setInfo("Document permanently deleted.");
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
+  }
+
+  async function doRestore(id) {
+    const safeId = String(id || "");
+    if (!safeId) return;
+    try {
+      const { data: restored } = await api.patch(`/documents/${encodeURIComponent(safeId)}/restore`);
+      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? restored : d)));
       setInfo("Document restored.");
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
@@ -153,8 +178,6 @@ export default function Vault() {
   }
 
   // ---------- Preview handling ----------
-  // We will fetch the latest file URL as a Blob and render it inline.
-  // This avoids forced download headers because we're using an object URL.
   async function openPreview(doc) {
     setPreviewDoc(doc);
     setPvErr("");
@@ -176,12 +199,10 @@ export default function Vault() {
 
     setPvLoading(true);
     try {
-      // Use fetch to get a blob, then build an object URL we control.
       const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
       const ct = res.headers.get("content-type") || declaredMime || "application/octet-stream";
       if (isTextLike(ct)) {
-        // Show text content in the modal
         const text = await res.text();
         setPvText(text);
       } else {
@@ -293,87 +314,110 @@ export default function Vault() {
           </tr>
         </thead>
         <tbody>
-          {docs.map((d) => (
-            <tr key={d._id} className={d.deletedAt ? "opacity-60" : ""}>
-              <td>
-                <input
-                  value={d.title || ""}
-                  onChange={(e) =>
-                    setDocs((prev) =>
-                      prev.map((x) => (x._id === d._id ? { ...x, title: e.target.value } : x))
-                    )
-                  }
-                  onBlur={(e) => {
-                    const newTitle = (e.target.value || "").trim();
-                    if (newTitle && newTitle !== d.title) doRename(d._id, newTitle);
-                  }}
-                />
-                {d.deletedAt && (
-                  <div style={{ fontSize: 12, color: "#a00" }}>
-                    deleted {new Date(d.deletedAt).toLocaleString()}
-                  </div>
-                )}
-              </td>
-              <td>
-                {d.latest ? (
-                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                    <button
-                      className="btn"
-                      type="button"
-                      onClick={() => openPreview(d)}
-                      title="Preview in app"
-                    >
-                      Preview
-                    </button>
-                    <a
-                      className="btn"
-                      href={d.latest.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Download file"
-                    >
-                      Download
-                    </a>
-                    <span className="muted" title={d.latest.filename} style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {d.latest.filename}
-                    </span>
-                  </div>
-                ) : (
-                  <span className="muted">—</span>
-                )}
-              </td>
-              <td><TagOrDash value={d.tags} /></td>
-              <td><Dash value={d.folder} /></td>
-              <td>{new Date(d.updatedAt || d.createdAt).toLocaleString()}</td>
-              <td>
-                {!d.deletedAt ? (
-                  <div className="row" style={{ gap: 6 }}>
-                    <input
-                      type="file"
-                      onChange={(e) =>
-                        setPendingFile((p) => ({
-                          ...p,
-                          [d._id]: e.target.files?.[0] || null,
-                        }))
-                      }
-                    />
-                    <button onClick={() => doUpload(d._id)} disabled={!pendingFile[d._id]}>
-                      Upload
-                    </button>
-                  </div>
-                ) : (
-                  <span className="muted">—</span>
-                )}
-              </td>
-              <td>
-                {!d.deletedAt ? (
-                  <button onClick={() => doDelete(d._id)}>Delete</button>
-                ) : (
-                  <button onClick={() => doRestore(d._id)}>Restore</button>
-                )}
-              </td>
-            </tr>
-          ))}
+          {docs.map((d, idx) => {
+            const id = docIdOf(d);
+            return (
+              <tr key={id || `row-${idx}`} className={d.deletedAt ? "opacity-60" : ""}>
+                <td>
+                  <input
+                    value={d.title || ""}
+                    onChange={(e) =>
+                      setDocs((prev) =>
+                        prev.map((x) => (docIdOf(x) === id ? { ...x, title: e.target.value } : x))
+                      )
+                    }
+                    onBlur={(e) => {
+                      const newTitle = (e.target.value || "").trim();
+                      if (id && newTitle && newTitle !== d.title) doRename(id, newTitle);
+                    }}
+                  />
+                  {d.deletedAt && (
+                    <div style={{ fontSize: 12, color: "#a00" }}>
+                      deleted {new Date(d.deletedAt).toLocaleString()}
+                    </div>
+                  )}
+                </td>
+                <td>
+                  {d.latest ? (
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <button
+                        className="btn"
+                        type="button"
+                        onClick={() => openPreview(d)}
+                        title="Preview in app"
+                      >
+                        Preview
+                      </button>
+                      <a
+                        className="btn"
+                        href={d.latest.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Download file"
+                      >
+                        Download
+                      </a>
+                      <span
+                        className="muted"
+                        title={d.latest.filename}
+                        style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      >
+                        {d.latest.filename}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td><TagOrDash value={d.tags} /></td>
+                <td><Dash value={d.folder} /></td>
+                <td>{new Date(d.updatedAt || d.createdAt).toLocaleString()}</td>
+                <td>
+                  {!d.deletedAt ? (
+                    <div className="row" style={{ gap: 6 }}>
+                      <input
+                        type="file"
+                        onChange={(e) =>
+                          setPendingFile((p) => ({
+                            ...p,
+                            [id]: e.target.files?.[0] || null,
+                          }))
+                        }
+                      />
+                      <button onClick={() => doUpload(id)} disabled={!pendingFile[id]}>
+                        Upload
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td>
+                  {!d.deletedAt ? (
+                    <button onClick={() => doDelete(id)}>Delete</button>
+                  ) : (
+                    <div className="row" style={{ gap: 8 }}>
+                      <button onClick={() => doRestore(id)}>Restore</button>
+                      <button
+                        className="btn"
+                        onClick={() => doHardDelete(id)}
+                        title="Admin only"
+                        style={{
+                          background: "#b91c1c",
+                          color: "white",
+                          border: "1px solid #7f1d1d",
+                          padding: "6px 10px",
+                          borderRadius: 4
+                        }}
+                      >
+                        Hard delete
+                      </button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
           {!docs.length && (
             <tr>
               <td colSpan={7} style={{ opacity: 0.7 }}>

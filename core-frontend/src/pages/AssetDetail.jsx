@@ -17,6 +17,22 @@ function fromLocalDateTimeInput(s) {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/* ---------- Minimal uploader display helpers ---------- */
+function shortId(x) {
+  const s = String(x || "");
+  return s.length > 12 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
+}
+function UploaderName({ att }) {
+  const by =
+    att?.uploadedByLabel ||
+    att?.uploadedByDisplay ||
+    att?.uploadedBy?.name ||
+    att?.uploadedBy?.email ||
+    (typeof att?.uploadedBy === "string" ? shortId(att.uploadedBy) : "");
+  return <span>{by || "Unknown"}</span>;
+}
+/* ------------------------------------------------------ */
+
 export default function AssetDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -81,7 +97,6 @@ export default function AssetDetail() {
         setSchedEnabled(false);
       }
     } catch (e) {
-      // Hide section if endpoint is missing (404) or disabled
       if (e?.response?.status === 404) {
         setSchedEnabled(false);
       } else {
@@ -184,7 +199,6 @@ export default function AssetDetail() {
         note: (mForm.note || "").trim(),
       };
       const { data } = await api.post(`/assets/${id}/maintenance`, payload);
-      // assume API returns the updated asset
       setAsset(data);
       setMForm({ date: "", note: "" });
       setInfo("Maintenance entry added.");
@@ -198,7 +212,6 @@ export default function AssetDetail() {
     setErr(""); setInfo("");
     try {
       const { data } = await api.delete(`/assets/${id}/maintenance/${mid}`);
-      // assume API returns updated asset; if not, reload
       if (data && data._id) {
         setAsset(data);
       } else {
@@ -311,7 +324,6 @@ export default function AssetDetail() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Asset</h1>
         <div className="flex gap-2">
-          {/* quick QR/bar controls so you can tweak before print */}
           <select className="border p-2 text-sm" value={labelSize} onChange={e=>setLabelSize(e.target.value)}>
             <option value="small">label: small</option>
             <option value="medium">label: medium</option>
@@ -465,17 +477,33 @@ export default function AssetDetail() {
                 <a href={att.url} target="_blank" rel="noopener noreferrer" className="block" title={att.filename || "Open attachment"}>
                   <div className="bg-gray-100" style={{ width: "100%", height: 110, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
                     {isImage ? (
-                      <img src={att.url} alt={att.filename || "attachment"} style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                           onError={(e) => { e.currentTarget.style.display = "none"; const p = e.currentTarget.parentElement; if (p) p.innerHTML = "<div style='font-size:40px'>📄</div>"; }} />
-                    ) : (<div className="text-4xl" aria-hidden>📄</div>)}
+                      <img
+                        src={att.url}
+                        alt={att.filename || "attachment"}
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                          const p = e.currentTarget.parentElement;
+                          if (p) p.innerHTML = "<div style='font-size:40px'>📄</div>";
+                        }}
+                      />
+                    ) : (
+                      <div className="text-4xl" aria-hidden>📄</div>
+                    )}
                   </div>
                 </a>
                 <div className="p-2 text-xs">
                   <div className="font-medium truncate" title={att.filename}>{att.filename || "Attachment"}</div>
                   {uploadedAt && <div className="text-gray-600">{uploadedAt}</div>}
-                  {att.uploadedBy && <div className="text-gray-600">by {att.uploadedBy}</div>}
+                  <div className="text-gray-600">
+                    by <UploaderName att={att} />
+                  </div>
                   {att.note && (
-                    <div className="text-gray-700 mt-1" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }} title={att.note}>
+                    <div
+                      className="text-gray-700 mt-1"
+                      style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                      title={att.note}
+                    >
                       {att.note}
                     </div>
                   )}

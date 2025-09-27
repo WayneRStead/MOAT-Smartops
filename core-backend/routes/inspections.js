@@ -5,7 +5,7 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// --- robust model loader ---
+/* ------------------------ robust model loader ------------------------ */
 function loadInspectionModel() {
   try {
     return mongoose.model('Inspection');
@@ -17,15 +17,27 @@ function loadInspectionModel() {
     throw new Error('Inspection model not loaded. Check models/Inspection.js exports.');
   }
 }
-
 const Inspection = loadInspectionModel();
 
+/* ------------------------ org scoping helpers ------------------------ */
+const HAS_ORG = !!(Inspection?.schema?.path && Inspection.schema.path('orgId'));
+
+function orgScope(orgId) {
+  if (!HAS_ORG) return {};
+  if (!orgId) return {};
+  const s = String(orgId);
+  // tolerate non-ObjectId org keys by skipping scope (e.g. "root")
+  if (!mongoose.Types.ObjectId.isValid(s)) return {};
+  return { orgId: new mongoose.Types.ObjectId(s) };
+}
+
+/* --------------------------- misc constants -------------------------- */
 const ALLOWED_STATUS = ['open', 'in-progress', 'closed'];
 const LINK_TYPES = ['project','inspection','asset','vehicle','user','task','clocking'];
 
 function normalizeStatus(s) {
   if (!s) return undefined;
-  if (s === 'planned') return 'open'; // tolerate legacy callers
+  if (s === 'planned') return 'open'; // legacy alias
   return ALLOWED_STATUS.includes(s) ? s : undefined;
 }
 
@@ -36,7 +48,7 @@ function sendError(res, e) {
   return res.status(500).json({ error: 'Server error', detail: e?.message || String(e) });
 }
 
-// Minimal role guard (keeps working even if your middleware exports differ)
+/* ------------------------------ role gate ---------------------------- */
 function allowRoles(...roles) {
   return (req, res, next) => {
     const user = req.user || {};
@@ -48,11 +60,37 @@ function allowRoles(...roles) {
   };
 }
 
-// ---------- LIST ----------
+/* ==================================================================== */
+/*  IMPORTANT: Guard special paths FIRST so they never hit /:id         */
+/* ==================================================================== */
+
+/**
+ * These are placeholders for the new inspections feature:
+ * - /inspections/forms
+ * - /inspections/submissions
+ * Return 404 intentionally so the frontend can fall back to its local
+ * mock adapter (your axios layer already does this on 404/500).
+ * Replace these stubs with real implementations when ready.
+ */
+router.all('/forms*', requireAuth, (_req, res) => {
+  return res.status(404).json({ error: 'Forms endpoint not implemented on server' });
+});
+
+router.all('/submissions*', requireAuth, (_req, res) => {
+  return res.status(404).json({ error: 'Submissions endpoint not implemented on server' });
+});
+
+/* ==================================================================== */
+/*  Classic Inspections CRUD (guard :id as ObjectId)                    */
+/*  NOTE: This router is mounted at /inspections                        */
+/* ==================================================================== */
+
+/* ------------------------------- LIST -------------------------------- */
+// GET /inspections
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { projectId, status, q, limit } = req.query;
-    const find = {};
+    const find = { ...orgScope(req.user?.orgId) };
 
     if (projectId) {
       if (!mongoose.Types.ObjectId.isValid(projectId)) {
@@ -80,10 +118,13 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- READ ----------
-router.get('/:id', requireAuth, async (req, res) => {
+/* ------------------------------- READ -------------------------------- */
+// GET /inspections/:id
+router.get('/:id([a-fA-F0-9]{24})', requireAuth, async (req, res) => {
   try {
-    const doc = await Inspection.findById(req.params.id).lean();
+    const doc = await Inspection.findOne(
+      { _id: req.params.id, ...orgScope(req.user?.orgId) }
+    ).lean();
     if (!doc) return res.status(404).json({ error: 'Not found' });
     res.json(doc);
   } catch (e) {
@@ -92,7 +133,8 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- CREATE ----------
+/* ------------------------------ CREATE ------------------------------- */
+// POST /inspections
 router.post('/', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (req, res) => {
   try {
     const { title, projectId, status, notes } = req.body || {};
@@ -101,6 +143,7 @@ router.post('/', requireAuth, allowRoles('manager', 'admin', 'superadmin'), asyn
     const doc = new Inspection({
       title: String(title).trim(),
       notes: notes || '',
+      ...(HAS_ORG ? orgScope(req.user?.orgId) : {}),
     });
 
     if (projectId) {
@@ -124,14 +167,14 @@ router.post('/', requireAuth, allowRoles('manager', 'admin', 'superadmin'), asyn
   }
 });
 
-// ---------- UPDATE ----------
-router.put('/:id', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (req, res) => {
+/* ------------------------------ UPDATE ------------------------------- */
+// PUT /inspections/:id
+router.put('/:id([a-fA-F0-9]{24})', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (req, res) => {
   try {
-    const doc = await Inspection.findById(req.params.id);
+    const doc = await Inspection.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
     const { title, status, projectId, notes } = req.body || {};
-
     if (title != null) doc.title = String(title).trim();
 
     if (status != null) {
@@ -157,10 +200,11 @@ router.put('/:id', requireAuth, allowRoles('manager', 'admin', 'superadmin'), as
   }
 });
 
-// ---------- DELETE (hard) ----------
-router.delete('/:id', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (req, res) => {
+/* ------------------------------ DELETE ------------------------------- */
+// DELETE /inspections/:id
+router.delete('/:id([a-fA-F0-9]{24})', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (req, res) => {
   try {
-    const del = await Inspection.findByIdAndDelete(req.params.id);
+    const del = await Inspection.findOneAndDelete({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!del) return res.status(404).json({ error: 'Not found' });
     res.sendStatus(204);
   } catch (e) {
@@ -169,8 +213,9 @@ router.delete('/:id', requireAuth, allowRoles('manager', 'admin', 'superadmin'),
   }
 });
 
-// ---------- LINKS: add ----------
-router.post('/:id/links', requireAuth, allowRoles('manager','admin','superadmin'), async (req, res) => {
+/* ------------------------------- LINKS ------------------------------- */
+// POST /inspections/:id/links
+router.post('/:id([a-fA-F0-9]{24})/links', requireAuth, allowRoles('manager','admin','superadmin'), async (req, res) => {
   try {
     const { type, refId } = req.body || {};
     if (!type || !LINK_TYPES.includes(type)) {
@@ -180,18 +225,16 @@ router.post('/:id/links', requireAuth, allowRoles('manager','admin','superadmin'
       return res.status(400).json({ error: 'invalid refId' });
     }
 
-    const doc = await Inspection.findById(req.params.id);
+    const doc = await Inspection.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
     if (!Array.isArray(doc.links)) doc.links = [];
-
     const refStr = String(refId);
     const exists = doc.links.some(l => l.type === type && String(l.refId) === refStr);
     if (!exists) {
       doc.links.push({ type, refId: new mongoose.Types.ObjectId(refStr) });
       await doc.save();
     }
-
     res.json(doc.links);
   } catch (e) {
     console.error('POST /inspections/:id/links error:', e);
@@ -199,8 +242,8 @@ router.post('/:id/links', requireAuth, allowRoles('manager','admin','superadmin'
   }
 });
 
-// ---------- LINKS: remove ----------
-router.delete('/:id/links', requireAuth, allowRoles('manager','admin','superadmin'), async (req, res) => {
+// DELETE /inspections/:id/links
+router.delete('/:id([a-fA-F0-9]{24})/links', requireAuth, allowRoles('manager','admin','superadmin'), async (req, res) => {
   try {
     const { type, refId } = req.body || {};
     if (!type || !LINK_TYPES.includes(type)) {
@@ -210,13 +253,12 @@ router.delete('/:id/links', requireAuth, allowRoles('manager','admin','superadmi
       return res.status(400).json({ error: 'invalid refId' });
     }
 
-    const doc = await Inspection.findById(req.params.id);
+    const doc = await Inspection.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
     const refStr = String(refId);
     doc.links = (doc.links || []).filter(l => !(l.type === type && String(l.refId) === refStr));
     await doc.save();
-
     res.json(doc.links || []);
   } catch (e) {
     console.error('DELETE /inspections/:id/links error:', e);
@@ -224,8 +266,9 @@ router.delete('/:id/links', requireAuth, allowRoles('manager','admin','superadmi
   }
 });
 
+/* ------------------------------ RESTORE ------------------------------ */
 // Optional stub (hard delete model)
-router.patch('/:id/restore', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (_req, res) => {
+router.patch('/:id([a-fA-F0-9]{24})/restore', requireAuth, allowRoles('manager', 'admin', 'superadmin'), async (_req, res) => {
   return res.status(400).json({ error: 'restore not supported (hard delete model)' });
 });
 

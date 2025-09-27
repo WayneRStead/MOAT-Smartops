@@ -1,4 +1,4 @@
-// core-backend/routes/tasks.js — visibility-enabled
+// core-backend/routes/tasks.js — visibility-enabled (org-scoped & backward-compatible)
 const express = require("express");
 const mongoose = require("mongoose");
 const path = require("path");
@@ -14,15 +14,11 @@ const router = express.Router();
 /* ------------------------- Helpers ------------------------- */
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
-const toObjectId = (maybeId) => {
-  const s = String(maybeId || "");
-  return isId(s) ? new mongoose.Types.ObjectId(s) : undefined;
-};
+const OID = (v) => (isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
 
 function allowRoles(...roles) {
   return (req, res, next) => {
-    const user = req.user || {};
-    const role = user.role || user.claims?.role;
+    const role = req.user?.role || req.user?.claims?.role;
     if (!roles.length) return next();
     if (!role) return res.sendStatus(401);
     if (!roles.includes(role)) return res.sendStatus(403);
@@ -31,13 +27,54 @@ function allowRoles(...roles) {
 }
 
 const getRole = (req) => (req.user?.role || req.user?.claims?.role || "user");
-const isAdminRole = (role) => ["admin", "superadmin"].includes(String(role));
+const isAdminRole = (role) => ["admin", "superadmin"].includes(String(role).toLowerCase());
 const isAdmin = (req) => isAdminRole(getRole(req));
 
-// Accept our canonical labels; store lowercase
+// enum-ish
 const normalizeStatus = (s) => (s ? String(s).toLowerCase() : undefined);
 
-// recompute minutes based on log
+/* ----------------------- Org helpers ----------------------- */
+
+const wantsObjectId = (model, p) => model?.schema?.path(p)?.instance === "ObjectId";
+function hasPath(model, p) {
+  return !!(model && model.schema && model.schema.path && model.schema.path(p));
+}
+
+/**
+ * IMPORTANT:
+ * - If token orgId is NOT a valid ObjectId (e.g. "root"), do NOT scope by org at all.
+ */
+function orgScope(model, req) {
+  if (!hasPath(model, "orgId")) return {};
+  const raw = req.user?.orgId;
+  if (!raw) return {};
+  const s = String(raw);
+  if (!mongoose.Types.ObjectId.isValid(s)) return {};
+  if (wantsObjectId(model, "orgId")) return { orgId: new mongoose.Types.ObjectId(s) };
+  return { orgId: s };
+}
+
+function ensureOrgOnDoc(model, doc, req) {
+  if (!hasPath(model, "orgId")) return true;
+  const present = doc.orgId != null && String(doc.orgId) !== "";
+  if (present) return true;
+
+  const raw = req.user?.orgId;
+  if (!raw) return false;
+  const s = String(raw);
+
+  if (wantsObjectId(model, "orgId")) {
+    if (!mongoose.Types.ObjectId.isValid(s)) return false;
+    doc.orgId = new mongoose.Types.ObjectId(s);
+  } else {
+    if (!mongoose.Types.ObjectId.isValid(s)) return false;
+    doc.orgId = s;
+  }
+  return true;
+}
+
+/* ----------------------- Time helpers ---------------------- */
+
 function computeActualMinutes(log = []) {
   const entries = [...(log || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
   let totalMs = 0;
@@ -54,7 +91,6 @@ function computeActualMinutes(log = []) {
   return Math.round(totalMs / 60000);
 }
 
-// Ensure every log row has an _id (migration helper for older docs)
 function ensureLogIds(taskDoc) {
   let patched = false;
   for (const e of taskDoc.actualDurationLog || []) {
@@ -66,7 +102,6 @@ function ensureLogIds(taskDoc) {
   return patched;
 }
 
-// Reflect status from the last chronological action (photo does not affect)
 function setStatusFromLog(taskDoc) {
   const log = [...(taskDoc.actualDurationLog || [])]
     .sort((a, b) => new Date(a.at) - new Date(b.at))
@@ -78,16 +113,20 @@ function setStatusFromLog(taskDoc) {
   if (last.action === "complete") taskDoc.status = "completed";
 }
 
-// Shape response
+/* ---------------- normalize output ---------------- */
 function normalizeOut(t) {
   const obj = t.toObject ? t.toObject() : { ...t };
   return {
     ...obj,
-    dueAt: obj.dueDate || null,
-    assignee: Array.isArray(obj.assignedTo) ? obj.assignedTo[0] : undefined,
+    // prefer dueAt if present, else legacy dueDate
+    dueAt: obj.dueAt ?? obj.dueDate ?? null,
+    // expose startDate, and alias startAt for older clients
+    startDate: obj.startDate ?? null,
+    startAt: obj.startDate ?? null,
+    // legacy mirrors (kept)
+    assignee: Array.isArray(obj.assignedTo) ? obj.assignedTo[0] : obj.assignee,
     actualDurationMinutes: computeActualMinutes(obj.actualDurationLog || []),
     isBlocked: (obj.dependentTaskIds?.length || 0) > 0,
-    // expose visibility for frontend
     visibilityMode: obj.visibilityMode || "org",
     assignedUserIds: Array.isArray(obj.assignedUserIds) ? obj.assignedUserIds : [],
     assignedGroupIds: Array.isArray(obj.assignedGroupIds) ? obj.assignedGroupIds : [],
@@ -95,44 +134,54 @@ function normalizeOut(t) {
 }
 
 /* ---------------- Visibility helpers ---------------- */
-// Expect req.myGroupIds from middleware/access ([] if missing).
+
+function normalizeMode(mode) {
+  const v = String(mode || "org").toLowerCase();
+  if (v === "restricted") return "assignees+groups";
+  return v;
+}
 function buildVisibilityFilter(req) {
-  if (isAdmin(req)) return {}; // admins can see everything including admins-only
+  if (isAdmin(req)) return {};
 
-  const myId = toObjectId(
-    req.user?._id || req.user?.id || req.user?.sub || req.user?.userId
-  );
-  const myGroups = (req.myGroupIds || []).map((g) => toObjectId(g)).filter(Boolean);
+  const me =
+    OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+  const myGroups = (req.myGroupIds || []).map((g) => OID(g)).filter(Boolean);
 
-  // Default to org-visible when unset
   return {
     $or: [
       { visibilityMode: { $exists: false } },
       { visibilityMode: "org" },
-      {
-        visibilityMode: "restricted",
-        $or: [
-          { assignedUserIds: myId },
-          { assignedGroupIds: { $in: myGroups } },
-        ],
-      },
-      // users should NOT see admins-only
+
+      { visibilityMode: "assignees",        assignedUserIds: me },
+      { visibilityMode: "assignees+groups", assignedUserIds: me },
+
+      { visibilityMode: "assignees",        assignedTo: me }, // legacy
+      { visibilityMode: "assignees+groups", assignedTo: me },
+
+      ...(myGroups.length
+        ? [
+            { visibilityMode: "groups",           assignedGroupIds: { $in: myGroups } },
+            { visibilityMode: "assignees+groups", assignedGroupIds: { $in: myGroups } },
+            { visibilityMode: "groups",           groupId: { $in: myGroups } }, // legacy single group
+            { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
+          ]
+        : []),
     ],
   };
 }
 
 async function assertCanSeeTaskOrAdmin(req, taskId) {
   if (isAdmin(req)) return true;
-  const filter = { _id: toObjectId(taskId), ...buildVisibilityFilter(req) };
+  const filter = { _id: OID(taskId), ...orgScope(Task, req), ...buildVisibilityFilter(req) };
   const exists = await Task.exists(filter);
   return !!exists;
 }
 
 function andFilters(...parts) {
-  const filters = parts.filter(Boolean);
-  if (!filters.length) return {};
-  if (filters.length === 1) return filters[0];
-  return { $and: filters };
+  const xs = parts.filter(Boolean);
+  if (!xs.length) return {};
+  if (xs.length === 1) return xs[0];
+  return { $and: xs };
 }
 
 function coerceObjectIdArray(arr) {
@@ -143,8 +192,8 @@ function coerceObjectIdArray(arr) {
 function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
   const out = {};
   if (reqBody.visibilityMode != null) {
-    const v = String(reqBody.visibilityMode).toLowerCase();
-    if (["org", "restricted", "admins"].includes(v)) {
+    let v = normalizeMode(reqBody.visibilityMode);
+    if (["org", "assignees", "groups", "assignees+groups", "admins"].includes(v)) {
       if (v === "admins" && !roleIsAdmin) {
         throw Object.assign(new Error("Only admins can set admins visibility"), { status: 403 });
       }
@@ -158,12 +207,11 @@ function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
     out.assignedGroupIds = coerceObjectIdArray(reqBody.assignedGroupIds);
   }
 
-  // Legacy fallbacks if new fields are omitted
   if (out.assignedUserIds === undefined && Array.isArray(reqBody.assignedTo)) {
     out.assignedUserIds = coerceObjectIdArray(reqBody.assignedTo);
   }
   if (out.assignedGroupIds === undefined && reqBody.groupId) {
-    const gid = toObjectId(reqBody.groupId);
+    const gid = OID(reqBody.groupId);
     out.assignedGroupIds = gid ? [gid] : [];
   }
 
@@ -172,7 +220,6 @@ function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
 
 /* ---------------- Geofence helpers ---------------- */
 
-// Great-circle distance (meters)
 function haversineMeters(a, b) {
   const toRad = (d) => (d * Math.PI) / 180;
   const R = 6371000;
@@ -184,8 +231,6 @@ function haversineMeters(a, b) {
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
-
-// ray-casting point in polygon; ring = [[lng,lat], ...] closed ring
 function pointInPolygon(point, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -198,13 +243,10 @@ function pointInPolygon(point, ring) {
   }
   return inside;
 }
-
-// Normalize legacy circle + new geoFences into a single list
 function collectTaskFences(taskOrProject) {
   const src = taskOrProject || {};
   const fences = [];
 
-  // Legacy single circle on tasks { lat, lng, radius }
   if (src.locationGeoFence?.lat != null && src.locationGeoFence?.lng != null) {
     fences.push({
       type: "circle",
@@ -212,8 +254,6 @@ function collectTaskFences(taskOrProject) {
       radius: Number(src.locationGeoFence.radius || 50),
     });
   }
-
-  // Multi-fence support (circles and/or polygons)
   if (Array.isArray(src.geoFences)) {
     for (const f of src.geoFences) {
       if (f?.type === "circle" && f.center && f.radius != null) {
@@ -227,10 +267,8 @@ function collectTaskFences(taskOrProject) {
       }
     }
   }
-
   return fences;
 }
-
 function isInsideAnyFence(point, fences) {
   for (const f of fences) {
     if (f.type === "circle") {
@@ -242,14 +280,12 @@ function isInsideAnyFence(point, fences) {
   }
   return false;
 }
-
-// Extract first .kml text from a KMZ (zip) buffer
 function extractKMLFromKMZ(buffer) {
   try {
     const zip = new AdmZip(buffer);
     const entries = zip.getEntries();
-    const preferred = entries.find(e => /(^|\/)doc\.kml$/i.test(e.entryName));
-    const kmlEntry = preferred || entries.find(e => /\.kml$/i.test(e.entryName));
+    thePreferred = entries.find(e => /(^|\/)doc\.kml$/i.test(e.entryName));
+    const kmlEntry = thePreferred || entries.find(e => /\.kml$/i.test(e.entryName));
     if (!kmlEntry) return null;
     return kmlEntry.getData().toString("utf8");
   } catch {
@@ -257,48 +293,63 @@ function extractKMLFromKMZ(buffer) {
   }
 }
 
-/* ---------------- Project overlap (warning-only) helpers ---------------- */
-
-async function getProjectPolygonsForTask(taskLike) {
-  try {
-    if (!taskLike?.projectId) return [];
-    const proj = await Project.findById(taskLike.projectId).lean();
-    if (!proj) return [];
-    const arr = Array.isArray(proj.geoFences) ? proj.geoFences : (proj.geoFence ? [proj.geoFence] : []);
-    return arr
-      .filter(f => f?.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3)
-      .map(f => ({ type: "polygon", ring: f.polygon }));
-  } catch { return []; }
-}
-
-function fenceOverlapsAnyProjectPolygon(fence, projectPolys = []) {
-  if (!projectPolys.length) return true; // no project fence → OK
-  if (fence.type === "circle") {
-    const pt = { lat: Number(fence.center.lat), lng: Number(fence.center.lng) };
-    return projectPolys.some(poly => pointInPolygon(pt, poly.ring));
-  }
-  const verts = fence.ring || fence.polygon || [];
-  if (Array.isArray(verts) && verts.length >= 3) {
-    // Heuristic: if any vertex is inside any project polygon, consider overlapping
-    return verts.some(([lng, lat]) =>
-      projectPolys.some(poly => pointInPolygon({ lat, lng }, poly.ring))
-    );
-  }
-  return true;
-}
-
-function gatherIncomingFencesFromBody(body) {
+/* --------- parse uploads (geojson/kml/kmz) ---------- */
+const memUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024 },
+});
+function parseGeoJSONToFences(buf, defaultRadius = 50) {
   const fences = [];
-  if (body.locationGeoFence?.lat != null && body.locationGeoFence?.lng != null) {
-    fences.push({ type: "circle", center: { lat: Number(body.locationGeoFence.lat), lng: Number(body.locationGeoFence.lng) }, radius: Number(body.locationGeoFence.radius || 50) });
-  }
-  if (Array.isArray(body.geoFences)) {
-    for (const f of body.geoFences) {
-      if (f?.type === "circle" && f.center && f.radius != null) {
-        fences.push({ type: "circle", center: { lat: Number(f.center.lat), lng: Number(f.center.lng) }, radius: Number(f.radius) });
-      } else if (f?.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3) {
-        fences.push({ type: "polygon", polygon: f.polygon });
+  let gj;
+  try { gj = JSON.parse(buf.toString("utf8")); } catch { return fences; }
+  function addGeom(geom) {
+    if (!geom || !geom.type) return;
+    const t = geom.type;
+    if (t === "Polygon" && Array.isArray(geom.coordinates) && geom.coordinates.length) {
+      const outer = geom.coordinates[0];
+      if (Array.isArray(outer) && outer.length >= 3) {
+        fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
       }
+    } else if (t === "MultiPolygon" && Array.isArray(geom.coordinates)) {
+      for (const poly of geom.coordinates) {
+        const outer = Array.isArray(poly) && poly.length ? poly[0] : null;
+        if (outer && outer.length >= 3) {
+          fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
+        }
+      }
+    } else if (t === "Point" && Array.isArray(geom.coordinates) && geom.coordinates.length >= 2) {
+      const [lng, lat] = geom.coordinates;
+      fences.push({ type: "circle", center: { lat: Number(lat), lng: Number(lng) }, radius: Number(defaultRadius) });
+    }
+  }
+  if (gj.type === "FeatureCollection" && Array.isArray(gj.features)) {
+    gj.features.forEach(f => addGeom(f?.geometry));
+  } else if (gj.type === "Feature") {
+    addGeom(gj.geometry);
+  } else {
+    addGeom(gj);
+  }
+  return fences;
+}
+function parseKMLToFences(text, defaultRadius = 50) {
+  const fences = [];
+  const lower = text.toLowerCase();
+  const polyRegex = /<polygon[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/polygon>/gi;
+  let m;
+  while ((m = polyRegex.exec(lower)) !== null) {
+    const pairs = m[1]
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").slice(0, 2).map(Number))
+      .filter((a) => a.length === 2 && Number.isFinite(a[0]) && Number.isFinite(a[1]));
+    if (pairs.length >= 3) fences.push({ type: "polygon", polygon: pairs.map(([lng, lat]) => [lng, lat]) });
+  }
+  const ptRegex = /<point[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/point>/gi;
+  while ((m = ptRegex.exec(lower)) !== null) {
+    const nums = m[1].trim().split(/,\s*/).slice(0, 2).map(Number);
+    if (nums.length === 2 && Number.isFinite(nums[0]) && Number.isFinite(nums[1])) {
+      const [lng, lat] = nums;
+      fences.push({ type: "circle", center: { lat, lng }, radius: Number(defaultRadius) });
     }
   }
   return fences;
@@ -309,10 +360,10 @@ router.get("/", requireAuth, async (req, res) => {
   try {
     const {
       q, status, userId, groupId, projectId, tag, priority,
-      dueFrom, dueTo, limit
+      dueFrom, dueTo, startFrom, startTo, sort, limit
     } = req.query;
 
-    const base = {};
+    const base = { ...orgScope(Task, req) };
 
     if (q) {
       base.$or = [
@@ -324,12 +375,20 @@ router.get("/", requireAuth, async (req, res) => {
     if (status) base.status = normalizeStatus(status);
     if (priority) base.priority = String(priority).toLowerCase();
 
-    if (userId && isId(userId)) base.assignedTo = new mongoose.Types.ObjectId(userId);
-    if (groupId && isId(groupId)) base.groupId = new mongoose.Types.ObjectId(groupId);
-    if (projectId && isId(projectId)) base.projectId = new mongoose.Types.ObjectId(projectId);
+    if (userId && isId(userId)) {
+      const uid = new mongoose.Types.ObjectId(userId);
+      base.$and = (base.$and || []).concat([{ $or: [{ assignedUserIds: uid }, { assignedTo: uid }] }]);
+    }
 
+    if (groupId && isId(groupId)) {
+      const gid = new mongoose.Types.ObjectId(groupId);
+      base.$and = (base.$and || []).concat([{ $or: [{ assignedGroupIds: gid }, { groupId: gid }] }]);
+    }
+
+    if (projectId && isId(projectId)) base.projectId = new mongoose.Types.ObjectId(projectId);
     if (tag) base.tags = tag;
 
+    // due range (legacy)
     if (dueFrom || dueTo) {
       base.dueDate = {
         ...(dueFrom ? { $gte: new Date(dueFrom) } : {}),
@@ -337,12 +396,26 @@ router.get("/", requireAuth, async (req, res) => {
       };
     }
 
+    // start range (NEW)
+    if (startFrom || startTo) {
+      base.startDate = {
+        ...(startFrom ? { $gte: new Date(startFrom) } : {}),
+        ...(startTo   ? { $lte: new Date(startTo) }   : {}),
+      };
+    }
+
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
 
     const filter = andFilters(base, buildVisibilityFilter(req));
 
+    // Sorting: default by due; timeline mode sorts by start then due
+    const useTimelineSort = sort === "timeline" || !!startFrom || !!startTo;
+    const sortSpec = useTimelineSort
+      ? { startDate: 1, dueAt: 1, dueDate: 1, updatedAt: -1 }
+      : { dueDate: 1, updatedAt: -1 };
+
     const rows = await Task.find(filter)
-      .sort({ dueDate: 1, updatedAt: -1 })
+      .sort(sortSpec)
       .limit(lim)
       .lean();
 
@@ -356,10 +429,10 @@ router.get("/", requireAuth, async (req, res) => {
 /* ---------------------------- READ ---------------------------- */
 router.get("/:id", requireAuth, async (req, res) => {
   try {
-    const _id = toObjectId(req.params.id);
+    const _id = OID(req.params.id);
     if (!_id) return res.status(400).json({ error: "bad id" });
 
-    const t = await Task.findOne(andFilters({ _id }, buildVisibilityFilter(req)))
+    const t = await Task.findOne(andFilters({ _id, ...orgScope(Task, req) }, buildVisibilityFilter(req)))
       .populate("assignedTo", "name email")
       .populate("actualDurationLog.userId", "name email");
 
@@ -389,9 +462,15 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
         assignedTo = body.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
       }
     } else if (Object.prototype.hasOwnProperty.call(body, "assignee")) {
-      const oid = toObjectId(body.assignee);
+      const oid = OID(body.assignee);
       assignedTo = oid ? [oid] : [];
     }
+
+    // NEW: start date support (accept startDate or startAt)
+    const startDate =
+      body.startDate ? new Date(body.startDate)
+      : body.startAt   ? new Date(body.startAt)
+      : undefined;
 
     const dueDate =
       body.dueDate ? new Date(body.dueDate)
@@ -413,9 +492,12 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       status: normalizeStatus(body.status) || "pending",
       tags: Array.isArray(body.tags) ? body.tags : [],
 
-      assignedTo,
-      projectId: toObjectId(body.projectId),
-      groupId:   toObjectId(body.groupId),
+      assignedTo, // legacy
+      projectId: OID(body.projectId),
+      groupId:   OID(body.groupId),   // legacy single group
+
+      // timeline fields
+      startDate,
       dueDate,
 
       dependentTaskIds: Array.isArray(body.dependentTaskIds)
@@ -426,31 +508,21 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       enforceLocationCheck: !!body.enforceLocationCheck,
       locationGeoFence: body.locationGeoFence || undefined, // legacy circle
 
-      // Multi-fence support (circles/polygons)
       ...(Array.isArray(body.geoFences) ? { geoFences: body.geoFences } : {}),
 
       estimatedDuration: body.estimatedDuration != null ? Number(body.estimatedDuration) : undefined,
 
-      // Visibility
+      // New visibility fields
       ...visibility,
     });
 
+    // Attach org — refuse to write non-ObjectId tokens like "root"
+    if (!ensureOrgOnDoc(Task, doc, req)) {
+      return res.status(400).json({ error: "orgId missing/invalid on token" });
+    }
+
     await doc.save();
-
-    // Warnings if task fences appear outside project boundary
-    let warnings = [];
-    try {
-      const projPolys = await getProjectPolygonsForTask(doc);
-      const fences = collectTaskFences(doc);
-      if (projPolys.length && fences.length) {
-        const allOverlap = fences.every(f => fenceOverlapsAnyProjectPolygon(f, projPolys));
-        if (!allOverlap) warnings.push("One or more task geofences do not overlap the project boundary.");
-      }
-    } catch { /* ignore */ }
-
-    const out = normalizeOut(doc);
-    if (warnings.length) out.warnings = warnings;
-    res.status(201).json(out);
+    res.status(201).json(normalizeOut(doc));
   } catch (e) {
     console.error("POST /tasks error:", e);
     res.status(500).json({ error: "Server error" });
@@ -460,7 +532,7 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
 /* --------------------------- UPDATE --------------------------- */
 router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   try {
-    const t = await Task.findById(req.params.id);
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     const b = req.body || {};
@@ -470,6 +542,15 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
     if (b.status != null) t.status = normalizeStatus(b.status);
 
+    // NEW: startDate / startAt
+    if (Object.prototype.hasOwnProperty.call(b, "startDate") ||
+        Object.prototype.hasOwnProperty.call(b, "startAt")) {
+      t.startDate = b.startDate ? new Date(b.startDate)
+                 : b.startAt   ? new Date(b.startAt)
+                 : undefined;
+    }
+
+    // dueAt / dueDate (kept)
     if (Object.prototype.hasOwnProperty.call(b, "dueDate") ||
         Object.prototype.hasOwnProperty.call(b, "dueAt")) {
       t.dueDate = b.dueDate ? new Date(b.dueDate)
@@ -477,8 +558,8 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
                : undefined;
     }
 
-    if (b.projectId !== undefined) t.projectId = toObjectId(b.projectId);
-    if (b.groupId   !== undefined) t.groupId   = toObjectId(b.groupId);
+    if (b.projectId !== undefined) t.projectId = OID(b.projectId);
+    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId); // legacy
 
     if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
       if (Array.isArray(b.assignedTo)) {
@@ -487,7 +568,7 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
         t.assignedTo = [];
       }
     } else if (Object.prototype.hasOwnProperty.call(b, "assignee")) {
-      const oid = toObjectId(b.assignee);
+      const oid = OID(b.assignee);
       t.assignedTo = oid ? [oid] : [];
     }
 
@@ -501,14 +582,13 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     if (b.enforceLocationCheck !== undefined) t.enforceLocationCheck = !!b.enforceLocationCheck;
     if (b.locationGeoFence !== undefined) t.locationGeoFence = b.locationGeoFence || undefined;
 
-    // accept geoFences on update
     if (b.geoFences !== undefined) t.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
 
     if (b.estimatedDuration !== undefined) {
       t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
-    // Visibility updates
+    // Visibility updates (new fields)
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
@@ -518,22 +598,13 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
     }
 
+    // Ensure org for legacy tasks
+    if (!ensureOrgOnDoc(Task, t, req)) {
+      return res.status(400).json({ error: "orgId missing/invalid on token" });
+    }
+
     await t.save();
-
-    // Warnings if task fences appear outside project boundary
-    let warnings = [];
-    try {
-      const projPolys = await getProjectPolygonsForTask(t);
-      const fences = collectTaskFences(t);
-      if (projPolys.length && fences.length) {
-        const allOverlap = fences.every(f => fenceOverlapsAnyProjectPolygon(f, projPolys));
-        if (!allOverlap) warnings.push("One or more task geofences do not overlap the project boundary.");
-      }
-    } catch { /* ignore */ }
-
-    const out = normalizeOut(t);
-    if (warnings.length) out.warnings = warnings;
-    res.json(out);
+    res.json(normalizeOut(t));
   } catch (e) {
     console.error("PUT /tasks/:id error:", e);
     res.status(500).json({ error: "Server error" });
@@ -548,10 +619,9 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "bad action" });
     }
 
-    const t = await Task.findById(req.params.id);
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
-    // Must be visible to act (unless admin override via role)
     const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
     if (!canSee && !adminOverride) return res.status(403).json({ error: "Forbidden" });
 
@@ -576,17 +646,13 @@ router.post("/:id/action", requireAuth, async (req, res) => {
           return res.status(400).json({ error: "location required" });
         }
 
-        // Gather all fences (legacy circle + new arrays)
         let fences = collectTaskFences(t);
-
-        // Inherit from project if none set on task
         if (!fences.length && t.projectId) {
           const proj = await Project.findById(t.projectId).lean();
           if (proj?.geoFences?.length || (proj?.locationGeoFence && proj.locationGeoFence.lat != null)) {
             fences = collectTaskFences(proj);
           }
         }
-
         if (fences.length) {
           const point = { lat: nLat, lng: nLng };
           const ok = isInsideAnyFence(point, fences);
@@ -596,27 +662,19 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     }
 
     const actorId =
-      toObjectId(req.user?._id) ||
-      toObjectId(req.user?.id) ||
-      toObjectId(req.user?.sub) ||
-      toObjectId(req.user?.userId);
-
-    const actorName  = req.user?.name || req.user?.fullName || undefined;
-    const actorEmail = req.user?.email || undefined;
-    const actorSub   = req.user?.sub || req.user?.id || undefined;
+      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
     t.actualDurationLog.push({
       action,
       at: new Date(),
       userId: actorId,
-      actorName,
-      actorEmail,
-      actorSub,
+      actorName: req.user?.name,
+      actorEmail: req.user?.email,
+      actorSub: req.user?.sub || req.user?.id,
     });
 
     ensureLogIds(t);
     setStatusFromLog(t);
-
     await t.save();
 
     const fresh = await Task.findById(t._id)
@@ -644,11 +702,11 @@ router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin
       return res.status(400).json({ error: "bad action" });
     }
 
-    const t = await Task.findById(req.params.id);
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     const editorId =
-      toObjectId(req.user?._id) || toObjectId(req.user?.id) || toObjectId(req.user?.sub) || toObjectId(req.user?.userId);
+      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
     t.actualDurationLog.push({
       action,
@@ -684,7 +742,7 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
 
     const { action, at, note } = req.body || {};
 
-    const t = await Task.findById(id);
+    const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     ensureLogIds(t);
@@ -703,7 +761,7 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
 
     row.editedAt = new Date();
     row.editedBy =
-      toObjectId(req.user?._id) || toObjectId(req.user?.id) || toObjectId(req.user?.sub) || toObjectId(req.user?.userId);
+      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
     setStatusFromLog(t);
     await t.save();
@@ -726,7 +784,7 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const t = await Task.findById(id);
+    const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     ensureLogIds(t);
@@ -761,92 +819,91 @@ fs.mkdirSync(taskDir, { recursive: true });
 function cleanFilename(name) {
   return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
 }
-const storage = multer.diskStorage({
+const disk = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, taskDir),
   filename: (_req, file, cb) => cb(null, `${Date.now()}_${cleanFilename(file.originalname)}`),
 });
-const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
+const uploadDisk = multer({ storage: disk, limits: { fileSize: 20 * 1024 * 1024 } });
 
-/* ---------------------- GEOFENCE UPLOAD ---------------------- */
-// In-memory upload for parsing KML/KMZ/GeoJSON
-const memUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 12 * 1024 * 1024 }, // plenty for shapes
+router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
+
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "file required" });
+    const mime = file.mimetype || "";
+    if (!mime.startsWith("image/")) {
+      return res.status(400).json({ error: "only image uploads are allowed" });
+    }
+
+    const relUrl = `/files/tasks/${path.basename(file.path)}`;
+    const note = String(req.body?.note || "");
+
+    const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+
+    t.attachments = t.attachments || [];
+    t.attachments.push({
+      filename: file.originalname,
+      url: relUrl,
+      mime,
+      size: file.size,
+      uploadedBy: req.user?.name || req.user?.email || String(req.user?._id || ""),
+      uploadedAt: new Date(),
+      note,
+    });
+
+    t.actualDurationLog.push({
+      action: "photo",
+      at: new Date(),
+      userId,
+      note,
+      actorName: req.user?.name,
+      actorEmail: req.user?.email,
+      actorSub: req.user?.sub || req.user?.id,
+    });
+
+    ensureLogIds(t);
+    await t.save();
+
+    const fresh = await Task.findById(t._id)
+      .populate("actualDurationLog.userId", "name email")
+      .lean();
+
+    res.json(normalizeOut(fresh));
+  } catch (e) {
+    console.error("POST /tasks/:id/attachments error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-// GeoJSON → fences
-function parseGeoJSONToFences(buf, defaultRadius = 50) {
-  const fences = [];
-  let gj;
-  try { gj = JSON.parse(buf.toString("utf8")); } catch { return fences; }
+router.delete("/:id/attachments/:attId", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
 
-  function addGeom(geom) {
-    if (!geom || !geom.type) return;
-    const t = geom.type;
-    if (t === "Polygon" && Array.isArray(geom.coordinates) && geom.coordinates.length) {
-      const outer = geom.coordinates[0]; // [[lng,lat],[...]]
-      if (Array.isArray(outer) && outer.length >= 3) {
-        fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
-      }
-    } else if (t === "MultiPolygon" && Array.isArray(geom.coordinates)) {
-      for (const poly of geom.coordinates) {
-        const outer = Array.isArray(poly) && poly.length ? poly[0] : null;
-        if (outer && outer.length >= 3) {
-          fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
-        }
-      }
-    } else if (t === "Point" && Array.isArray(geom.coordinates) && geom.coordinates.length >= 2) {
-      const [lng, lat] = geom.coordinates;
-      fences.push({ type: "circle", center: { lat: Number(lat), lng: Number(lng) }, radius: Number(defaultRadius) });
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+    const before = (t.attachments || []).length;
+    t.attachments = (t.attachments || []).filter((a) => String(a._id) !== String(req.params.attId));
+    if (t.attachments.length === before) {
+      return res.status(404).json({ error: "attachment not found" });
     }
+    await t.save();
+
+    const fresh = await Task.findById(t._id).lean();
+    res.json(normalizeOut(fresh));
+  } catch (e) {
+    console.error("DELETE /tasks/:id/attachments/:attId error:", e);
+    res.status(500).json({ error: "Server error" });
   }
+});
 
-  if (gj.type === "FeatureCollection" && Array.isArray(gj.features)) {
-    gj.features.forEach(f => addGeom(f?.geometry));
-  } else if (gj.type === "Feature") {
-    addGeom(gj.geometry);
-  } else {
-    addGeom(gj);
-  }
-
-  return fences;
-}
-
-// Very lightweight KML parser for <Polygon><coordinates> and <Point><coordinates>
-function parseKMLToFences(text, defaultRadius = 50) {
-  const fences = [];
-  const lower = text.toLowerCase();
-
-  // Polygons
-  const polyRegex = /<polygon[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/polygon>/gi;
-  let m;
-  while ((m = polyRegex.exec(lower)) !== null) {
-    const coordsRaw = m[1];
-    const pairs = coordsRaw
-      .trim()
-      .split(/\s+/)
-      .map((p) => p.split(",").slice(0, 2).map(Number))
-      .filter((a) => a.length === 2 && Number.isFinite(a[0]) && Number.isFinite(a[1]));
-    if (pairs.length >= 3) {
-      // KML is lon,lat — keep as [lng,lat]
-      fences.push({ type: "polygon", polygon: pairs.map(([lng, lat]) => [lng, lat]) });
-    }
-  }
-
-  // Points (buffer them to circles)
-  const ptRegex = /<point[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/point>/gi;
-  while ((m = ptRegex.exec(lower)) !== null) {
-    const nums = m[1].trim().split(/,\s*/).slice(0, 2).map(Number);
-    if (nums.length === 2 && Number.isFinite(nums[0]) && Number.isFinite(nums[1])) {
-      const [lng, lat] = nums;
-      fences.push({ type: "circle", center: { lat, lng }, radius: Number(defaultRadius) });
-    }
-  }
-
-  return fences;
-}
-
-// Upload & parse GeoJSON/KML/KMZ → store as geoFences
+/* --------------------------- GEOFENCES --------------------------- */
 router.post(
   "/:id/geofences/upload",
   requireAuth,
@@ -854,7 +911,7 @@ router.post(
   memUpload.single("file"),
   async (req, res) => {
     try {
-      const t = await Task.findById(req.params.id);
+      const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
       if (!t) return res.status(404).json({ error: "Not found" });
 
       const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
@@ -862,7 +919,7 @@ router.post(
 
       if (!req.file) return res.status(400).json({ error: "file required" });
 
-      const radius = Number(req.query.radius || 50); // meters for points
+      const radius = Number(req.query.radius || 50);
       const ext = (req.file.originalname.split(".").pop() || "").toLowerCase();
       const mime = (req.file.mimetype || "").toLowerCase();
 
@@ -879,18 +936,12 @@ router.post(
         return res.status(400).json({ error: "unsupported file type (use .geojson, .kml or .kmz)" });
       }
 
-      if (!fences.length) {
-        return res.status(400).json({ error: "no usable shapes found" });
-      }
+      if (!fences.length) return res.status(400).json({ error: "no usable shapes found" });
 
-      // Append to existing geoFences
       t.geoFences = Array.isArray(t.geoFences) ? t.geoFences : [];
       for (const f of fences) {
-        if (f.type === "polygon") {
-          t.geoFences.push({ type: "polygon", polygon: f.polygon });
-        } else if (f.type === "circle") {
-          t.geoFences.push({ type: "circle", center: f.center, radius: f.radius });
-        }
+        if (f.type === "polygon") t.geoFences.push({ type: "polygon", polygon: f.polygon });
+        else if (f.type === "circle") t.geoFences.push({ type: "circle", center: f.center, radius: f.radius });
       }
 
       await t.save();
@@ -903,100 +954,76 @@ router.post(
   }
 );
 
-// Replace all fences
-router.put(
-  "/:id/geofences",
-  requireAuth,
-  allowRoles("manager", "admin", "superadmin"),
-  async (req, res) => {
-    try {
-      const t = await Task.findById(req.params.id);
-      if (!t) return res.status(404).json({ error: "Not found" });
-      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.put("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-      const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
-      t.geoFences = arr;
-      await t.save();
-      res.json(normalizeOut(await Task.findById(t._id).lean()));
-    } catch (e) {
-      console.error("PUT /tasks/:id/geofences error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
+    t.geoFences = arr;
+    await t.save();
+    res.json(normalizeOut(await Task.findById(t._id).lean()));
+  } catch (e) {
+       console.error("PUT /tasks/:id/geofences error:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
-// Append fences
-router.patch(
-  "/:id/geofences",
-  requireAuth,
-  allowRoles("manager", "admin", "superadmin"),
-  async (req, res) => {
-    try {
-      const t = await Task.findById(req.params.id);
-      if (!t) return res.status(404).json({ error: "Not found" });
-      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.patch("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-      const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
-      t.geoFences = Array.isArray(t.geoFences) ? t.geoFences.concat(arr) : arr;
-      await t.save();
-      res.json(normalizeOut(await Task.findById(t._id).lean()));
-    } catch (e) {
-      console.error("PATCH /tasks/:id/geofences error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
+    t.geoFences = Array.isArray(t.geoFences) ? t.geoFences.concat(arr) : arr;
+    await t.save();
+    res.json(normalizeOut(await Task.findById(t._id).lean()));
+  } catch (e) {
+    console.error("PATCH /tasks/:id/geofences error:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
-// Clear all fences
-router.delete(
-  "/:id/geofences",
-  requireAuth,
-  allowRoles("manager", "admin", "superadmin"),
-  async (req, res) => {
-    try {
-      const t = await Task.findById(req.params.id);
-      if (!t) return res.status(404).json({ error: "Not found" });
-      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.delete("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-      t.geoFences = [];
-      await t.save();
-      res.json(normalizeOut(await Task.findById(t._id).lean()));
-    } catch (e) {
-      console.error("DELETE /tasks/:id/geofences error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    t.geoFences = [];
+    await t.save();
+    res.json(normalizeOut(await Task.findById(t._id).lean()));
+  } catch (e) {
+    console.error("DELETE /tasks/:id/geofences error:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
-// Read fences only
-router.get(
-  "/:id/geofences",
-  requireAuth,
-  async (req, res) => {
-    try {
-      const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.get("/:id/geofences", requireAuth, async (req, res) => {
+  try {
+    const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-      const t = await Task.findById(req.params.id).lean();
-      if (!t) return res.status(404).json({ error: "Not found" });
-      res.json({ geoFences: Array.isArray(t.geoFences) ? t.geoFences : [] });
-    } catch (e) {
-      console.error("GET /tasks/:id/geofences error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) }).lean();
+    if (!t) return res.status(404).json({ error: "Not found" });
+    res.json({ geoFences: Array.isArray(t.geoFences) ? t.geoFences : [] });
+  } catch (e) {
+    console.error("GET /tasks/:id/geofences error:", e);
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
-// Effective (task-or-project) fences for preview/inheritance
 router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
   try {
     const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const t = await Task.findById(req.params.id).lean();
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) }).lean();
     if (!t) return res.status(404).json({ error: "Not found" });
 
     let fences = collectTaskFences(t);
@@ -1006,18 +1033,12 @@ router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
       const proj = await Project.findById(t.projectId).lean();
       if (proj) {
         const pf = collectTaskFences(proj);
-        if (pf.length) {
-          fences = pf;
-          source = "project";
-        } else {
-          source = "none";
-        }
+        if (pf.length) { fences = pf; source = "project"; } else { source = "none"; }
       } else {
         source = "none";
       }
     }
 
-    // convert internal 'ring' to storage shape for polygons
     const out = fences.map(f => (f.type === "polygon" && f.ring)
       ? { type: "polygon", polygon: f.ring }
       : f);
@@ -1029,107 +1050,13 @@ router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
   }
 });
 
-/* ---------------- Upload photo → attachments + photo log ---------------- */
-router.post(
-  "/:id/attachments",
-  requireAuth,
-  upload.single("file"),
-  async (req, res) => {
-    try {
-      const t = await Task.findById(req.params.id);
-      if (!t) return res.status(404).json({ error: "Not found" });
-
-      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-      const file = req.file;
-      if (!file) return res.status(400).json({ error: "file required" });
-      const mime = file.mimetype || "";
-      if (!mime.startsWith("image/")) {
-        return res.status(400).json({ error: "only image uploads are allowed" });
-      }
-
-      const relUrl = `/files/tasks/${path.basename(file.path)}`;
-      const note = String(req.body?.note || "");
-
-      const userId =
-        toObjectId(req.user?._id) || toObjectId(req.user?.id) || toObjectId(req.user?.sub) || toObjectId(req.user?.userId);
-      const uploadedBy = req.user?.name || req.user?.email || undefined;
-
-      t.attachments = t.attachments || [];
-      t.attachments.push({
-        filename: file.originalname,
-        url: relUrl,
-        mime,
-        size: file.size,
-        uploadedBy,
-        uploadedAt: new Date(),
-        note,
-      });
-
-      t.actualDurationLog.push({
-        action: "photo",
-        at: new Date(),
-        userId,
-        note,
-        actorName: req.user?.name,
-        actorEmail: req.user?.email,
-        actorSub: req.user?.sub || req.user?.id,
-      });
-
-      ensureLogIds(t);
-      await t.save();
-
-      const fresh = await Task.findById(t._id)
-        .populate("actualDurationLog.userId", "name email")
-        .lean();
-
-      res.json(normalizeOut(fresh));
-    } catch (e) {
-      console.error("POST /tasks/:id/attachments error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
-// Delete attachment
-router.delete(
-  "/:id/attachments/:attId",
-  requireAuth,
-  allowRoles("manager", "admin", "superadmin"),
-  async (req, res) => {
-    try {
-      const t = await Task.findById(req.params.id);
-      if (!t) return res.status(404).json({ error: "Not found" });
-
-      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-      if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-      const before = (t.attachments || []).length;
-
-      t.attachments = (t.attachments || []).filter((a) => String(a._id) !== String(req.params.attId));
-
-      if (t.attachments.length === before) {
-        return res.status(404).json({ error: "attachment not found" });
-      }
-      await t.save();
-
-      const fresh = await Task.findById(t._id).lean();
-      res.json(normalizeOut(fresh));
-    } catch (e) {
-      console.error("DELETE /tasks/:id/attachments/:attId error:", e);
-      res.status(500).json({ error: "Server error" });
-    }
-  }
-);
-
 /* --------------------------- DELETE --------------------------- */
 router.delete("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   try {
     const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const del = await Task.findByIdAndDelete(req.params.id);
+    const del = await Task.findOneAndDelete({ _id: req.params.id, ...orgScope(Task, req) });
     if (!del) return res.status(404).json({ error: "Not found" });
     res.sendStatus(204);
   } catch (e) {
@@ -1137,5 +1064,9 @@ router.delete("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"),
     res.status(500).json({ error: "Server error" });
   }
 });
+
+/* --------------------------- DEBUG --------------------------- */
+router.get("/_ping", (req, res) => res.json({ ok: true }));
+router.post("/_ping", (req, res) => res.json({ ok: true }));
 
 module.exports = router;

@@ -18,17 +18,26 @@ const toObjectId = (maybeId) => {
 };
 
 function allowRoles(...roles) {
+  const allow = roles.map((r) => String(r).toLowerCase());
   return (req, res, next) => {
     const user = req.user || {};
-    const role = user.role || user.claims?.role;
-    if (!roles.length) return next();
+    const role = String(user.role || user.claims?.role || "").toLowerCase();
+    if (!allow.length) return next();
     if (!role) return res.sendStatus(401);
-    if (!roles.includes(role)) return res.sendStatus(403);
+    if (!allow.includes(role)) return res.sendStatus(403);
     next();
   };
 }
 
-const normalizeStatus = (s) => (s ? String(s).toLowerCase() : undefined);
+const normalizeStatus = (s) => (s ? String(s).toLowerCase().trim() : undefined);
+
+// If orgId is a valid ObjectId, scope by it; otherwise (e.g. "root") skip scoping
+function orgScope(orgId) {
+  if (!orgId) return {};
+  const s = String(orgId);
+  if (!mongoose.Types.ObjectId.isValid(s)) return {};
+  return { orgId: new mongoose.Types.ObjectId(s) };
+}
 
 /* ---- geofence shape helpers (same shapes used by tasks) ---- */
 
@@ -164,7 +173,9 @@ function parseKMLToProjectFences(text) {
 router.get("/", requireAuth, async (req, res) => {
   try {
     const { q, status, tag, limit } = req.query;
-    const find = {};
+    const find = {
+      ...orgScope(req.user?.orgId),
+    };
 
     if (q) {
       find.$or = [
@@ -189,9 +200,9 @@ router.get("/", requireAuth, async (req, res) => {
 // GET /api/projects/:id
 router.get("/:id", requireAuth, async (req, res) => {
   try {
-    const p = await Project.findById(req.params.id).lean();
-    if (!p) return res.status(404).json({ error: "Not found" });
-    res.json(p);
+    const doc = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) }).lean();
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(doc);
   } catch (e) {
     console.error("GET /projects/:id error:", e);
     res.status(500).json({ error: "Server error" });
@@ -205,7 +216,17 @@ router.post("/", requireAuth, allowRoles("manager","admin","superadmin"), async 
     const b = req.body || {};
     if (!b.name) return res.status(400).json({ error: "name required" });
 
+    if (b.startDate && b.endDate && new Date(b.endDate) < new Date(b.startDate)) {
+      return res.status(400).json({ error: "endDate cannot be before startDate" });
+    }
+
+    const orgIdRaw = req.user?.orgId;
+    const orgId = mongoose.Types.ObjectId.isValid(String(orgIdRaw))
+      ? new mongoose.Types.ObjectId(String(orgIdRaw))
+      : orgIdRaw;
+
     const doc = new Project({
+      orgId,
       name: String(b.name).trim(),
       description: b.description || "",
       status: normalizeStatus(b.status) || "active",
@@ -229,7 +250,7 @@ router.post("/", requireAuth, allowRoles("manager","admin","superadmin"), async 
 // PUT /api/projects/:id
 router.put("/:id", requireAuth, allowRoles("manager","admin","superadmin"), async (req, res) => {
   try {
-    const p = await Project.findById(req.params.id);
+    const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!p) return res.status(404).json({ error: "Not found" });
 
     const b = req.body || {};
@@ -242,6 +263,10 @@ router.put("/:id", requireAuth, allowRoles("manager","admin","superadmin"), asyn
       p.startDate = b.startDate ? new Date(b.startDate) : undefined;
     if (Object.prototype.hasOwnProperty.call(b, "endDate"))
       p.endDate = b.endDate ? new Date(b.endDate) : undefined;
+
+    if (p.startDate && p.endDate && p.endDate < p.startDate) {
+      return res.status(400).json({ error: "endDate cannot be before startDate" });
+    }
 
     if (b.clientId !== undefined) p.clientId = toObjectId(b.clientId);
     if (b.groupId  !== undefined) p.groupId  = toObjectId(b.groupId);
@@ -260,7 +285,7 @@ router.put("/:id", requireAuth, allowRoles("manager","admin","superadmin"), asyn
 // DELETE /api/projects/:id
 router.delete("/:id", requireAuth, allowRoles("manager","admin","superadmin"), async (req, res) => {
   try {
-    const del = await Project.findByIdAndDelete(req.params.id);
+    const del = await Project.findOneAndDelete({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!del) return res.status(404).json({ error: "Not found" });
     res.sendStatus(204);
   } catch (e) {
@@ -269,9 +294,11 @@ router.delete("/:id", requireAuth, allowRoles("manager","admin","superadmin"), a
   }
 });
 
-/* ----------------------- PROJECT GEOFENCES CRUD ----------------------- */
+/* ----------------------- PROJECT GEOFENCES CRUD -----------------------
+   NOTE: You also mounted a dedicated projects-geofences router earlier.
+   If you want to avoid duplicate handlers, feel free to remove these
+   endpoints from this file and keep the dedicated router only. */
 
-// Upload & parse GeoJSON/KML/KMZ → store as project geoFences (polygons)
 router.post(
   "/:id/geofences/upload",
   requireAuth,
@@ -279,7 +306,7 @@ router.post(
   memUpload.single("file"),
   async (req, res) => {
     try {
-      const p = await Project.findById(req.params.id);
+      const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
       if (!p) return res.status(404).json({ error: "Not found" });
       if (!req.file) return res.status(400).json({ error: "file required" });
 
@@ -320,17 +347,15 @@ router.post(
   }
 );
 
-// Replace all project fences
 router.put(
   "/:id/geofences",
   requireAuth,
   allowRoles("manager","admin","superadmin"),
   async (req, res) => {
     try {
-      const p = await Project.findById(req.params.id);
+      const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
       if (!p) return res.status(404).json({ error: "Not found" });
       const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
-      // store only polygons
       p.geoFences = arr.filter(f => f?.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3);
       await p.save();
       res.json(await Project.findById(p._id).lean());
@@ -341,14 +366,13 @@ router.put(
   }
 );
 
-// Append project fences
 router.patch(
   "/:id/geofences",
   requireAuth,
   allowRoles("manager","admin","superadmin"),
   async (req, res) => {
     try {
-      const p = await Project.findById(req.params.id);
+      const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
       if (!p) return res.status(404).json({ error: "Not found" });
       const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
       const add = arr.filter(f => f?.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3);
@@ -362,14 +386,13 @@ router.patch(
   }
 );
 
-// Clear project fences
 router.delete(
   "/:id/geofences",
   requireAuth,
   allowRoles("manager","admin","superadmin"),
   async (req, res) => {
     try {
-      const p = await Project.findById(req.params.id);
+      const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
       if (!p) return res.status(404).json({ error: "Not found" });
       p.geoFences = [];
       await p.save();
@@ -381,13 +404,12 @@ router.delete(
   }
 );
 
-// Read project fences
 router.get(
   "/:id/geofences",
   requireAuth,
   async (req, res) => {
     try {
-      const p = await Project.findById(req.params.id).lean();
+      const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) }).lean();
       if (!p) return res.status(404).json({ error: "Not found" });
       res.json({ geoFences: Array.isArray(p.geoFences) ? p.geoFences : [] });
     } catch (e) {
@@ -405,12 +427,16 @@ router.get("/:id/tasks", requireAuth, async (req, res) => {
     const pid = req.params.id;
     if (!isId(pid)) return res.status(400).json({ error: "bad id" });
 
-    const find = { projectId: new mongoose.Types.ObjectId(pid) };
+    const find = {
+      projectId: new mongoose.Types.ObjectId(pid),
+      ...orgScope(req.user?.orgId), // 🔒 scope to org
+    };
     if (status) find.status = normalizeStatus(status);
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 1000);
     const rows = await Task.find(find)
-      .sort({ dueDate: 1, updatedAt: -1 })
+      // sort by whichever your schema actually uses:
+      .sort({ dueAt: 1, dueDate: 1, updatedAt: -1 })
       .limit(lim)
       .lean();
 
@@ -425,15 +451,17 @@ router.get("/:id/tasks", requireAuth, async (req, res) => {
 // GET /api/projects/:id/coverage
 router.get("/:id/coverage", requireAuth, async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id).lean();
+    const project = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) }).lean();
     if (!project) return res.status(404).json({ error: "Not found" });
 
     const projectFences = collectProjectFences(project); // [{type:'polygon', ring:[[lng,lat],...]}]
 
-    // Completed tasks in this project (with any fences)
+    // Completed/done tasks in this project (with any fences), scoped to org
+    const doneStates = ["completed", "done", "finished"];
     const tasks = await Task.find({
       projectId: new mongoose.Types.ObjectId(project._id),
-      status: "completed",
+      ...orgScope(req.user?.orgId),
+      status: { $in: doneStates },
     }).lean();
 
     const completedTaskFences = [];

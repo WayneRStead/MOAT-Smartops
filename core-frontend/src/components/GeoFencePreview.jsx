@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 
 export default function GeoFencePreview({
   projectId,
-  taskId,                 // optional: overlay task fences on top of project
+  taskId,
   height = 360,
   className = "",
   reloadKey,
@@ -14,37 +14,46 @@ export default function GeoFencePreview({
   onPickLocation,
 
   // Visuals
-  legend = false,         // tiny legend in the corner
+  legend = false,
+  showLayerToggles = true, // Project toggle shown; Task toggle hidden when taskId is set
   projectStyle = {
-    color: "#1e3a8a",     // blue-800
+    color: "#1e3a8a",
     weight: 2,
     dashArray: null,
-    fillColor: "#60a5fa", // blue-400
+    fillColor: "#60a5fa",
     fillOpacity: 0.08,
   },
   taskStyle = {
-    color: "#b45309",     // amber-700
+    color: "#b40909ff",
     weight: 2,
     dashArray: "7,3",
-    fillColor: "#f59e0b", // amber-500
+    fillColor: "#f50b0bff",
     fillOpacity: 0.12,
   },
 
-  // Extras (supports point / circle / polygon / polyline)
-  fallbackCircle = null,  // {lat,lng,radius} when nothing saved yet
-  taskCircle = null,      // live pin+buffer (e.g. before save)
-  extraFences = [],       // extra markers/polys to render
+  // Extras
+  fallbackCircle = null,
+  taskCircle = null,
+  extraFences = [],
 
-  // Render Point features as dot + buffered circle
+  // Points
   renderPointsAsCircles = true,
-  pointRadiusMeters = 25, // default buffer in meters when feature doesn't override
-  pointPixelRadius = 5,   // visual radius (px) for the dot
+  pointRadiusMeters = 25,
+  pointPixelRadius = 5,
 
-  // NEW: quick hover labels (uses f.meta.label / f.title / f.name / f.label)
+  // Hover tooltips (rich)
   enableHoverLabels = true,
 
-  // Notify parent when fences fetched (to enable downloads, etc.)
-  onLoaded,               // ({ projectFences, taskFences }) => void
+  // Always-on labels
+  labelMode = "hover",          // "hover" | "always"
+  labelMinZoom = null,          // number | null
+  labelClassName = "gf-label",
+
+  // Optional resolvers
+  overlayStyleResolver,
+  hoverMetaResolver,
+
+  onLoaded,
 }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -52,13 +61,121 @@ export default function GeoFencePreview({
   const layerTaskRef = useRef(null);
   const layerExtraRef = useRef(null);
   const layerPickRef = useRef(null);
+  const layerLabelRef = useRef(null);
 
   const [L, setL] = useState(null);
   const [err, setErr] = useState("");
   const [projectFences, setProjectFences] = useState([]);
   const [taskFences, setTaskFences] = useState([]);
 
-  // Soft-load Leaflet
+  // NEW: layer visibility toggles
+  const [showProject, setShowProject] = useState(true);
+  const [showTask, setShowTask] = useState(true);
+  // In a task view, the task layer is always visible (no toggle)
+  const taskVisible = taskId ? true : showTask;
+
+  /* ----------------------------- Small URL helpers ---------------------------- */
+  function apiBaseOrigin() {
+    const base = api?.defaults?.baseURL || "";
+    return base.replace(/\/api\/?$/i, "");
+  }
+  function toAbsoluteUrl(u) {
+    if (!u) return "";
+    const s = String(u);
+    if (/^https?:\/\//i.test(s)) return s;
+    if (s.startsWith("/")) return apiBaseOrigin() + s;
+    return s;
+  }
+
+  /* --------------------------- KML/KMZ/GeoJSON helpers ------------------------ */
+  function parseKMLToRings(kmlText) {
+    try {
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(kmlText, "application/xml");
+      const coordsEls = Array.from(xml.getElementsByTagName("coordinates"));
+      const rings = [];
+      coordsEls.forEach((el) => {
+        const raw = (el.textContent || "").trim();
+        if (!raw) return;
+        const pts = raw
+          .split(/\s+/)
+          .map((pair) => {
+            const [lng, lat] = pair.split(",").slice(0, 2).map(Number);
+            return [lng, lat];
+          })
+          .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
+        if (pts.length >= 3) {
+          const first = pts[0];
+          const last = pts[pts.length - 1];
+          if (first[0] !== last[0] || first[1] !== last[1]) pts.push(first);
+          rings.push(pts);
+        }
+      });
+      return rings;
+    } catch {
+      return [];
+    }
+  }
+
+  async function fetchAndParseKmlLike(url) {
+    try {
+      const abs = toAbsoluteUrl(url);
+      const res = await fetch(abs);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ct = (res.headers.get("Content-Type") || "").toLowerCase();
+
+      if (ct.includes("kmz") || /\.kmz(\?|#|$)/i.test(abs)) {
+        const blob = await res.blob();
+        const { default: JSZip } = await import("jszip");
+        const zip = await JSZip.loadAsync(blob);
+        const kmlEntry =
+          zip.file(/\.kml$/i)[0] ||
+          Object.values(zip.files).find((f) => /\.kml$/i.test(f.name));
+        if (!kmlEntry) return [];
+        const kmlText = await kmlEntry.async("text");
+        const rings = parseKMLToRings(kmlText);
+        return rings.map((r) => ({ type: "polygon", polygon: r }));
+      }
+
+      const kmlText = await res.text();
+      const rings = parseKMLToRings(kmlText);
+      return rings.map((r) => ({ type: "polygon", polygon: r }));
+    } catch {
+      return [];
+    }
+  }
+
+  function geoJSONToFences(geo) {
+    try {
+      if (!geo) return [];
+      const polys =
+        geo.type === "Polygon"
+          ? [geo.coordinates]
+          : geo.type === "MultiPolygon"
+          ? geo.coordinates
+          : null;
+      if (!polys) return [];
+      const out = [];
+      polys.forEach((poly) => {
+        const outer = Array.isArray(poly?.[0]) ? poly[0] : null;
+        if (!outer || outer.length < 3) return;
+        const ring = outer
+          .map(([lng, lat]) => [Number(lng), Number(lat)])
+          .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
+        if (ring.length >= 3) {
+          const first = ring[0];
+          const last = ring[ring.length - 1];
+          if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first);
+          out.push({ type: "polygon", polygon: ring });
+        }
+      });
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  /* -------------------------------- Soft-load Leaflet -------------------------------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -73,19 +190,23 @@ export default function GeoFencePreview({
     return () => { cancelled = true; };
   }, []);
 
-  // Fetch fences (project)
+  /* ------------------------------ Fetch fences (project) ------------------------------ */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!projectId) { setProjectFences([]); return; }
       try {
-        const { data } = await api.get(`/projects/${projectId}/geofences`, {
-          headers: { "cache-control": "no-cache" },
-        });
+        const { data } = await api.get(`/projects/${projectId}/geofences`, { headers: { "cache-control": "no-cache" } });
+
         const list = Array.isArray(data?.geoFences) ? data.geoFences
                    : Array.isArray(data?.fences)    ? data.fences
                    : Array.isArray(data)            ? data : [];
-        if (!cancelled) setProjectFences(list);
+
+        let merged = [...list];
+        if (data?.geoJSON) merged = merged.concat(geoJSONToFences(data.geoJSON));
+        if (data?.kmlRef?.url) merged = merged.concat(await fetchAndParseKmlLike(data.kmlRef.url));
+
+        if (!cancelled) setProjectFences(merged);
       } catch {
         if (!cancelled) setProjectFences([]);
       }
@@ -93,19 +214,23 @@ export default function GeoFencePreview({
     return () => { cancelled = true; };
   }, [projectId, reloadKey]);
 
-  // Fetch fences (task)
+  /* -------------------------------- Fetch fences (task) -------------------------------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!taskId) { setTaskFences([]); return; }
       try {
-        const { data } = await api.get(`/tasks/${taskId}/geofences`, {
-          headers: { "cache-control": "no-cache" },
-        });
+        const { data } = await api.get(`/tasks/${taskId}/geofences`, { headers: { "cache-control": "no-cache" } });
+
         const list = Array.isArray(data?.geoFences) ? data.geoFences
                    : Array.isArray(data?.fences)    ? data.fences
                    : Array.isArray(data)            ? data : [];
-        if (!cancelled) setTaskFences(list);
+
+        let merged = [...list];
+        if (data?.geoJSON) merged = merged.concat(geoJSONToFences(data.geoJSON));
+        if (data?.kmlRef?.url) merged = merged.concat(await fetchAndParseKmlLike(data.kmlRef.url));
+
+        if (!cancelled) setTaskFences(merged);
       } catch {
         if (!cancelled) setTaskFences([]);
       }
@@ -113,15 +238,10 @@ export default function GeoFencePreview({
     return () => { cancelled = true; };
   }, [taskId, reloadKey]);
 
-  // Notify parent whenever we have the latest
-  useEffect(() => {
-    onLoaded?.({ projectFences, taskFences });
-  }, [onLoaded, projectFences, taskFences]);
+  useEffect(() => { onLoaded?.({ projectFences, taskFences }); }, [onLoaded, projectFences, taskFences]);
 
-  // Helpers
+  /* ---------------------------------- Draw helpers ---------------------------------- */
   const isNum = (n) => Number.isFinite(typeof n === "string" ? Number(n) : n);
-
-  // Accepts [lng,lat] array OR {lat,lng} object
   const toLatLngPair = (pt) => {
     if (!pt) return null;
     if (Array.isArray(pt) && pt.length >= 2) {
@@ -133,85 +253,60 @@ export default function GeoFencePreview({
     }
     return null;
   };
-
-  // Normalize polygon to [[lat,lng]...]
   const normalizePolygonLatLng = (polyOrObj) => {
     let poly = polyOrObj;
     if (poly && poly.coordinates) poly = poly.coordinates;
     if (!Array.isArray(poly)) return null;
-    if (Array.isArray(poly[0]) && Array.isArray(poly[0][0]) && Array.isArray(poly[0][0][0])) {
-      poly = poly[0]; // MultiPolygon -> first Polygon
-    }
-    const ring = Array.isArray(poly[0]) && (Array.isArray(poly[0][0]) || typeof poly[0][0] === "object")
-      ? poly[0]
-      : poly;
+    if (Array.isArray(poly[0]) && Array.isArray(poly[0][0]) && Array.isArray(poly[0][0][0])) poly = poly[0]; // Multi->first
+    const ring = Array.isArray(poly[0]) && (Array.isArray(poly[0][0]) || typeof poly[0][0] === "object") ? poly[0] : poly;
     const out = [];
     for (const p of ring) {
-      const pair = toLatLngPair(p);
-      if (pair) out.push(pair);
+      const pair = toLatLngPair(p); if (pair) out.push(pair);
     }
     return out.length >= 3 ? out : null;
   };
-
   const toCircle = (f) => {
-    const pickCenter = () => {
+    const center = (() => {
       if (f?.center) {
-        const pair = toLatLngPair(f.center);
-        if (pair) return { lat: pair[0], lng: pair[1] };
+        const pair = toLatLngPair(f.center); if (pair) return { lat: pair[0], lng: pair[1] };
       }
       if (f?.point) {
-        const pair = toLatLngPair(f.point);
-        if (pair) return { lat: pair[0], lng: pair[1] };
+        const pair = toLatLngPair(f.point); if (pair) return { lat: pair[0], lng: pair[1] };
       }
       if (isNum(f?.lat) && isNum(f?.lng)) return { lat: Number(f.lat), lng: Number(f.lng) };
       return null;
-    };
-    const center = pickCenter();
-    const r = isNum(f?.radius) ? Number(f.radius)
-            : isNum(f?.radiusMeters) ? Number(f.radiusMeters) : null;
-    if ((String(f?.type).toLowerCase() === "circle" || f?.kind === "circle") && center && isNum(r)) {
-      return { lat: center.lat, lng: center.lng, radius: r };
-    }
-    return null;
+    })();
+    const r = isNum(f?.radius) ? Number(f.radius) : isNum(f?.radiusMeters) ? Number(f.radiusMeters) : null;
+    return (String(f?.type).toLowerCase() === "circle" || f?.kind === "circle") && center && isNum(r)
+      ? { lat: center.lat, lng: center.lng, radius: r }
+      : null;
   };
-
   const toPolyline = (f) => {
     const line = f?.line || f?.path || f?.coordinates;
     if (!Array.isArray(line)) return null;
     const latlngs = [];
-    for (const p of line) {
-      const pair = toLatLngPair(p);
-      if (pair) latlngs.push(pair);
-    }
+    for (const p of line) { const pair = toLatLngPair(p); if (pair) latlngs.push(pair); }
     return latlngs.length >= 2 ? latlngs : null;
   };
-
   const toPoint = (f) => {
-    // explicit point
     if (String(f?.type).toLowerCase() === "point") {
-      const pair = toLatLngPair(f.coordinates || f.point);
-      if (pair) return { lat: pair[0], lng: pair[1] };
+      const pair = toLatLngPair(f.coordinates || f.point); if (pair) return { lat: pair[0], lng: pair[1] };
     }
-    // generic lat/lng
     if (isNum(f?.lat) && isNum(f?.lng)) return { lat: Number(f.lat), lng: Number(f.lng) };
-    // GeoJSON Feature { geometry: { type: 'Point', coordinates: [lng,lat] } }
     if (f?.geometry && String(f.geometry.type).toLowerCase() === "point") {
-      const pair = toLatLngPair(f.geometry.coordinates);
-      if (pair) return { lat: pair[0], lng: pair[1] };
+      const pair = toLatLngPair(f.geometry.coordinates); if (pair) return { lat: pair[0], lng: pair[1] };
     }
     return null;
   };
-
   const resolvePointRadiusMeters = (feature) => {
     const cand = feature?.pointRadiusMeters ?? feature?.bufferMeters ?? feature?.radius ?? feature?.radiusMeters;
     const n = Number(cand);
     return Number.isFinite(n) ? n : Number(pointRadiusMeters) || 25;
   };
 
-  // Create map once
+  /* ------------------------------------- Init map ------------------------------------ */
   useEffect(() => {
     if (!L || !containerRef.current || mapRef.current) return;
-
     const map = L.map(containerRef.current, { center: [0, 0], zoom: 2, preferCanvas: true, zoomControl: true });
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -222,6 +317,7 @@ export default function GeoFencePreview({
     layerTaskRef.current    = L.layerGroup().addTo(map);
     layerExtraRef.current   = L.layerGroup().addTo(map);
     layerPickRef.current    = L.layerGroup().addTo(map);
+    layerLabelRef.current   = L.layerGroup().addTo(map);
     mapRef.current = map;
 
     if (allowPicking) {
@@ -230,15 +326,10 @@ export default function GeoFencePreview({
         if (!isNum(lat) || !isNum(lng)) return;
         try {
           const pick = layerPickRef.current; pick.clearLayers();
-          // dot instead of pin
           const dot = L.circleMarker([lat, lng], {
-            radius: pointPixelRadius,
-            color: "#111",
-            weight: 1,
-            fillColor: "#111",
-            fillOpacity: 1,
+            radius: pointPixelRadius, color: "#111", weight: 1, fillColor: "#111", fillOpacity: 1,
           }).addTo(pick);
-          if (enableHoverLabels) dot.bindTooltip("Picked location", { direction: "top", sticky: true, opacity: 0.9 });
+          if (enableHoverLabels) dot.bindTooltip("Picked location", { direction: "top", sticky: true, opacity: 0.95 });
         } catch {}
         onPickLocation?.({ lat, lng });
       });
@@ -247,7 +338,24 @@ export default function GeoFencePreview({
     setTimeout(() => { try { map.invalidateSize(false); } catch {} }, 50);
   }, [L, allowPicking, onPickLocation, pointPixelRadius, enableHoverLabels]);
 
-  // Style normalizer
+  // Add/remove layer groups based on toggles
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const lp = layerProjectRef.current;
+    const lt = layerTaskRef.current;
+
+    if (lp) {
+      if (showProject && !map.hasLayer(lp)) map.addLayer(lp);
+      if (!showProject && map.hasLayer(lp)) map.removeLayer(lp);
+    }
+    if (lt) {
+      if (taskVisible && !map.hasLayer(lt)) map.addLayer(lt);
+      if (!taskVisible && map.hasLayer(lt)) map.removeLayer(lt);
+    }
+  }, [showProject, taskVisible]);
+
+  /* ------------------------------------- Style helpers -------------------------------- */
   function normalizeStyle(s) {
     return {
       color: s?.color ?? "#000",
@@ -257,180 +365,302 @@ export default function GeoFencePreview({
       fillOpacity: Number.isFinite(Number(s?.fillOpacity)) ? Number(s.fillOpacity) : 0.1,
     };
   }
+  function styleFromOverlay(overlay, baseStyle) {
+    const base = normalizeStyle(baseStyle);
+    const fromResolver = overlayStyleResolver ? (overlayStyleResolver(overlay) || {}) : {};
+    const o = overlay?.style || {};
+    const color = fromResolver.color || o.stroke || o.color || overlay?.meta?.color || base.color;
+    const fillColor = fromResolver.fillColor || o.fill || o.fillColor || overlay?.meta?.color || base.fillColor;
+    const weight = Number.isFinite(fromResolver.weight) ? fromResolver.weight
+                : Number.isFinite(o.strokeWidth) ? Number(o.strokeWidth) : base.weight;
+    const dashArray = fromResolver.dashArray ?? o.dashArray ?? base.dashArray;
+    const fillOpacity = Number.isFinite(fromResolver.fillOpacity) ? fromResolver.fillOpacity
+                      : Number.isFinite(o.fillOpacity) ? Number(o.fillOpacity) : base.fillOpacity;
+    return { color, fillColor, weight, dashArray, fillOpacity };
+  }
 
-  // Draw everything
+  /* --------------------------------- Labels & visibility -------------------------------- */
+  const baseTooltip = (f) => f?.meta?.label || f?.title || f?.name || f?.label || null;
+
   useEffect(() => {
-    if (!L || !mapRef.current || !layerProjectRef.current || !layerTaskRef.current || !layerExtraRef.current) return;
-
     const map = mapRef.current;
-    const layerProj = layerProjectRef.current;
-    const layerTask = layerTaskRef.current;
-    const layerExtra = layerExtraRef.current;
+    if (!map) return;
 
-    layerProj.clearLayers();
-    layerTask.clearLayers();
-    layerExtra.clearLayers();
+    const update = () => {
+      const group = layerLabelRef.current;
+      if (!group) return;
 
-    const bounds = L.latLngBounds([]);
-    let drew = false;
-
-    const labelFor = (f) =>
-      f?.meta?.label || f?.title || f?.name || f?.label || null;
-
-    const maybeTooltip = (layer, f) => {
-      if (!enableHoverLabels) return;
-      const lbl = labelFor(f);
-      if (lbl && layer?.bindTooltip) {
-        try { layer.bindTooltip(String(lbl), { direction: "top", sticky: true, opacity: 0.9 }); } catch {}
+      if (labelMode !== "always") {
+        if (map.hasLayer(group)) map.removeLayer(group);
+        return;
+      }
+      if (labelMinZoom != null && Number.isFinite(Number(labelMinZoom))) {
+        const ok = map.getZoom() >= Number(labelMinZoom);
+        if (ok) { if (!map.hasLayer(group)) map.addLayer(group); }
+        else    { if (map.hasLayer(group)) map.removeLayer(group); }
+      } else {
+        if (!map.hasLayer(group)) map.addLayer(group);
       }
     };
 
-    const drawSet = (fences, style, targetLayer) => {
-      const st = normalizeStyle(style);
-      for (const f of fences || []) {
-        const type = String(f?.type || f?.kind || f?.geometry?.type || "").toLowerCase();
+    map.on("zoomend", update);
+    setTimeout(update, 0);
+    return () => { map.off("zoomend", update); };
+  }, [labelMode, labelMinZoom]);
 
-        // polygon
+  /* -------------------------------------- Draw layers ---------------------------------- */
+  useEffect(() => {
+    if (!L || !mapRef.current || !layerProjectRef.current || !layerTaskRef.current || !layerExtraRef.current || !layerLabelRef.current) return;
+
+    const map = mapRef.current;
+    const lp = layerProjectRef.current; const lt = layerTaskRef.current; const lx = layerExtraRef.current;
+    const lbl = layerLabelRef.current;
+    lp.clearLayers(); lt.clearLayers(); lx.clearLayers(); lbl.clearLayers();
+
+    const bounds = L.latLngBounds([]); let drew = false;
+
+    const makeHoverHtml = (overlay) => {
+      const meta = hoverMetaResolver ? hoverMetaResolver(overlay) : null;
+      if (!meta) {
+        const label = baseTooltip(overlay);
+        return label ? `<div>${String(label)}</div>` : null;
+      }
+      const rows = [
+        `<div><strong>${meta.taskName || baseTooltip(overlay) || "Task"}</strong></div>`,
+        meta.assigneeName ? `<div>Assignee: ${meta.assigneeName}</div>` : "",
+        meta.status ? `<div>Status: ${meta.status}</div>` : "",
+        meta.due ? `<div>Due: ${meta.due}</div>` : "",
+      ].filter(Boolean);
+      return rows.length ? rows.join("") : null;
+    };
+
+    const bindHoverTooltip = (layer, overlay) => {
+      if (!enableHoverLabels || !layer?.bindTooltip) return;
+      const html = makeHoverHtml(overlay);
+      if (!html) return;
+      try {
+        layer.bindTooltip(html, {
+          direction: "top",
+          sticky: true,
+          opacity: 0.95,
+          className: "leaflet-tooltip",
+        });
+      } catch {}
+    };
+
+    const addPermanentLabelAt = (latlng, text) => {
+      if (!text || !latlng) return;
+      try {
+        const tip = L.tooltip({
+          permanent: true,
+          direction: "top",
+          opacity: 0.9,
+          className: `leaflet-tooltip ${labelClassName || ""}`,
+          interactive: false,
+          offset: [0, -6],
+        }).setLatLng(latlng).setContent(String(text));
+        lbl.addLayer(tip);
+      } catch {}
+    };
+
+    const drawSet = (fences, baseStyle, targetLayer, perFeature = false, includeInBounds = true) => {
+      for (const f of fences || []) {
+        const st = perFeature ? styleFromOverlay(f, baseStyle) : normalizeStyle(baseStyle);
+        const type = String(f?.type || f?.kind || f?.geometry?.type || "").toLowerCase();
+        const name = baseTooltip(f);
+
         if (type === "polygon" || (f?.polygon || (f?.geometry && f.geometry.type === "Polygon"))) {
           const latlngs = normalizePolygonLatLng(f.polygon || f.geometry || f.coordinates);
           if (latlngs) {
             const poly = L.polygon(latlngs, st).addTo(targetLayer);
-            maybeTooltip(poly, f);
-            const b = poly.getBounds?.(); if (b?.isValid()) bounds.extend(b);
-            drew = true;
-            continue;
+            bindHoverTooltip(poly, f);
+            if (labelMode === "always" && name) {
+              try { addPermanentLabelAt(poly.getBounds().getCenter(), name); } catch {}
+            }
+            const b = poly.getBounds?.(); if (includeInBounds && b?.isValid()) bounds.extend(b);
+            drew = true; continue;
           }
         }
-
-        // circle
         if (type === "circle" || f?.radius || f?.radiusMeters) {
           const c = toCircle(f);
           if (c) {
             const circle = L.circle([c.lat, c.lng], { ...st, radius: c.radius }).addTo(targetLayer);
-            maybeTooltip(circle, f);
-            const b = circle.getBounds?.(); if (b?.isValid()) bounds.extend(b);
-            drew = true;
-            continue;
+            bindHoverTooltip(circle, f);
+            if (labelMode === "always" && name) {
+              try { addPermanentLabelAt(circle.getLatLng(), name); } catch {}
+            }
+            const b = circle.getBounds?.(); if (includeInBounds && b?.isValid()) bounds.extend(b);
+            drew = true; continue;
           }
         }
-
-        // polyline / line
         if (type === "line" || type === "polyline" || Array.isArray(f?.line) || Array.isArray(f?.path)) {
           const latlngs = toPolyline(f);
           if (latlngs) {
             const pl = L.polyline(latlngs, st).addTo(targetLayer);
-            maybeTooltip(pl, f);
-            const b = pl.getBounds?.(); if (b?.isValid()) bounds.extend(b);
-            drew = true;
-            continue;
+            bindHoverTooltip(pl, f);
+            if (labelMode === "always" && name) {
+              try { addPermanentLabelAt(pl.getBounds().getCenter(), name); } catch {}
+            }
+            const b = pl.getBounds?.(); if (includeInBounds && b?.isValid()) bounds.extend(b);
+            drew = true; continue;
           }
         }
-
-        // point => dot + (optional) buffered circle
         const pt = toPoint(f);
         if (pt) {
           const dot = L.circleMarker([pt.lat, pt.lng], {
             radius: pointPixelRadius,
-            color: st.color || "#000",
-            weight: 1,
-            fillColor: st.color || "#000",
-            fillOpacity: 1,
+            color: st.color, weight: 1, fillColor: st.color, fillOpacity: 1,
           }).addTo(targetLayer);
-          maybeTooltip(dot, f);
-
-          let b = dot.getLatLng ? L.latLngBounds([dot.getLatLng()]) : null;
-
-          if (renderPointsAsCircles) {
-            const radius = resolvePointRadiusMeters(f);
-            const circle = L.circle([pt.lat, pt.lng], { ...st, radius }).addTo(targetLayer);
-            maybeTooltip(circle, f);
-            const cb = circle.getBounds?.();
-            if (cb?.isValid()) b = b ? b.extend(cb) : cb;
+          bindHoverTooltip(dot, f);
+          if (labelMode === "always" && name) {
+            try { addPermanentLabelAt(dot.getLatLng(), name); } catch {}
           }
-
-          if (b?.isValid()) bounds.extend(b);
-          drew = true;
-          continue;
+          let b = dot.getLatLng ? L.latLngBounds([dot.getLatLng()]) : null;
+          if (renderPointsAsCircles) {
+            const r = resolvePointRadiusMeters(f);
+            const circle = L.circle([pt.lat, pt.lng], { ...st, radius: r }).addTo(targetLayer);
+            bindHoverTooltip(circle, f);
+            const cb = circle.getBounds?.(); if (cb?.isValid()) b = b ? b.extend(cb) : cb;
+          }
+          if (includeInBounds && b?.isValid()) bounds.extend(b);
+          drew = true; continue;
         }
       }
     };
 
-    // Project below, Task above
-    drawSet(projectFences, projectStyle, layerProj);
-    drawSet(taskFences,    taskStyle,    layerTask);
+    // Base layers (respect visibility)
+    if (showProject) drawSet(projectFences, projectStyle, layerProjectRef.current, false, true);
+    if (taskVisible) drawSet(taskFences,    taskStyle,    layerTaskRef.current,    false, true);
 
-    // Live taskCircle (e.g. pin+buffer not yet saved)
-    if (taskCircle && isNum(taskCircle.lat) && isNum(taskCircle.lng) && isNum(taskCircle.radius)) {
+    // Live circle respects taskVisible now
+    if (taskVisible && taskCircle && isNum(taskCircle.lat) && isNum(taskCircle.lng) && isNum(taskCircle.radius)) {
       const st = normalizeStyle({ ...taskStyle, dashArray: "2,4" });
-      const circle = L.circle([taskCircle.lat, taskCircle.lng], { ...st, radius: Number(taskCircle.radius) }).addTo(layerExtra);
-      if (enableHoverLabels) try { circle.bindTooltip("Task buffer (unsaved)", { direction: "top", sticky: true, opacity: 0.9 }); } catch {}
+      const circle = L.circle([taskCircle.lat, taskCircle.lng], { ...st, radius: Number(taskCircle.radius) }).addTo(layerExtraRef.current);
+      bindHoverTooltip(circle, { meta: { label: "Task buffer (unsaved)" } });
+      if (labelMode === "always") {
+        try { addPermanentLabelAt(circle.getLatLng(), "Task buffer"); } catch {}
+      }
       const b = circle.getBounds?.(); if (b?.isValid()) bounds.extend(b);
       drew = true;
     }
 
-    // fallback when absolutely nothing else
+    // Extra overlays
+    drawSet(extraFences, { color: "#ef4444", fillColor: "#ef4444", weight: 2, fillOpacity: 0.15 }, layerExtraRef.current, true, true);
+
+    // Fallback
     if (!drew && fallbackCircle && isNum(fallbackCircle.lat) && isNum(fallbackCircle.lng) && isNum(fallbackCircle.radius)) {
       const st = normalizeStyle({ ...projectStyle, dashArray: "2,2" });
-      const circle = L.circle([fallbackCircle.lat, fallbackCircle.lng], { ...st, radius: Number(fallbackCircle.radius) }).addTo(layerExtra);
-      if (enableHoverLabels) try { circle.bindTooltip("Fallback area", { direction: "top", sticky: true, opacity: 0.9 }); } catch {}
+      const circle = L.circle([fallbackCircle.lat, fallbackCircle.lng], { ...st, radius: Number(fallbackCircle.radius) }).addTo(layerExtraRef.current);
+      bindHoverTooltip(circle, { meta: { label: "Fallback area" } });
+      if (labelMode === "always") {
+        try { addPermanentLabelAt(circle.getLatLng(), "Fallback area"); } catch {}
+      }
       const b = circle.getBounds?.(); if (b?.isValid()) bounds.extend(b);
       drew = true;
     }
 
-    // extra items (supports polygons, circles, polylines, points)
-    drawSet(extraFences, { ...taskStyle, color: "#ef4444", fillColor: "#ef4444" }, layerExtra);
-
-    // Fit map
     try {
       if (drew && bounds.isValid()) map.fitBounds(bounds.pad(0.15), { animate: false });
       else map.setView([0, 0], 2, { animate: false });
       setTimeout(() => { try { map.invalidateSize(false); } catch {} }, 50);
     } catch {}
 
+    // enforce labelMinZoom immediately
+    (function enforce() {
+      const lbl = layerLabelRef.current;
+      if (!lbl) return;
+      if (labelMode !== "always") {
+        if (map.hasLayer(lbl)) map.removeLayer(lbl);
+        return;
+      }
+      if (labelMinZoom != null && Number.isFinite(Number(labelMinZoom))) {
+        const ok = map.getZoom() >= Number(labelMinZoom);
+        if (ok) { if (!map.hasLayer(lbl)) map.addLayer(lbl); }
+        else    { if (map.hasLayer(lbl)) map.removeLayer(lbl); }
+      } else {
+        if (!map.hasLayer(lbl)) map.addLayer(lbl);
+      }
+    })();
+
   }, [
     L,
-    projectFences,
-    taskFences,
-    taskCircle,
-    fallbackCircle,
-    extraFences,
-    projectStyle,
-    taskStyle,
-    reloadKey,
-    renderPointsAsCircles,
-    pointRadiusMeters,
-    pointPixelRadius,
-    enableHoverLabels,
+    projectFences, taskFences,
+    taskCircle, fallbackCircle, extraFences,
+    projectStyle, taskStyle, reloadKey,
+    renderPointsAsCircles, pointRadiusMeters, pointPixelRadius,
+    enableHoverLabels, overlayStyleResolver, hoverMetaResolver,
+    labelMode, labelMinZoom, labelClassName,
+    showProject, taskVisible,
   ]);
 
-  // Legend
+  /* -------------------------------------- Legend -------------------------------------- */
+  const Swatch = ({ stroke, fill, dashed }) => (
+    <span className="inline-flex items-center gap-1">
+      {/* fill square with stroke border */}
+      <span
+        style={{
+          display: "inline-block",
+          width: 12,
+          height: 12,
+          background: fill || stroke,
+          border: `2px solid ${stroke || "#000"}`,
+          borderRadius: 3,
+        }}
+      />
+      {/* small line sample */}
+      <span
+        style={{
+          width: 16,
+          height: 0,
+          borderTop: dashed ? `3px dashed ${stroke || "#000"}` : `3px solid ${stroke || "#000"}`,
+        }}
+      />
+    </span>
+  );
+
   const Legend = () => (
-    <div className="absolute right-2 top-2 bg-white/90 rounded shadow px-2 py-1 text-xs space-y-1">
+    <div className="absolute right-2 top-2 bg-white/95 rounded-lg shadow px-3 py-2 text-xs space-y-1 border border-gray-200">
       {projectId && (
-        <div className="flex items-center gap-2">
-          <span style={{ width: 14, height: 0, borderTop: `3px solid ${projectStyle?.color || "#1e3a8a"}` }} />
-          <span>Project fences</span>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Swatch stroke={projectStyle?.color} fill={projectStyle?.fillColor} />
+            <span className="truncate">Project fences</span>
+            <span className="text-[11px] text-gray-500">({projectFences.length})</span>
+          </div>
+          {showLayerToggles && (
+            <label className="ml-2 inline-flex items-center gap-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showProject}
+                onChange={(e) => setShowProject(e.target.checked)}
+              />
+              <span>Show</span>
+            </label>
+          )}
         </div>
       )}
       {taskId && (
-        <div className="flex items-center gap-2">
-          <span style={{ width: 14, height: 0, borderTop: `3px dashed ${taskStyle?.color || "#b45309"}` }} />
-          <span>Task fences</span>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Swatch stroke={taskStyle?.color} fill={taskStyle?.fillColor} dashed />
+            <span className="truncate">Task fences</span>
+            <span className="text-[11px] text-gray-500">({taskFences.length})</span>
+          </div>
+          {/* In task view, hide the toggle (task layer always visible) */}
+          {!taskId || !showLayerToggles ? null : null}
         </div>
       )}
     </div>
   );
 
   return (
-    <div className={`relative ${className}`} style={{ height }}>
+    <div className={`relative z-0 ${className}`} style={{ height }}>
       {err ? (
-        <div className="h-full w-full flex items-center justify-center text-sm text-gray-600 bg-gray-100 rounded">
-          {err}
-        </div>
+        <div className="h-full w-full flex items-center justify-center text-sm text-gray-600 bg-gray-100 rounded">{err}</div>
       ) : (
         <>
           {legend && <Legend />}
-          <div ref={containerRef} style={{ height: "100%", width: "100%" }} />
+          <div ref={containerRef} className="z-0" style={{ height: "100%", width: "100%" }} />
         </>
       )}
     </div>

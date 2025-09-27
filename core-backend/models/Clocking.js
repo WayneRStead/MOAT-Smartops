@@ -2,9 +2,9 @@
 const mongoose = require('mongoose');
 
 // Suggested types for UI (not enforced in schema to stay backward-compatible)
-const CLOCK_TYPES = [
-  'present', 'in', 'out', 'training', 'sick', 'leave', 'iod', 'overtime'
-];
+const CLOCK_TYPES = Object.freeze([
+  'present', 'in', 'out', 'training', 'sick', 'leave', 'iod', 'overtime',
+]);
 
 const AttachmentSchema = new mongoose.Schema({
   filename:   String,
@@ -26,25 +26,27 @@ const ClockingEditSchema = new mongoose.Schema({
   editedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   note:       { type: String, default: '' },
   changes:    [{
-    field:  { type: String, required: true },          // e.g. "start", "end", "status", "location.lat"
+    field:  { type: String, required: true },          // e.g. "type", "at", "notes", "location"
     before: { type: mongoose.Schema.Types.Mixed },     // old value
     after:  { type: mongoose.Schema.Types.Mixed },     // new value
   }],
 }, { _id: false });
 
 const ClockingSchema = new mongoose.Schema({
-  orgId:     { type: String, default: 'root', index: true },  // simple org scoping
+  // NOTE: orgId is kept as String to match existing data/JWTs (e.g., "root" or "6500...0099")
+  orgId:     { type: String, default: 'root', index: true },
+
   userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', index: true },
 
-  // NOTE: no enum here — prevents crashes on legacy/unknown values
+  // Keep flexible (no enum) to avoid legacy value crashes
   type:      { type: String, default: 'present', index: true },
 
   at:        { type: Date, default: Date.now, index: true },
   notes:     { type: String, default: '' },
 
   location:     LocationSchema,
-  attachments: [ AttachmentSchema ],
+  attachments: { type: [AttachmentSchema], default: [] },
 
   createdBy:    { type: String },        // req.user?.sub or email
 
@@ -57,7 +59,10 @@ const ClockingSchema = new mongoose.Schema({
 // Useful query index
 ClockingSchema.index({ projectId: 1, userId: 1, at: -1 });
 
-const Clocking = mongoose.model('Clocking', ClockingSchema);
+// ----- Model guard (prevents OverwriteModelError on hot reload) -----
+const modelName = 'Clocking';
+const ClockingModel =
+  mongoose.models[modelName] || mongoose.model(modelName, ClockingSchema);
 
-module.exports = Clocking;
+module.exports = ClockingModel;
 module.exports.CLOCK_TYPES = CLOCK_TYPES;

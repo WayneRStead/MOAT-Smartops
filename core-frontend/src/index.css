@@ -187,6 +187,30 @@ input[type="checkbox"], input[type="radio"] {
 .table tr:last-child td {
   border-bottom: none;
 }
+/* PDF Prints */
+
+/* ===== Print styles: hide app chrome, keep report clean ===== */
+@media print {
+  /* Hide the whole app shell and any .no-print elements */
+  nav, .navbar, header, footer, .no-print { display: none !important; }
+
+  /* Remove background colors that can print badly */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  html, body { margin: 0 !important; padding: 0 !important; }
+  body { background: #fff !important; }
+
+  /* Expand the content to full width on paper */
+  .print-container { margin: 0 !important; padding: 0.5in !important; }
+
+  /* Give each item some breathing room on page breaks */
+  .print-break-avoid { break-inside: avoid; page-break-inside: avoid; }
+  .print-break-before { break-before: page; page-break-before: always; }
+}
+
+/* Optional: better page margins */
+@page { margin: 12mm; }
+
 
 /* ===========================
    Utilities
@@ -207,3 +231,58 @@ input[type="checkbox"], input[type="radio"] {
 .mt-1 { margin-top: .25rem; }
 .mt-2 { margin-top: .5rem; }
 .mt-3 { margin-top: 1rem; }
+
+/* Keep Leaflet inside its lane */
+.leaflet-container { z-index: 0 !important; }
+
+/* === Print / PDF tweaks === */
+@media print {
+  /* Hide app chrome */
+  .no-print, nav, header, .navbar, .AppNavbar { display: none !important; }
+
+  /* Improve color fidelity */
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Container for printable pages */
+  .print-container { padding: 0 !important; }
+
+  /* Avoid splitting important blocks */
+  .print-break-avoid { page-break-inside: avoid; }
+
+  /* Show print-only header; hide screen header */
+  .print-header { display: block !important; }
+  .screen-header { display: none !important; }
+
+  /* Simple watermark */
+  .print-watermark {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    opacity: 0.06;
+    font-size: 120px;
+    font-weight: 800;
+    transform: rotate(-30deg);
+  }
+}
+@media screen {
+  .print-header { display: none; }
+  .screen-header { display: block; }
+}
+
+/* Status chips (used by the viewer) */
+.chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+.chip-pass  { color: #065f46; background: #d1fae5; border: 1px solid #10b98133; }
+.chip-fail  { color: #991b1b; background: #fee2e2; border: 1px solid #ef444433; }
+.chip-na    { color: #92400e; background: #fef3c7; border: 1px solid #f59e0b33; }

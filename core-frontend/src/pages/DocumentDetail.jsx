@@ -66,7 +66,7 @@ export default function DocumentDetail() {
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
 
-  // Preview: try doc.latest.url first, then API fallbacks. Fetch as blob and render via object URL.
+  // Preview: try doc.latest.url first, then API fallbacks (download/file). Fetch as blob and render via object URL.
   useEffect(() => {
     let cancelled = false;
     let objUrl = "";
@@ -94,11 +94,12 @@ export default function DocumentDetail() {
       setPreviewUrl("");
       setPreviewMime("");
 
-      // Most reliable (downloads today, but we turn it into a blob URL):
       const primary = doc?.latest?.url;
 
-      // Safe fallbacks (cover both with/without global /api prefix):
+      // Expanded fallbacks: prefer /download (redirects to latest), but keep /file for older servers
       const fallbacks = [
+        `/api/documents/${id}/download`,
+        `/documents/${id}/download`,
         `/api/documents/${id}/file`,
         `/documents/${id}/file`,
       ];
@@ -202,18 +203,27 @@ export default function DocumentDetail() {
   async function deleteDoc() {
     if (!confirm("Delete this document?")) return;
     try {
-      await api.delete(`/documents/${id}`);
+      await api.delete(`/documents/${id}`); // soft delete
       setInfo("Deleted");
       navigate("/vault");
     } catch (e) { setErr(e?.response?.data?.error || String(e)); }
   }
 
+  // Robust restore: try PATCH /restore; if missing, inform user gracefully
   async function restoreDoc() {
+    setErr(""); setInfo("");
     try {
       const { data } = await api.patch(`/documents/${id}/restore`);
       setDoc(data);
       setInfo("Restored");
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      const code = e?.response?.status;
+      if (code === 404 || code === 405) {
+        setErr("Restore is not available on the server yet. Please add PATCH /documents/:id/restore.");
+      } else {
+        setErr(e?.response?.data?.error || String(e));
+      }
+    }
   }
 
   async function deleteVersion(idx) {
@@ -233,42 +243,79 @@ export default function DocumentDetail() {
     } catch (e) { setErr(e?.response?.data?.error || String(e)); }
   }
 
-  // Links (generic)
+  // ---------- Links (robust with fallback) ----------
+  function normalizeLink(l) {
+    const type = l.type || l.module;
+    return { ...l, type, module: type, refId: l.refId };
+  }
+
+  // Fallback helper: rewrite entire links array via PUT
+  async function rewriteLinks(nextLinks) {
+    const norm = (nextLinks || []).map(normalizeLink);
+    const { data } = await api.put(`/documents/${id}`, { links: norm });
+    setDoc(prev => ({ ...prev, links: data.links || norm }));
+    await resolveLinkedLookups({ links: norm });
+  }
+
   async function addLink() {
     if (!newLink.refId) return;
+    setErr(""); setInfo("");
+    const body = normalizeLink({ type: newLink.type, refId: newLink.refId });
     try {
-      const { data } = await api.post(`/documents/${id}/links`, { type: newLink.type, refId: newLink.refId });
+      const { data } = await api.post(`/documents/${id}/links`, body);
       setDoc(prev => ({ ...prev, links: data }));
       setNewLink({ ...newLink, refId: "" });
       await resolveLinkedLookups({ links: data });
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      const code = e?.response?.status;
+      if (code === 404 || code === 405 || code === 501) {
+        // Fallback: add locally then PUT full array
+        const exists = (doc?.links || []).some(l => (l.type||l.module) === body.type && String(l.refId) === String(body.refId));
+        const next = exists ? doc.links : [...(doc?.links || []), body];
+        await rewriteLinks(next);
+        setNewLink({ ...newLink, refId: "" });
+        setInfo("Link added.");
+        setTimeout(() => setInfo(""), 1200);
+      } else {
+        setErr(e?.response?.data?.error || String(e));
+      }
+    }
   }
 
   async function removeLink(type, refId) {
+    setErr(""); setInfo("");
     try {
       const { data } = await api.delete(`/documents/${id}/links`, { data: { type, refId } });
       setDoc(prev => ({ ...prev, links: data }));
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      const code = e?.response?.status;
+      if (code === 404 || code === 405 || code === 501) {
+        const next = (doc?.links || []).filter(l => (l.type||l.module) !== type || String(l.refId) !== String(refId));
+        await rewriteLinks(next);
+        setInfo("Link removed.");
+        setTimeout(() => setInfo(""), 1200);
+      } else {
+        setErr(e?.response?.data?.error || String(e));
+      }
+    }
   }
 
   // Quick linkers
   async function linkProject() {
     if (!pickProject) return;
-    try {
-      const { data } = await api.post(`/documents/${id}/links`, { type: "project", refId: pickProject });
-      setDoc(prev => ({ ...prev, links: data }));
-      setPickProject("");
-      await resolveLinkedLookups({ links: data });
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    await addLinkWith({ type: "project", refId: pickProject });
+    setPickProject("");
   }
   async function linkUser() {
     if (!pickUser) return;
-    try {
-      const { data } = await api.post(`/documents/${id}/links`, { type: "user", refId: pickUser });
-      setDoc(prev => ({ ...prev, links: data }));
-      setPickUser("");
-      await resolveLinkedLookups({ links: data });
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    await addLinkWith({ type: "user", refId: pickUser });
+    setPickUser("");
+  }
+  async function addLinkWith(l) {
+    const prev = { ...newLink };
+    setNewLink({ type: l.type, refId: l.refId });
+    await addLink();
+    setNewLink(prev);
   }
 
   const projectLinks = useMemo(() => (doc?.links || []).filter(l => (l.type||l.module) === "project"), [doc]);
@@ -364,6 +411,13 @@ export default function DocumentDetail() {
               <div className="text-xs text-gray-600">
                 For: {forLabel}
               </div>
+
+              {/* Direct download via server helper if available */}
+              <div className="text-xs">
+                <a className="underline" href={`/documents/${id}/download`} target="_blank" rel="noreferrer">
+                  Download via server
+                </a>
+              </div>
             </>
           )}
 
@@ -443,7 +497,11 @@ export default function DocumentDetail() {
         ) : (
           <div className="space-y-2">
             {doc.versions.map((v, i) => {
-              const isLatest = doc.latest && v && doc.latest.filename === v.filename && doc.latest.uploadedAt === v.uploadedAt;
+              const isLatest =
+                doc.latest &&
+                v &&
+                doc.latest.filename === v.filename &&
+                doc.latest.uploadedAt === v.uploadedAt;
               return (
                 <div key={i} className={`flex flex-wrap items-center justify-between border p-2 rounded ${v.deletedAt ? "opacity-60" : ""}`}>
                   <div className="space-y-1">
