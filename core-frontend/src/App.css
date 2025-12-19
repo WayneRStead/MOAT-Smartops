@@ -76,3 +76,6 @@ a { color: var(--accent); }
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Keep Leaflet inside its lane */
+.leaflet-container { z-index: 0 !important; }

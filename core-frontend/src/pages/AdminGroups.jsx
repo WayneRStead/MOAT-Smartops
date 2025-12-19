@@ -1,40 +1,59 @@
 // src/pages/AdminGroups.jsx
 import React, { useEffect, useMemo, useState } from "react";
+import { useTheme } from "../ThemeContext";
+import { api } from "../lib/api"; // ✅ use shared axios client (adds x-org-id, auth, aliases)
 
-/* ----------------------------- tiny API helper ----------------------------- */
-function getToken() {
-  return (
-    localStorage.getItem("jwt") ||
-    localStorage.getItem("token") ||
-    sessionStorage.getItem("jwt") ||
-    sessionStorage.getItem("token") ||
-    ""
+/* ----------------------------- helpers ------------------------------------ */
+const normId = (v) => {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object") return String(v._id || v.id || v.userId || "");
+  return "";
+};
+
+const getLeaderIdFromGroup = (g) =>
+  normId(
+    g?.leaderUserId ??
+      g?.leaderId ??
+      g?.groupLeaderUserId ??
+      g?.groupLeaderId ??
+      g?.leader?._id ??
+      g?.leader?.id ??
+      g?.leader
   );
+
+const upsertLeaderFields = (userId) => {
+  const v = userId || null; // null clears leader server-side
+  return {
+    leaderUserId: v,
+    leaderId: v,
+    groupLeaderUserId: v,
+    groupLeaderId: v,
+    leader: v,
+  };
+};
+
+function userDisplay(u) {
+  return u?.name || u?.email || u?.username || u?._id;
 }
-async function api(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken()}`,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: "include",
-  });
-  if (!res.ok) {
-    let msg = `${res.status} ${res.statusText}`;
-    try {
-      const j = await res.json();
-      if (j?.error) msg = j.error;
-    } catch {}
-    throw new Error(msg);
+
+function getOrgId() {
+  try {
+    return (
+      localStorage.getItem("currentOrgId") ||
+      localStorage.getItem("orgId") ||
+      sessionStorage.getItem("currentOrgId") ||
+      sessionStorage.getItem("orgId") ||
+      localStorage.getItem("tenantId") ||
+      sessionStorage.getItem("tenantId") ||
+      null
+    );
+  } catch {
+    return null;
   }
-  if (res.status === 204) return null;
-  return res.json();
 }
 
-/* ----------------------------- UI components ------------------------------ */
-
+/* ----------------------------- UI bits ------------------------------------ */
 function Chip({ children }) {
   return (
     <span
@@ -55,7 +74,7 @@ function Chip({ children }) {
   );
 }
 
-function Modal({ open, onClose, children, width = 640, title }) {
+function Modal({ open, onClose, children, width = 760, title }) {
   if (!open) return null;
   return (
     <div
@@ -72,7 +91,7 @@ function Modal({ open, onClose, children, width = 640, title }) {
       <div
         style={{
           width,
-          maxWidth: "90vw",
+          maxWidth: "95vw",
           background: "#fff",
           borderRadius: 12,
           boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
@@ -80,9 +99,18 @@ function Modal({ open, onClose, children, width = 640, title }) {
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 12,
+            alignItems: "center",
+          }}
+        >
           <h3 style={{ margin: 0 }}>{title}</h3>
-          <button onClick={onClose} aria-label="Close" style={{ fontSize: 18 }}>✕</button>
+          <button onClick={onClose} aria-label="Close" style={{ fontSize: 18 }}>
+            ✕
+          </button>
         </div>
         {children}
       </div>
@@ -91,8 +119,9 @@ function Modal({ open, onClose, children, width = 640, title }) {
 }
 
 /* ------------------------------ Main page --------------------------------- */
-
 export default function AdminGroups() {
+  const { org } = useTheme();
+
   const [groups, setGroups] = useState([]);
   const [users, setUsers] = useState([]);
   const [q, setQ] = useState("");
@@ -109,26 +138,40 @@ export default function AdminGroups() {
   const [leaderUserId, setLeaderUserId] = useState("");
   const [memberUserIds, setMemberUserIds] = useState([]);
 
+  // filters in editor
+  const [leaderFilter, setLeaderFilter] = useState("");
+  const [memberFilter, setMemberFilter] = useState("");
+
   function resetEditor(g = null) {
     setEditing(g);
     setName(g?.name || "");
     setDescription(g?.description || "");
-    setLeaderUserId(g?.leaderUserId || "");
-    setMemberUserIds(g?.memberUserIds || []);
+    setLeaderUserId(getLeaderIdFromGroup(g));
+    setMemberUserIds((g?.memberUserIds || []).map(String));
+    setLeaderFilter("");
+    setMemberFilter("");
   }
 
   async function loadAll() {
     setLoading(true);
     setErr("");
     try {
+      if (!getOrgId()) {
+        setErr('No organisation selected. Please sign in (or pick an org) so requests include header "x-org-id".');
+        setGroups([]);
+        setUsers([]);
+        return;
+      }
       const [gs, us] = await Promise.all([
-        api("GET", "/api/groups?limit=1000"),
-        api("GET", "/api/users?limit=1000"), // admin will see all; non-admin will just see visible
+        api.get("/groups", { params: { limit: 1000 } }),
+        api.get("/users", { params: { limit: 2000 } }),
       ]);
-      setGroups(gs || []);
-      setUsers(us || []);
+      setGroups(Array.isArray(gs.data) ? gs.data : []);
+      setUsers(Array.isArray(us.data) ? us.data : []);
     } catch (e) {
-      setErr(String(e.message || e));
+      setErr(e?.response?.data?.error || e?.message || "Failed to load data");
+      setGroups([]);
+      setUsers([]);
     } finally {
       setLoading(false);
     }
@@ -144,188 +187,227 @@ export default function AdminGroups() {
     return groups.filter((g) => re.test(g.name) || re.test(g.description || ""));
   }, [groups, q]);
 
-  function userName(id) {
+  function userNameById(id) {
     const u = users.find((x) => String(x._id) === String(id));
-    return u ? (u.name || u.email || u.username || u._id) : id;
+    return userDisplay(u) || id;
   }
+
+  const leaderCandidates = useMemo(() => {
+    const needle = leaderFilter.trim().toLowerCase();
+    if (!needle) return users;
+    return users.filter((u) => userDisplay(u).toLowerCase().includes(needle));
+  }, [users, leaderFilter]);
+
+  const memberCandidates = useMemo(() => {
+    const needle = memberFilter.trim().toLowerCase();
+    if (!needle) return users;
+    return users.filter((u) => userDisplay(u).toLowerCase().includes(needle));
+  }, [users, memberFilter]);
+
+  const toggleMember = (id) => {
+    setMemberUserIds((prev) => {
+      const s = new Set(prev.map(String));
+      const key = String(id);
+      if (s.has(key)) s.delete(key);
+      else s.add(key);
+      return Array.from(s);
+    });
+  };
+
+  const selectFilteredMembers = () => {
+    setMemberUserIds((prev) => {
+      const s = new Set(prev.map(String));
+      for (const u of memberCandidates) s.add(String(u._id));
+      return Array.from(s);
+    });
+  };
+  const clearFilteredMembers = () => {
+    if (!memberFilter.trim()) {
+      setMemberUserIds([]);
+      return;
+    }
+    setMemberUserIds((prev) => {
+      const s = new Set(prev.map(String));
+      for (const u of memberCandidates) s.delete(String(u._id));
+      return Array.from(s);
+    });
+  };
 
   async function saveGroup() {
     try {
       setErr("");
-      const payload = {
-        name,
-        description,
-        leaderUserId: leaderUserId || undefined,
-        memberUserIds,
-      };
+
+      // Ensure leader (if set) is in members
+      const finalMemberIds = Array.from(
+        new Set(
+          (memberUserIds || [])
+            .concat(leaderUserId ? [leaderUserId] : [])
+            .map(String)
+        )
+      );
+
       if (editing?._id) {
-        const saved = await api("PUT", `/api/groups/${editing._id}`, payload);
-        setGroups((xs) => xs.map((g) => (String(g._id) === String(saved._id) ? saved : g)));
+        const id = editing._id;
+
+        const putPayload = {
+          name,
+          description,
+          memberUserIds: finalMemberIds,
+          ...upsertLeaderFields(leaderUserId),
+        };
+        await api.put(`/groups/${id}`, putPayload);
+
+        // ensure single-leader semantics (best-effort)
+        try {
+          await api.post(`/groups/${id}/leader`, {
+            userId: leaderUserId || null,
+            ...upsertLeaderFields(leaderUserId),
+          });
+        } catch {}
+
+        const refreshed = await api.get("/groups", { params: { limit: 1000 } });
+        setGroups(Array.isArray(refreshed.data) ? refreshed.data : []);
       } else {
-        const created = await api("POST", "/api/groups", payload);
-        setGroups((xs) => [created, ...xs]);
+        const createPayload = {
+          name,
+          description,
+          memberUserIds: finalMemberIds,
+          ...upsertLeaderFields(leaderUserId),
+        };
+        const created = await api.post("/groups", createPayload);
+
+        try {
+          await api.post(`/groups/${created.data?._id}/leader`, {
+            userId: leaderUserId || null,
+            ...upsertLeaderFields(leaderUserId),
+          });
+        } catch {}
+
+        const refreshed = await api.get("/groups", { params: { limit: 1000 } });
+        setGroups(Array.isArray(refreshed.data) ? refreshed.data : []);
       }
+
       setOpen(false);
     } catch (e) {
-      setErr(String(e.message || e));
+      setErr(e?.response?.data?.error || e?.message || "Failed to save group");
     }
   }
 
   async function removeGroup(id) {
     if (!window.confirm("Delete this group? (soft delete)")) return;
     try {
-      await api("DELETE", `/api/groups/${id}`);
+      await api.delete(`/groups/${id}`);
       setGroups((xs) => xs.filter((g) => String(g._id) !== String(id)));
     } catch (e) {
-      alert(e.message || e);
+      alert(e?.response?.data?.error || e?.message || "Failed to delete group");
     }
   }
 
-  async function addMember(g, uid) {
-    try {
-      const updated = await api("POST", `/api/groups/${g._id}/members`, { userId: uid });
-      setGroups((xs) => xs.map((x) => (String(x._id) === String(g._id) ? updated : x)));
-    } catch (e) {
-      alert(e.message || e);
-    }
-  }
-
-  async function removeMember(g, uid) {
-    try {
-      const updated = await api("DELETE", `/api/groups/${g._id}/members/${uid}`);
-      setGroups((xs) => xs.map((x) => (String(x._id) === String(g._id) ? updated : x)));
-    } catch (e) {
-      alert(e.message || e);
-    }
-  }
-
-  async function setLeader(g, uid) {
-    try {
-      const updated = await api("POST", `/api/groups/${g._id}/leader`, { userId: uid || null });
-      setGroups((xs) => xs.map((x) => (String(x._id) === String(g._id) ? updated : x)));
-    } catch (e) {
-      alert(e.message || e);
-    }
-  }
+  const accent = org?.accentColor || "#2a7fff";
 
   return (
-    <div style={{ padding: 20 }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <h2 style={{ margin: 0, flex: 1 }}>Groups</h2>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search groups…"
-          style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0", minWidth: 220 }}
-        />
-        <button
-          onClick={() => { resetEditor(null); setOpen(true); }}
-          style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #0ea5e9", background: "#0ea5e9", color: "#fff" }}
-        >
-          + New Group
-        </button>
-      </header>
+    <div className="max-w-7xl mx-auto p-4" style={{ "--accent": accent }}>
+      <style>{`
+        .btn{border:1px solid #e5e7eb;border-radius:10px;padding:8px 12px;background:#fff}
+        .btn:hover{box-shadow:0 1px 0 rgba(0,0,0,.04)}
+        .btn-sm{padding:6px 10px;border-radius:8px}
+        .btn-accent{background:var(--accent,#2a7fff);color:#fff;border-color:var(--accent,#2a7fff)}
+        .btn-danger{background:#b91c1c;color:#fff;border-color:#7f1d1d}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px}
+        .muted{color:#64748b}
+      `}</style>
 
-      {err && <div style={{ color: "#b91c1c", marginBottom: 12 }}>Error: {err}</div>}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Groups</h1>
+        <div className="flex items-center gap-2">
+          <input
+            className="input input-bordered"
+            style={{ minWidth: 240 }}
+            placeholder="Search groups…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <button
+            className="btn btn-accent"
+            onClick={() => {
+              resetEditor(null);
+              setOpen(true);
+            }}
+          >
+            New Group
+          </button>
+        </div>
+      </div>
+
+      {err && <div className="text-red-600 mt-2">Error: {err}</div>}
+
       {loading ? (
-        <div>Loading…</div>
+        <div className="mt-3">Loading…</div>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {filtered.map((g) => (
-            <div key={g._id} style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <h3 style={{ margin: 0, flex: 1 }}>{g.name}</h3>
-                <button onClick={() => { resetEditor(g); setOpen(true); }} style={{ padding: "6px 10px", borderRadius: 8 }}>Edit</button>
-                <button onClick={() => removeGroup(g._id)} style={{ padding: "6px 10px", borderRadius: 8, color: "#b91c1c" }}>
-                  Delete
-                </button>
-              </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          {filtered.map((g) => {
+            const leaderId = getLeaderIdFromGroup(g);
+            const memberCount = (g.memberUserIds || []).length;
+            return (
+              <div key={g._id} className="card">
+                <div className="flex items-center gap-2">
+                  <h3 className="font-semibold text-lg flex-1 m-0">{g.name}</h3>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      resetEditor(g);
+                      setOpen(true);
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button className="btn btn-sm btn-danger" onClick={() => removeGroup(g._id)}>
+                    Delete
+                  </button>
+                </div>
 
-              {g.description && <p style={{ marginTop: 8 }}>{g.description}</p>}
+                {g.description && <p className="mt-2">{g.description}</p>}
 
-              <div style={{ marginTop: 8 }}>
-                <strong>Leader:</strong>{" "}
-                {g.leaderUserId ? (
-                  <>
-                    {userName(g.leaderUserId)}{" "}
-                    <button onClick={() => setLeader(g, null)} style={{ marginLeft: 8, fontSize: 12 }}>Clear</button>
-                  </>
-                ) : (
-                  <em>None</em>
-                )}
-              </div>
+                <div className="mt-2">
+                  <strong>Group Leader:</strong>{" "}
+                  {leaderId ? <>{userNameById(leaderId)}</> : <em className="muted">None</em>}
+                </div>
 
-              <div style={{ marginTop: 8 }}>
-                <strong>Members ({(g.memberUserIds || []).length}):</strong>
-                <div style={{ marginTop: 6 }}>
-                  {(g.memberUserIds || []).map((uid) => (
-                    <Chip key={uid}>
-                      {userName(uid)}
-                      <button
-                        onClick={() => removeMember(g, uid)}
-                        title="Remove"
-                        style={{ marginLeft: 6, border: "none", background: "transparent", cursor: "pointer" }}
-                      >
-                        ×
-                      </button>
-                    </Chip>
-                  ))}
+                <div className="mt-2">
+                  <strong>Members ({memberCount}):</strong>
+                  <div className="mt-1">
+                    {(g.memberUserIds || []).map((uid) => (
+                      <Chip key={normId(uid)}>{userNameById(uid)}</Chip>
+                    ))}
+                  </div>
                 </div>
               </div>
+            );
+          })}
 
-              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <select
-                  onChange={(e) => setLeader(g, e.target.value)}
-                  defaultValue=""
-                  style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #e2e8f0" }}
-                >
-                  <option value="">— Set Leader —</option>
-                  {users.map((u) => (
-                    <option key={u._id} value={u._id}>
-                      {u.name || u.email || u.username}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  onChange={(e) => {
-                    const uid = e.target.value;
-                    if (uid) addMember(g, uid);
-                    e.target.value = "";
-                  }}
-                  defaultValue=""
-                  style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #e2e8f0" }}
-                >
-                  <option value="">— Add Member —</option>
-                  {users
-                    .filter((u) => !(g.memberUserIds || []).some((m) => String(m) === String(u._id)))
-                    .map((u) => (
-                      <option key={u._id} value={u._id}>
-                        {u.name || u.email || u.username}
-                      </option>
-                    ))}
-                </select>
-              </div>
-            </div>
-          ))}
-
-          {!filtered.length && <div style={{ opacity: 0.7 }}>No groups yet.</div>}
+          {!filtered.length && <div className="mt-3 muted">No groups yet.</div>}
         </div>
       )}
 
+      {/* Editor modal */}
       <Modal
         open={open}
         onClose={() => setOpen(false)}
         title={editing?._id ? "Edit Group" : "Create Group"}
       >
-        <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gap: 12 }}>
           <label>
             <div style={{ fontSize: 12, marginBottom: 4 }}>Name</div>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g., Team A"
-              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}
+              style={{
+                width: "100%",
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid #e2e8f0",
+              }}
             />
           </label>
 
@@ -335,65 +417,188 @@ export default function AdminGroups() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
-              style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
+              style={{
+                width: "100%",
+                padding: 10,
+                borderRadius: 8,
+                border: "1px solid #e2e8f0",
+              }}
             />
           </label>
 
-          <label>
-            <div style={{ fontSize: 12, marginBottom: 4 }}>Leader</div>
-            <select
-              value={leaderUserId || ""}
-              onChange={(e) => setLeaderUserId(e.target.value)}
-              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}
-            >
-              <option value="">(None)</option>
-              {users.map((u) => (
-                <option key={u._id} value={u._id}>
-                  {u.name || u.email || u.username}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label>
-            <div style={{ fontSize: 12, marginBottom: 4 }}>Members</div>
+          {/* Leader (with filter) */}
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 12, marginBottom: 4 }}>Group Leader</div>
+              <div style={{ fontSize: 12, color: "#64748b" }}>Select any user (optional)</div>
+            </div>
             <div
               style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 280px",
+                gap: 8,
+                alignItems: "center",
+              }}
+            >
+              <input
+                placeholder="Filter users…"
+                value={leaderFilter}
+                onChange={(e) => setLeaderFilter(e.target.value)}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #e2e8f0",
+                }}
+              />
+              <select
+                value={leaderUserId || ""}
+                onChange={(e) => setLeaderUserId(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #e2e8f0",
+                }}
+              >
+                <option value="">(None)</option>
+                {leaderCandidates.map((u) => (
+                  <option key={u._id} value={u._id}>
+                    {userDisplay(u)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Members (pills in grid + filter) */}
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 12, marginBottom: 6 }}>Members</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={selectFilteredMembers}
+                  style={{
+                    fontSize: 12,
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    border: "1px solid #e2e8f0",
+                    background: "#f8fafc",
+                  }}
+                  title="Add all filtered users"
+                >
+                  Select filtered
+                </button>
+                <button
+                  type="button"
+                  onClick={clearFilteredMembers}
+                  style={{
+                    fontSize: 12,
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    border: "1px solid #e2e8f0",
+                    background: "#f8fafc",
+                  }}
+                  title="Clear filtered (or all if no filter)"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <input
+              placeholder="Filter users…"
+              value={memberFilter}
+              onChange={(e) => setMemberFilter(e.target.value)}
+              style={{
+                width: "100%",
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid #e2e8f0",
+                marginBottom: 8,
+              }}
+            />
+
+            <div
+              className="pill-grid"
+              style={{
+                maxHeight: 260,
+                overflow: "auto",
                 border: "1px solid #e2e8f0",
                 borderRadius: 10,
                 padding: 10,
-                maxHeight: 210,
-                overflow: "auto",
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 8,
               }}
             >
-              {users.map((u) => {
+              {memberCandidates.map((u) => {
                 const id = String(u._id);
-                const checked = memberUserIds.some((x) => String(x) === id);
+                const active = memberUserIds.some((x) => String(x) === id);
                 return (
-                  <label key={id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(e) => {
-                        if (e.target.checked) setMemberUserIds((xs) => Array.from(new Set([...xs, id])));
-                        else setMemberUserIds((xs) => xs.filter((x) => String(x) !== id));
+                  <button
+                    type="button"
+                    key={id}
+                    className={`pill ${active ? "active" : ""}`}
+                    onClick={() => toggleMember(id)}
+                    title={userDisplay(u)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      border: "1px solid #e2e8f0",
+                      padding: "6px 10px",
+                      borderRadius: 9999,
+                      fontSize: 13,
+                      cursor: "pointer",
+                      background: active ? "var(--accent,#2a7fff)" : "#fff",
+                      color: active ? "#fff" : "#111827",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: "inline-block",
+                        maxWidth: 180,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        textAlign: "left",
                       }}
-                    />
-                    <span>{u.name || u.email || u.username}</span>
-                  </label>
+                    >
+                      {userDisplay(u)}
+                    </span>
+                    {active && <span>✓</span>}
+                  </button>
                 );
               })}
             </div>
-          </label>
+
+            <div style={{ marginTop: 6, fontSize: 12, color: "#64748b" }}>
+              Selected: {memberUserIds.length}
+            </div>
+          </div>
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-            <button onClick={() => setOpen(false)} style={{ padding: "8px 12px", borderRadius: 10 }}>
+            <button
+              onClick={() => setOpen(false)}
+              style={{ padding: "8px 12px", borderRadius: 10 }}
+              type="button"
+            >
               Cancel
             </button>
             <button
               onClick={saveGroup}
-              style={{ padding: "8px 12px", borderRadius: 10, background: "#16a34a", color: "#fff", border: "1px solid #16a34a" }}
+              className="btn"
+              style={{
+                padding: "8px 12px",
+                borderRadius: 10,
+                background: "var(--accent,#2a7fff)",
+                color: "#fff",
+                borderColor: "var(--accent,#2a7fff)",
+              }}
               disabled={!name.trim()}
+              type="button"
             >
               {editing?._id ? "Save" : "Create"}
             </button>

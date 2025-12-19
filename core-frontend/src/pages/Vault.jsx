@@ -47,35 +47,78 @@ function isTextLike(mime = "") {
 
 /** --- small UI helpers --- **/
 function TagOrDash({ value }) {
-  return value?.length ? value.join(", ") : <span className="muted">—</span>;
+  return value?.length ? value.join(", ") : <span className="text-gray-500">—</span>;
 }
 function Dash({ value }) {
-  return value ? value : <span className="muted">—</span>;
+  return value ? value : <span className="text-gray-500">—</span>;
+}
+
+/* ---------- Small, shared Modal ---------- */
+function Modal({ open, onClose, children, title, width = 760 }) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-[200]"
+      onMouseDown={onClose}
+      style={{
+        background: "rgba(0,0,0,0.45)",
+        display: "grid",
+        placeItems: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl"
+        style={{ width, maxWidth: "95vw", maxHeight: "90vh", overflow: "auto" }}
+      >
+        <div className="flex items-center justify-between p-4 border-b">
+          <h3 className="text-lg font-semibold m-0">{title}</h3>
+          <button className="text-xl" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
 }
 
 export default function Vault() {
   const [docs, setDocs] = useState([]);
   const [q, setQ] = useState("");
+  const [qDeb, setQDeb] = useState("");
   const [includeDeleted, setIncludeDeleted] = useState(false);
 
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
+  // create modal
+  const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState({ title: "", folder: "", tags: "" });
-  const [pendingFile, setPendingFile] = useState({}); // { [id]: File|null }
+
+  // edit modal
+  const [editDoc, setEditDoc] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editFile, setEditFile] = useState(null);
+  const [editSaving, setEditSaving] = useState(false);
 
   // preview modal state
   const [previewDoc, setPreviewDoc] = useState(null); // a full doc row
   const [pvLoading, setPvLoading] = useState(false);
   const [pvErr, setPvErr] = useState("");
-  const [pvUrl, setPvUrl] = useState(""); // object URL for media/pdf
+  const [pvUrl, setPvUrl] = useState("");  // object URL for media/pdf
   const [pvText, setPvText] = useState(""); // text preview (for text/*)
+
+  // debounce search
+  useEffect(() => {
+    const t = setTimeout(() => setQDeb(q.trim()), 250);
+    return () => clearTimeout(t);
+  }, [q]);
 
   async function load() {
     setErr(""); setInfo("");
     try {
       const params = {};
-      if (q) params.q = q;
+      if (qDeb) params.q = qDeb;
       if (includeDeleted) params.includeDeleted = 1;
       const { data } = await api.get("/documents", { params });
       setDocs(data || []);
@@ -84,7 +127,7 @@ export default function Vault() {
     }
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [includeDeleted]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [includeDeleted, qDeb]);
 
   async function doCreate(e) {
     e.preventDefault();
@@ -102,27 +145,8 @@ export default function Vault() {
       const { data: doc } = await api.post("/documents", body);
       setDocs((prev) => [doc, ...prev]);
       setCreating({ title: "", folder: "", tags: "" });
-      setInfo("Document created. You can upload a version.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
-    }
-  }
-
-  async function doUpload(id) {
-    const safeId = String(id || "");
-    if (!safeId) return setErr("Missing document id for upload.");
-    const f = pendingFile[safeId];
-    if (!f) return;
-    setErr(""); setInfo("");
-    try {
-      const fd = new FormData();
-      fd.append("file", f);
-      const { data: updated } = await api.post(`/documents/${encodeURIComponent(safeId)}/upload`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
-      setPendingFile((p) => ({ ...p, [safeId]: null }));
-      setInfo("Version uploaded.");
+      setInfo("Document created.");
+      setShowCreate(false);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -134,6 +158,23 @@ export default function Vault() {
     try {
       const { data: updated } = await api.put(`/documents/${encodeURIComponent(safeId)}`, { title });
       setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
+      setInfo("Title updated.");
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
+  }
+
+  async function doUploadVersion(id, file) {
+    const safeId = String(id || "");
+    if (!safeId || !file) return;
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data: updated } = await api.post(`/documents/${encodeURIComponent(safeId)}/upload`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
+      setInfo("Version uploaded.");
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -193,7 +234,7 @@ export default function Vault() {
     }
 
     if (!isPreviewable(declaredMime)) {
-      setPvErr("Preview for this file type isn’t supported. Use Download to open it.");
+      setPvErr("Preview for this file type isn’t supported. Use Download in the preview.");
       return;
     }
 
@@ -241,194 +282,263 @@ export default function Vault() {
   const isAudio = useMemo(() => previewMime.startsWith("audio/"), [previewMime]);
   const textLike = useMemo(() => isTextLike(previewMime), [previewMime]);
 
+  // ---------- Edit modal helpers ----------
+  function openEditModal(doc) {
+    setEditDoc(doc);
+    setEditTitle(doc?.title || "");
+    setEditFile(null);
+    setEditSaving(false);
+  }
+  function closeEditModal() {
+    setEditDoc(null);
+    setEditTitle("");
+    setEditFile(null);
+    setEditSaving(false);
+  }
+  async function saveEditModal() {
+    if (!editDoc) return;
+    setEditSaving(true);
+    setErr(""); setInfo("");
+    try {
+      const id = docIdOf(editDoc);
+      // rename if changed
+      const trimmed = (editTitle || "").trim();
+      if (trimmed && trimmed !== (editDoc.title || "")) {
+        await doRename(id, trimmed);
+      }
+      // upload if selected
+      if (editFile) {
+        await doUploadVersion(id, editFile);
+      }
+      closeEditModal();
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   return (
-    <div className="card">
-      <h2>Smart Document Vault</h2>
-      {err && <p style={{ color: "crimson" }}>{err}</p>}
-      {info && <p style={{ color: "seagreen" }}>{info}</p>}
-
-      {/* Search & options */}
-      <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: "center" }}>
-        <input
-          placeholder="Search title / filename / tag…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && load()}
-          style={{ minWidth: 280 }}
-        />
-        <button onClick={load}>Search</button>
-
-        <label style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 12 }}>
+    <div className="max-w-7xl mx-auto p-4">
+      {/* Header: title + search + toggles + actions */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Vault</h1>
+        <div className="flex items-center gap-2">
           <input
-            type="checkbox"
-            checked={includeDeleted}
-            onChange={(e) => setIncludeDeleted(e.target.checked)}
+            className="input input-bordered"
+            style={{ minWidth: 260 }}
+            placeholder="Search title, filename, tag…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
           />
-          Include deleted
-        </label>
+          <label className="text-sm flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={includeDeleted}
+              onChange={(e) => setIncludeDeleted(e.target.checked)}
+            />
+            Show deleted
+          </label>
+          <button className="btn btn-sm" onClick={() => setShowCreate(true)}>
+            New Document
+          </button>
+        </div>
       </div>
 
-      {/* Create */}
-      <form
-        className="row"
-        onSubmit={doCreate}
-        style={{ gap: 8, marginBottom: 16, alignItems: "end" }}
-      >
-        <label>
-          Title
-          <input
-            value={creating.title}
-            onChange={(e) => setCreating({ ...creating, title: e.target.value })}
-            required
-          />
-        </label>
-        <label>
-          Folder
-          <input
-            value={creating.folder}
-            onChange={(e) => setCreating({ ...creating, folder: e.target.value })}
-            placeholder="Policies/Health & Safety"
-          />
-        </label>
-        <label>
-          Tags
-          <input
-            value={creating.tags}
-            onChange={(e) => setCreating({ ...creating, tags: e.target.value })}
-            placeholder="safety, onboarding"
-          />
-        </label>
-        <button className="btn-primary">Add</button>
-      </form>
+      {err && <div className="text-red-600 mt-2">{err}</div>}
+      {info && <div className="text-green-700 mt-2">{info}</div>}
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th style={{ width: 260 }}>Title</th>
-            <th>Latest</th>
-            <th>Tags</th>
-            <th>Folder</th>
-            <th>Updated</th>
-            <th>Upload</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {docs.map((d, idx) => {
-            const id = docIdOf(d);
-            return (
-              <tr key={id || `row-${idx}`} className={d.deletedAt ? "opacity-60" : ""}>
-                <td>
-                  <input
-                    value={d.title || ""}
-                    onChange={(e) =>
-                      setDocs((prev) =>
-                        prev.map((x) => (docIdOf(x) === id ? { ...x, title: e.target.value } : x))
-                      )
-                    }
-                    onBlur={(e) => {
-                      const newTitle = (e.target.value || "").trim();
-                      if (id && newTitle && newTitle !== d.title) doRename(id, newTitle);
-                    }}
-                  />
-                  {d.deletedAt && (
-                    <div style={{ fontSize: 12, color: "#a00" }}>
-                      deleted {new Date(d.deletedAt).toLocaleString()}
-                    </div>
-                  )}
-                </td>
-                <td>
-                  {d.latest ? (
-                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                      <button
-                        className="btn"
-                        type="button"
-                        onClick={() => openPreview(d)}
-                        title="Preview in app"
-                      >
-                        Preview
-                      </button>
-                      <a
-                        className="btn"
-                        href={d.latest.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        title="Download file"
-                      >
-                        Download
-                      </a>
-                      <span
-                        className="muted"
-                        title={d.latest.filename}
-                        style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                      >
-                        {d.latest.filename}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td><TagOrDash value={d.tags} /></td>
-                <td><Dash value={d.folder} /></td>
-                <td>{new Date(d.updatedAt || d.createdAt).toLocaleString()}</td>
-                <td>
-                  {!d.deletedAt ? (
-                    <div className="row" style={{ gap: 6 }}>
+      {/* Table */}
+      <div className="mt-3 overflow-x-auto rounded-xl border">
+        <table className="table w-full">
+          <thead className="bg-gray-50 sticky top-0 z-10">
+            <tr>
+              <th style={{ width: 320 }}>Title</th>
+              <th style={{ width: 360 }}>Latest</th>
+              <th>Tags</th>
+              <th>Folder</th>
+              <th>Updated</th>
+              <th className="text-right" style={{ width: 220 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {docs.length ? (
+              docs.map((d, idx) => {
+                const id = docIdOf(d);
+                return (
+                  <tr key={id || `row-${idx}`} className={d.deletedAt ? "opacity-60" : ""}>
+                    <td className="align-top">
                       <input
-                        type="file"
+                        className="border p-2 w-full"
+                        value={d.title || ""}
                         onChange={(e) =>
-                          setPendingFile((p) => ({
-                            ...p,
-                            [id]: e.target.files?.[0] || null,
-                          }))
+                          setDocs((prev) =>
+                            prev.map((x) => (docIdOf(x) === id ? { ...x, title: e.target.value } : x))
+                          )
                         }
-                      />
-                      <button onClick={() => doUpload(id)} disabled={!pendingFile[id]}>
-                        Upload
-                      </button>
-                    </div>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td>
-                  {!d.deletedAt ? (
-                    <button onClick={() => doDelete(id)}>Delete</button>
-                  ) : (
-                    <div className="row" style={{ gap: 8 }}>
-                      <button onClick={() => doRestore(id)}>Restore</button>
-                      <button
-                        className="btn"
-                        onClick={() => doHardDelete(id)}
-                        title="Admin only"
-                        style={{
-                          background: "#b91c1c",
-                          color: "white",
-                          border: "1px solid #7f1d1d",
-                          padding: "6px 10px",
-                          borderRadius: 4
+                        onBlur={(e) => {
+                          const newTitle = (e.target.value || "").trim();
+                          if (id && newTitle && newTitle !== d.title) doRename(id, newTitle);
                         }}
-                      >
-                        Hard delete
-                      </button>
-                    </div>
-                  )}
+                      />
+                      {d.deletedAt && (
+                        <div className="text-xs text-red-700 mt-1">
+                          deleted {new Date(d.deletedAt).toLocaleString()}
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="align-top">
+                      {d.latest ? (
+                        <button
+                          className="underline text-left"
+                          title="Open preview"
+                          onClick={() => openPreview(d)}
+                          style={{ maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        >
+                          {d.latest.filename}
+                        </button>
+                      ) : (
+                        <span className="text-gray-500">—</span>
+                      )}
+                    </td>
+
+                    <td className="align-top"><TagOrDash value={d.tags} /></td>
+                    <td className="align-top"><Dash value={d.folder} /></td>
+                    <td className="align-top">
+                      {new Date(d.updatedAt || d.createdAt).toLocaleString()}
+                    </td>
+
+                    <td className="text-right align-top">
+                      {!d.deletedAt ? (
+                        <div className="inline-flex gap-2">
+                          <button className="btn btn-sm" onClick={() => openEditModal(d)}>Edit</button>
+                          <button className="btn btn-sm" onClick={() => doDelete(id)}>Delete</button>
+                        </div>
+                      ) : (
+                        <div className="inline-flex flex-col gap-2 items-end">
+                          <button className="btn btn-sm" onClick={() => doRestore(id)}>Restore</button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => doHardDelete(id)}
+                            title="Admin only"
+                            style={{ background: "#b91c1c", color: "white", border: "1px solid #7f1d1d" }}
+                          >
+                            Hard Delete
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            ) : (
+              <tr>
+                <td className="p-4 text-gray-600" colSpan={6}>
+                  No documents yet.
                 </td>
               </tr>
-            );
-          })}
-          {!docs.length && (
-            <tr>
-              <td colSpan={7} style={{ opacity: 0.7 }}>
-                No documents yet.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            )}
+          </tbody>
+        </table>
+      </div>
 
-      {/* Preview Modal */}
+      {/* Create Modal */}
+      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="New Document">
+        <form onSubmit={doCreate} className="grid md:grid-cols-2 gap-3">
+          <label className="text-sm md:col-span-2">
+            Title
+            <input
+              className="border p-2 w-full"
+              value={creating.title}
+              onChange={(e) => setCreating({ ...creating, title: e.target.value })}
+              required
+            />
+          </label>
+          <label className="text-sm">
+            Folder
+            <input
+              className="border p-2 w-full"
+              value={creating.folder}
+              onChange={(e) => setCreating({ ...creating, folder: e.target.value })}
+              placeholder="Policies/Health & Safety"
+            />
+          </label>
+          <label className="text-sm">
+            Tags (comma-separated)
+            <input
+              className="border p-2 w-full"
+              value={creating.tags}
+              onChange={(e) => setCreating({ ...creating, tags: e.target.value })}
+              placeholder="safety, onboarding"
+            />
+          </label>
+          <div className="md:col-span-2 flex items-center gap-2 pt-1">
+            <button className="px-3 py-2 bg-black text-white rounded" type="submit">
+              Create
+            </button>
+            <button type="button" className="px-3 py-2 border rounded" onClick={() => setShowCreate(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Edit Modal */}
+      <Modal open={!!editDoc} onClose={closeEditModal} title="Edit Document">
+        {editDoc && (
+          <div className="space-y-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="text-sm md:col-span-2">
+                Title
+                <input
+                  className="border p-2 w-full"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                />
+              </label>
+              <label className="text-sm md:col-span-2">
+                Upload / Replace file
+                <input
+                  className="border p-2 w-full"
+                  type="file"
+                  onChange={(e) => setEditFile(e.target.files?.[0] || null)}
+                />
+                <div className="text-xs text-gray-600 mt-1">
+                  Current: {editDoc.latest?.filename || "—"}
+                </div>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                className="px-3 py-2 bg-black text-white rounded disabled:opacity-60"
+                disabled={editSaving}
+                onClick={saveEditModal}
+              >
+                {editSaving ? "Saving…" : "Save"}
+              </button>
+              <button className="px-3 py-2 border rounded" onClick={closeEditModal}>Cancel</button>
+              <div className="ml-auto flex items-center gap-2">
+                {!editDoc.deletedAt && (
+                  <button
+                    className="px-3 py-2 border rounded"
+                    onClick={() => {
+                      if (!confirm("Delete this document?")) return;
+                      doDelete(docIdOf(editDoc));
+                      closeEditModal();
+                    }}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Preview Modal (lightbox) */}
       {previewDoc && (
         <div
           className="fixed inset-0"
@@ -442,44 +552,46 @@ export default function Vault() {
             zIndex: 200,
             padding: 12,
           }}
+          onMouseDown={closePreview}
         >
           <div
-            className="bg-white rounded shadow-2xl"
+            className="bg-white rounded-2xl shadow-2xl"
             style={{ width: "100%", maxWidth: 1000, maxHeight: "90vh", display: "flex", flexDirection: "column" }}
+            onMouseDown={(e) => e.stopPropagation()}
           >
             {/* header */}
-            <div className="row" style={{ justifyContent: "space-between", padding: 12, borderBottom: "1px solid #eee", alignItems: "center" }}>
-              <div style={{ minWidth: 0 }}>
-                <div className="font-medium" title={previewDoc.latest?.filename || previewDoc.title}>
+            <div className="flex items-center justify-between p-3 border-b">
+              <div className="min-w-0">
+                <div className="font-medium truncate" title={previewDoc.latest?.filename || previewDoc.title}>
                   {previewDoc.title || previewDoc.latest?.filename || "Document"}
                 </div>
-                <div className="muted" style={{ fontSize: 12 }}>
+                <div className="text-xs text-gray-600">
                   Type: {previewMime || "unknown"}
                 </div>
               </div>
-              <div className="row" style={{ gap: 8 }}>
+              <div className="flex items-center gap-2">
                 {previewDoc?.latest?.url && (
-                  <a className="btn" href={previewDoc.latest.url} target="_blank" rel="noreferrer">Download</a>
+                  <a className="btn btn-sm" href={previewDoc.latest.url} target="_blank" rel="noreferrer">Download</a>
                 )}
-                <button className="btn" onClick={closePreview}>Close</button>
+                <button className="btn btn-sm" onClick={closePreview}>Close</button>
               </div>
             </div>
 
             {/* body */}
             <div style={{ flex: 1, overflow: "auto", background: "#f7f7f7" }}>
-              {pvLoading && <div style={{ padding: 16, fontSize: 14, color: "#555" }}>Loading preview…</div>}
-              {pvErr && <div style={{ padding: 16, color: "crimson" }}>{pvErr}</div>}
+              {pvLoading && <div className="p-4 text-gray-700 text-sm">Loading preview…</div>}
+              {pvErr && <div className="p-4 text-red-600 text-sm">{pvErr}</div>}
 
               {!pvLoading && !pvErr && (
                 <>
                   {textLike && (
-                    <div style={{ padding: 12 }}>
+                    <div className="p-3">
                       <pre
                         style={{
                           whiteSpace: "pre-wrap",
                           background: "white",
                           border: "1px solid #eee",
-                          borderRadius: 6,
+                          borderRadius: 8,
                           padding: 12,
                           maxHeight: "75vh",
                           overflow: "auto",
@@ -492,23 +604,23 @@ export default function Vault() {
                   )}
 
                   {isImage && pvUrl && (
-                    <div style={{ padding: 12, display: "flex", justifyContent: "center" }}>
+                    <div className="p-3 flex justify-center">
                       <img
                         src={pvUrl}
                         alt={previewDoc.latest?.filename || previewDoc.title}
-                        style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain", borderRadius: 6, background: "white" }}
+                        style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain", borderRadius: 8, background: "white" }}
                       />
                     </div>
                   )}
 
                   {isVideo && pvUrl && (
-                    <div style={{ padding: 12 }}>
-                      <video src={pvUrl} controls style={{ width: "100%", maxHeight: "75vh", background: "black" }} />
+                    <div className="p-3">
+                      <video src={pvUrl} controls style={{ width: "100%", maxHeight: "75vh", background: "black", borderRadius: 8 }} />
                     </div>
                   )}
 
                   {isAudio && pvUrl && (
-                    <div style={{ padding: 12 }}>
+                    <div className="p-3">
                       <audio src={pvUrl} controls style={{ width: "100%" }} />
                     </div>
                   )}
@@ -520,7 +632,7 @@ export default function Vault() {
                   )}
 
                   {!textLike && !isImage && !isVideo && !isAudio && !isPdf && (
-                    <div style={{ padding: 16, fontSize: 14, color: "#555" }}>
+                    <div className="p-4 text-gray-700 text-sm">
                       Preview not available. Use <b>Download</b> to open the file.
                     </div>
                   )}

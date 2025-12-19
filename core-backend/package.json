@@ -13,7 +13,7 @@
   "dependencies": {
     "@tmcw/togeojson": "^7.1.2",
     "adm-zip": "^0.5.16",
-    "bcrypt": "^6.0.0",
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "csv-parse": "^6.1.0",
@@ -23,6 +23,7 @@
     "jszip": "^3.10.1",
     "mongoose": "^7.6.1",
     "multer": "^2.0.2",
+    "nodemailer": "^7.0.10",
     "xlsx": "^0.18.5",
     "xmldom": "^0.6.0"
   },
@@ -30,7 +31,7 @@
     "nodemon": "^3.1.10"
   },
   "engines": {
-    "node": ">=16"
+    "node": "20.x"
   },
   "keywords": [],
   "author": "Wayne Stead",

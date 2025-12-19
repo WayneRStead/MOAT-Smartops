@@ -48,4 +48,9 @@ TaskMilestoneSchema.pre('validate', function (next) {
   next();
 });
 
+// Optional: alias setter (defensive)
+TaskMilestoneSchema.virtual('endActual')
+  .set(function (v) { this.actualEndAt = v; })
+  .get(function () { return this.actualEndAt; });
+
 module.exports = mongoose.model('TaskMilestone', TaskMilestoneSchema);

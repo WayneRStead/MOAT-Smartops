@@ -1,9 +1,11 @@
 // core-backend/routes/vehicles.js
 const express = require('express');
 const mongoose = require('mongoose');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, resolveOrgContext, requireOrg } = require('../middleware/auth');
 
 const router = express.Router();
+// ✅ Enforce auth + org on ALL routes
+router.use(requireAuth, resolveOrgContext, requireOrg);
 
 /* ---------------------------- model loading ---------------------------- */
 // Prefer already-compiled model; require() only if missing
@@ -15,16 +17,24 @@ const isValidId = (v) => !!v && mongoose.Types.ObjectId.isValid(String(v));
 const asObjectId = (v) => (isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
 
 // Build an org filter that matches your Vehicle schema (String or ObjectId).
-// If the schema has no orgId, we skip org scoping.
-// If orgId is a string like "root" but schema expects ObjectId, we skip filtering to avoid cast errors.
-function buildOrgFilter(model, orgId) {
+// Prefers per-request org (header/query/body parsed by resolveOrgContext) then token's orgId.
+function buildOrgFilter(model, req) {
   const p = model?.schema?.path('orgId');
   if (!p) return {}; // schema has no orgId -> no org filter
-  const s = String(orgId || '');
+
+  // Source precedence: explicit request org -> token user org
+  const src = req.orgObjectId || req.orgId || req.user?.orgId || null;
+  if (!src) return {};
+
+  if (req.orgObjectId && p.instance === 'ObjectId') {
+    return { orgId: req.orgObjectId };
+  }
+
+  const s = String(src || '');
   if (p.instance === 'String') {
     return s ? { orgId: s } : {};
   }
-  // ObjectId orgId
+  // ObjectId expected
   return mongoose.Types.ObjectId.isValid(s) ? { orgId: new mongoose.Types.ObjectId(s) } : {};
 }
 
@@ -105,18 +115,34 @@ function computeNextDue(reminders = []) {
 
 /* -------------------------------- LIST --------------------------------- */
 // GET /vehicles
-router.get('/', requireAuth, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const { q, projectId, status, limit, driverId, taskId } = req.query;
+    const {
+      q,
+      projectId,
+      status,
+      limit,
+      driverId,
+      taskId,
+      vehicleType,
+      vin,
+    } = req.query;
 
     const find = {
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     };
 
+    // text-ish search on reg/make/model/vin
     if (q) {
       const rx = new RegExp(escapeRx(q), 'i');
-      find.$or = [{ reg: rx }, { make: rx }, { model: rx }];
+      find.$or = [{ reg: rx }, { make: rx }, { model: rx }, { vin: rx }];
     }
+    if (vin) {
+      // exact vin filter if provided explicitly
+      find.vin = new RegExp(`^${escapeRx(String(vin).trim())}$`, 'i');
+    }
+    if (vehicleType) find.vehicleType = String(vehicleType).toLowerCase();
+
     if (isValidId(projectId)) find.projectId = asObjectId(projectId);
     if (isValidId(driverId))  find.driverId  = asObjectId(driverId);
     if (isValidId(taskId))    find.taskId    = asObjectId(taskId);
@@ -154,14 +180,14 @@ router.get('/', requireAuth, async (req, res) => {
 
 /* -------------------------------- READ --------------------------------- */
 // GET /vehicles/:id
-router.get('/:id', requireAuth, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!isValidId(id)) return res.status(404).json({ error: 'Not found' });
 
     const row = await Vehicle.findOne({
       _id: id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     })
       .populate({ path: 'driverId', select: 'name email' })
       .populate({ path: 'taskId',   select: 'title' })
@@ -179,9 +205,13 @@ router.get('/:id', requireAuth, async (req, res) => {
 
 /* ------------------------------- CREATE -------------------------------- */
 // POST /vehicles
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
-    const { reg, make, model, year, status, projectId, driverId, taskId } = req.body || {};
+    const {
+      reg, make, model, year, status,
+      projectId, driverId, taskId,
+      vin, vehicleType,
+    } = req.body || {};
     if (!reg || !String(reg).trim()) {
       return res.status(400).json({ error: 'reg required' });
     }
@@ -193,18 +223,26 @@ router.post('/', requireAuth, async (req, res) => {
       model: model || '',
       year: year ? Number(year) : undefined,
       status: status || 'active',
+      vin: vin ?? undefined,
+      vehicleType: vehicleType ?? undefined,
       projectId: isValidId(projectId) ? asObjectId(projectId) : undefined,
       driverId:  isValidId(driverId)  ? asObjectId(driverId)  : undefined,
       taskId:    isValidId(taskId)    ? asObjectId(taskId)    : undefined,
     });
 
-    // Set orgId if schema has it
+    // Set orgId if schema has it (prefer request org over token)
     const orgPath = Vehicle?.schema?.path('orgId');
     if (orgPath) {
       if (orgPath.instance === 'String') {
-        doc.orgId = String(req.user?.orgId || 'root');
-      } else if (mongoose.Types.ObjectId.isValid(String(req.user?.orgId))) {
-        doc.orgId = new mongoose.Types.ObjectId(String(req.user.orgId));
+        const src = req.orgId || req.user?.orgId || 'root';
+        doc.orgId = String(src);
+      } else {
+        const src =
+          req.orgObjectId ||
+          (mongoose.Types.ObjectId.isValid(String(req.orgId || req.user?.orgId))
+            ? new mongoose.Types.ObjectId(String(req.orgId || req.user?.orgId))
+            : undefined);
+        if (src) doc.orgId = src;
       }
     }
 
@@ -219,7 +257,14 @@ router.post('/', requireAuth, async (req, res) => {
   } catch (e) {
     console.error('POST /vehicles error:', e);
     if (e && e.code === 11000) {
-      return res.status(409).json({ error: 'Vehicle with this registration already exists' });
+      // Duplicate key could be reg or vin
+      const k = Object.keys(e.keyPattern || e.keyValue || {})[0] || 'reg';
+      const which = k.toLowerCase().includes('vin') ? 'VIN' : 'registration';
+      return res.status(409).json({ error: `Vehicle with this ${which} already exists` });
+    }
+    // Mongoose validation errors (e.g., VIN format)
+    if (e?.name === 'ValidationError') {
+      return res.status(400).json({ error: e.message });
     }
     res.status(500).json({ error: 'Server error' });
   }
@@ -227,23 +272,33 @@ router.post('/', requireAuth, async (req, res) => {
 
 /* ------------------------------- UPDATE -------------------------------- */
 // PUT /vehicles/:id
-router.put('/:id', requireAuth, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const v = await Vehicle.findOne({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     });
     if (!v) return res.status(404).json({ error: 'Not found' });
 
     if (!visibleToReq(req, v)) return res.status(403).json({ error: 'Forbidden' });
 
-    const { reg, make, model, year, status, projectId, driverId, taskId } = req.body || {};
+    const {
+      reg, make, model, year, status,
+      projectId, driverId, taskId,
+      vin, vehicleType,
+    } = req.body || {};
 
     if (reg != null)   v.reg = String(reg).trim();
     if (make != null)  v.make = make;
     if (model != null) v.model = model;
     if (year != null)  v.year = year ? Number(year) : undefined;
-    if (status != null && ['active', 'workshop', 'retired'].includes(status)) v.status = status;
+
+    if (status != null && ['active', 'workshop', 'retired', 'stolen'].includes(status)) {
+      v.status = status;
+    }
+
+    if (vin !== undefined)         v.vin = vin;                  // model handles '', null -> null + validation
+    if (vehicleType !== undefined) v.vehicleType = vehicleType;  // enum validated by model
 
     if (projectId !== undefined) v.projectId = isValidId(projectId) ? asObjectId(projectId) : undefined;
     if (driverId  !== undefined) v.driverId  = isValidId(driverId)  ? asObjectId(driverId)  : undefined;
@@ -259,17 +314,25 @@ router.put('/:id', requireAuth, async (req, res) => {
     res.json(normalizeOut(ret));
   } catch (e) {
     console.error('PUT /vehicles/:id error:', e);
+    if (e && e.code === 11000) {
+      const k = Object.keys(e.keyPattern || e.keyValue || {})[0] || 'reg';
+      const which = k.toLowerCase().includes('vin') ? 'VIN' : 'registration';
+      return res.status(409).json({ error: `Vehicle with this ${which} already exists` });
+    }
+    if (e?.name === 'ValidationError') {
+      return res.status(400).json({ error: e.message });
+    }
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 /* ------------------------------- DELETE -------------------------------- */
 // DELETE /vehicles/:id
-router.delete('/:id', requireAuth, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const del = await Vehicle.findOneAndDelete({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     });
     if (!del) return res.status(404).json({ error: 'Not found' });
     res.sendStatus(204);
@@ -281,12 +344,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
 /* ----------------------------- REMINDERS ------------------------------- */
 // GET /vehicles/:id/reminders
-router.get('/:id/reminders', requireAuth, async (req, res) => {
+router.get('/:id/reminders', async (req, res) => {
   try {
     if (!isValidId(req.params.id)) return res.status(404).json({ error: 'Not found' });
     const v = await Vehicle.findOne({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     }).lean();
     if (!v) return res.status(404).json({ error: 'Not found' });
     if (!visibleToReq(req, v)) return res.status(403).json({ error: 'Forbidden' });
@@ -300,7 +363,7 @@ router.get('/:id/reminders', requireAuth, async (req, res) => {
 });
 
 // POST /vehicles/:id/reminders
-router.post('/:id/reminders', requireAuth, async (req, res) => {
+router.post('/:id/reminders', async (req, res) => {
   try {
     const { kind, dueDate, dueOdometer, notes } = req.body || {};
     if (!isValidId(req.params.id)) return res.status(404).json({ error: 'Not found' });
@@ -308,7 +371,7 @@ router.post('/:id/reminders', requireAuth, async (req, res) => {
 
     const v = await Vehicle.findOne({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     });
     if (!v) return res.status(404).json({ error: 'Not found' });
     if (!visibleToReq(req, v)) return res.status(403).json({ error: 'Forbidden' });
@@ -333,14 +396,14 @@ router.post('/:id/reminders', requireAuth, async (req, res) => {
 });
 
 // PUT /vehicles/:id/reminders/:rid
-router.put('/:id/reminders/:rid', requireAuth, async (req, res) => {
+router.put('/:id/reminders/:rid', async (req, res) => {
   try {
     if (!isValidId(req.params.id) || !isValidId(req.params.rid)) {
       return res.status(404).json({ error: 'Not found' });
     }
     const v = await Vehicle.findOne({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     });
     if (!v) return res.status(404).json({ error: 'Not found' });
     if (!visibleToReq(req, v)) return res.status(403).json({ error: 'Forbidden' });
@@ -365,7 +428,7 @@ router.put('/:id/reminders/:rid', requireAuth, async (req, res) => {
 });
 
 // DELETE /vehicles/:id/reminders/:rid
-router.delete('/:id/reminders/:rid', requireAuth, async (req, res) => {
+router.delete('/:id/reminders/:rid', async (req, res) => {
   try {
     if (!isValidId(req.params.id) || !isValidId(req.params.rid)) {
       return res.status(404).json({ error: 'Not found' });
@@ -374,7 +437,7 @@ router.delete('/:id/reminders/:rid', requireAuth, async (req, res) => {
     // Try subdocument deletion first
     const v = await Vehicle.findOne({
       _id: req.params.id,
-      ...buildOrgFilter(Vehicle, req.user?.orgId),
+      ...buildOrgFilter(Vehicle, req),
     });
     if (!v) return res.status(404).json({ error: 'Not found' });
     if (!visibleToReq(req, v)) return res.status(403).json({ error: 'Forbidden' });
@@ -389,7 +452,7 @@ router.delete('/:id/reminders/:rid', requireAuth, async (req, res) => {
 
     // Fallback (if reminders array contains plain objects and not subdocs)
     await Vehicle.updateOne(
-      { _id: req.params.id, ...buildOrgFilter(Vehicle, req.user?.orgId) },
+      { _id: req.params.id, ...buildOrgFilter(Vehicle, req) },
       { $pull: { reminders: { _id: new mongoose.Types.ObjectId(String(req.params.rid)) } } }
     );
 

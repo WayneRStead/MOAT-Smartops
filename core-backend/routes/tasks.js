@@ -8,6 +8,7 @@ const AdmZip = require("adm-zip");
 const { requireAuth } = require("../middleware/auth");
 const Task = require("../models/Task");
 const Project = require("../models/Project"); // inherit project fences
+const TaskMilestone = require("../models/TaskMilestone"); // <-- validate milestoneId on logs
 
 const router = express.Router();
 
@@ -15,6 +16,18 @@ const router = express.Router();
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
 const OID = (v) => (isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
+
+// Accepts: id string, object with {_id|id|value|userId}, array (first item)
+function extractId(maybe) {
+  if (!maybe) return undefined;
+  if (typeof maybe === "string" && isId(maybe)) return new mongoose.Types.ObjectId(maybe);
+  if (Array.isArray(maybe) && maybe.length) return extractId(maybe[0]);
+  if (typeof maybe === "object") {
+    const cand = maybe._id || maybe.id || maybe.value || maybe.userId;
+    if (typeof cand === "string" && isId(cand)) return new mongoose.Types.ObjectId(cand);
+  }
+  return undefined;
+}
 
 function allowRoles(...roles) {
   return (req, res, next) => {
@@ -30,8 +43,16 @@ const getRole = (req) => (req.user?.role || req.user?.claims?.role || "user");
 const isAdminRole = (role) => ["admin", "superadmin"].includes(String(role).toLowerCase());
 const isAdmin = (req) => isAdminRole(getRole(req));
 
-// enum-ish
-const normalizeStatus = (s) => (s ? String(s).toLowerCase() : undefined);
+// friendlier status normalization (keeps enum final check in model)
+function normalizeStatus(s) {
+  if (s == null) return undefined;
+  const v = String(s).trim().toLowerCase();
+  if (["done", "finish", "finished", "complete", "completed"].includes(v)) return "completed";
+  if (["in progress", "in-progress", "inprogress", "started", "start", "resume", "resumed"].includes(v)) return "in-progress";
+  if (["pause", "paused"].includes(v)) return "paused";
+  if (["open", "todo", "to-do", "pending"].includes(v)) return "pending";
+  return v;
+}
 
 /* ----------------------- Org helpers ----------------------- */
 
@@ -105,7 +126,7 @@ function ensureLogIds(taskDoc) {
 function setStatusFromLog(taskDoc) {
   const log = [...(taskDoc.actualDurationLog || [])]
     .sort((a, b) => new Date(a.at) - new Date(b.at))
-    .filter((e) => e.action !== "photo");
+    .filter((e) => e.action !== "photo" && e.action !== "fence");
   if (!log.length) return;
   const last = log[log.length - 1];
   if (last.action === "start" || last.action === "resume") taskDoc.status = "in-progress";
@@ -118,12 +139,9 @@ function normalizeOut(t) {
   const obj = t.toObject ? t.toObject() : { ...t };
   return {
     ...obj,
-    // prefer dueAt if present, else legacy dueDate
     dueAt: obj.dueAt ?? obj.dueDate ?? null,
-    // expose startDate, and alias startAt for older clients
     startDate: obj.startDate ?? null,
-    startAt: obj.startDate ?? null,
-    // legacy mirrors (kept)
+    startAt: obj.startDate ?? null, // legacy alias
     assignee: Array.isArray(obj.assignedTo) ? obj.assignedTo[0] : obj.assignee,
     actualDurationMinutes: computeActualMinutes(obj.actualDurationLog || []),
     isBlocked: (obj.dependentTaskIds?.length || 0) > 0,
@@ -284,7 +302,7 @@ function extractKMLFromKMZ(buffer) {
   try {
     const zip = new AdmZip(buffer);
     const entries = zip.getEntries();
-    thePreferred = entries.find(e => /(^|\/)doc\.kml$/i.test(e.entryName));
+    const thePreferred = entries.find(e => /(^|\/)doc\.kml$/i.test(e.entryName));
     const kmlEntry = thePreferred || entries.find(e => /\.kml$/i.test(e.entryName));
     if (!kmlEntry) return null;
     return kmlEntry.getData().toString("utf8");
@@ -456,26 +474,25 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
     const body = req.body || {};
     if (!body.title) return res.status(400).json({ error: "title required" });
 
+    // assignee/assignedTo aliases (accept id string, object {_id|id|value|userId}, or array)
     let assignedTo = [];
-    if (Object.prototype.hasOwnProperty.call(body, "assignedTo")) {
-      if (Array.isArray(body.assignedTo)) {
-        assignedTo = body.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
-      }
-    } else if (Object.prototype.hasOwnProperty.call(body, "assignee")) {
-      const oid = OID(body.assignee);
-      assignedTo = oid ? [oid] : [];
+    if (Array.isArray(body.assignedTo)) {
+      assignedTo = body.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
+    } else {
+      const one = extractId(body.assignee || body.assigneeId || (Array.isArray(body.assignedTo) ? body.assignedTo[0] : undefined));
+      if (one) assignedTo = [one];
     }
 
-    // NEW: start date support (accept startDate or startAt)
+    // start date
     const startDate =
       body.startDate ? new Date(body.startDate)
       : body.startAt   ? new Date(body.startAt)
       : undefined;
 
-    const dueDate =
-      body.dueDate ? new Date(body.dueDate)
-      : body.dueAt   ? new Date(body.dueAt)
-      : undefined;
+    // due date aliases
+    const rawDue =
+      body.dueAt ?? body.dueDate ?? body.deadline ?? body.deadlineAt ?? undefined;
+    const dueDate = rawDue ? new Date(rawDue) : undefined;
 
     // Visibility fields
     let visibility = {};
@@ -499,6 +516,7 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       // timeline fields
       startDate,
       dueDate,
+      dueAt: dueDate, // explicitly mirror on create
 
       dependentTaskIds: Array.isArray(body.dependentTaskIds)
         ? body.dependentTaskIds.filter(isId).map((id) => new mongoose.Types.ObjectId(id))
@@ -529,7 +547,7 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
   }
 });
 
-/* --------------------------- UPDATE --------------------------- */
+/* --------------------------- UPDATE (PUT full) --------------------------- */
 router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   try {
     const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
@@ -542,7 +560,7 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
     if (b.status != null) t.status = normalizeStatus(b.status);
 
-    // NEW: startDate / startAt
+    // startDate / startAt
     if (Object.prototype.hasOwnProperty.call(b, "startDate") ||
         Object.prototype.hasOwnProperty.call(b, "startAt")) {
       t.startDate = b.startDate ? new Date(b.startDate)
@@ -550,26 +568,36 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
                  : undefined;
     }
 
-    // dueAt / dueDate (kept)
-    if (Object.prototype.hasOwnProperty.call(b, "dueDate") ||
-        Object.prototype.hasOwnProperty.call(b, "dueAt")) {
-      t.dueDate = b.dueDate ? new Date(b.dueDate)
-               : b.dueAt   ? new Date(b.dueAt)
-               : undefined;
+    // due date aliases: dueAt/dueDate/deadline/deadlineAt
+    if (
+      Object.prototype.hasOwnProperty.call(b, "dueDate") ||
+      Object.prototype.hasOwnProperty.call(b, "dueAt") ||
+      Object.prototype.hasOwnProperty.call(b, "deadline") ||
+      Object.prototype.hasOwnProperty.call(b, "deadlineAt")
+    ) {
+      const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
+      const d = rawDue ? new Date(rawDue) : undefined;
+      t.dueDate = d;
+      t.dueAt = d;
     }
 
+    // project/group
     if (b.projectId !== undefined) t.projectId = OID(b.projectId);
-    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId); // legacy
+    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId);
 
+    // assignee/assignedTo
     if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
       if (Array.isArray(b.assignedTo)) {
         t.assignedTo = b.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
-      } else {
+      } // if not an array, ignore to avoid accidental clearing
+    }
+    if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
+      const one = extractId(b.assignee || b.assigneeId);
+      if (one) {
+        t.assignedTo = [one];
+      } else if (b.assignee === null || b.assigneeId === null) {
         t.assignedTo = [];
-      }
-    } else if (Object.prototype.hasOwnProperty.call(b, "assignee")) {
-      const oid = OID(b.assignee);
-      t.assignedTo = oid ? [oid] : [];
+      } // else ignore invalid shape instead of clearing
     }
 
     if (b.dependentTaskIds !== undefined) {
@@ -588,7 +616,7 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
-    // Visibility updates (new fields)
+    // Visibility updates
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
@@ -607,6 +635,85 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     res.json(normalizeOut(t));
   } catch (e) {
     console.error("PUT /tasks/:id error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* --------------------------- PARTIAL UPDATE (PATCH) --------------------------- */
+router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+  try {
+    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    if (!t) return res.status(404).json({ error: "Not found" });
+    const b = req.body || {};
+
+    if (b.title != null) t.title = String(b.title).trim();
+    if (b.description != null) t.description = String(b.description);
+    if (b.priority != null) t.priority = String(b.priority).toLowerCase();
+    if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
+    if (b.status != null) t.status = normalizeStatus(b.status);
+
+    if (b.startDate != null || b.startAt != null) {
+      t.startDate = b.startDate ? new Date(b.startDate)
+                 : b.startAt   ? new Date(b.startAt)
+                 : undefined;
+    }
+
+    if (b.dueAt != null || b.dueDate != null || b.deadline != null || b.deadlineAt != null) {
+      const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
+      const d = rawDue ? new Date(rawDue) : undefined;
+      t.dueDate = d;
+      t.dueAt = d;
+    }
+
+    if (b.projectId !== undefined) t.projectId = OID(b.projectId);
+    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId);
+
+    if (b.assignedTo !== undefined) {
+      if (Array.isArray(b.assignedTo)) {
+        t.assignedTo = b.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
+      } // ignore non-array to avoid clearing
+    }
+    if (b.assignee !== undefined || b.assigneeId !== undefined) {
+      const one = extractId(b.assignee || b.assigneeId);
+      if (one) {
+        t.assignedTo = [one];
+      } else if (b.assignee === null || b.assigneeId === null) {
+        t.assignedTo = [];
+      } // else ignore invalid shape
+    }
+
+    if (b.dependentTaskIds !== undefined) {
+      t.dependentTaskIds = Array.isArray(b.dependentTaskIds)
+        ? b.dependentTaskIds.filter(isId).map((id) => new mongoose.Types.ObjectId(id))
+        : [];
+    }
+
+    if (b.enforceQRScan !== undefined) t.enforceQRScan = !!b.enforceQRScan;
+    if (b.enforceLocationCheck !== undefined) t.enforceLocationCheck = !!b.enforceLocationCheck;
+    if (b.locationGeoFence !== undefined) t.locationGeoFence = b.locationGeoFence || undefined;
+    if (b.geoFences !== undefined) t.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
+
+    if (b.estimatedDuration !== undefined) {
+      t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
+    }
+
+    try {
+      const vis = sanitizeVisibilityInput(b, isAdmin(req));
+      if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
+      if (vis.assignedUserIds != null) t.assignedUserIds = vis.assignedUserIds;
+      if (vis.assignedGroupIds != null) t.assignedGroupIds = vis.assignedGroupIds;
+    } catch (err) {
+      return res.status(err.status || 400).json({ error: err.message || "visibility error" });
+    }
+
+    if (!ensureOrgOnDoc(Task, t, req)) {
+      return res.status(400).json({ error: "orgId missing/invalid on token" });
+    }
+
+    await t.save();
+    res.json(normalizeOut(t));
+  } catch (e) {
+    console.error("PATCH /tasks/:id error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -664,6 +771,7 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     const actorId =
       OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
+    const nLat = Number(lat), nLng = Number(lng);
     t.actualDurationLog.push({
       action,
       at: new Date(),
@@ -671,6 +779,7 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       actorName: req.user?.name,
       actorEmail: req.user?.email,
       actorSub: req.user?.sub || req.user?.id,
+      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
     });
 
     ensureLogIds(t);
@@ -690,14 +799,14 @@ router.post("/:id/action", requireAuth, async (req, res) => {
 });
 
 /* ---------------------- MANUAL LOG CRUD ---------------------- */
-const ALLOWED_LOG_ACTIONS = new Set(["start","pause","resume","complete","photo"]);
+const ALLOWED_LOG_ACTIONS = new Set(["start","pause","resume","complete","photo","fence"]);
 
 router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   try {
     const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const { action, at, note } = req.body || {};
+    const { action, at, note, lat, lng, milestoneId } = req.body || {};
     if (!ALLOWED_LOG_ACTIONS.has(String(action))) {
       return res.status(400).json({ error: "bad action" });
     }
@@ -705,8 +814,20 @@ router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin
     const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
+    // optional milestone validation (must belong to this task)
+    let msId = undefined;
+    if (milestoneId !== undefined && milestoneId !== null) {
+      const oid = OID(milestoneId);
+      if (!oid) return res.status(400).json({ error: "bad milestoneId" });
+      const exists = await TaskMilestone.exists({ _id: oid, taskId: t._id });
+      if (!exists) return res.status(400).json({ error: "milestone not found for this task" });
+      msId = oid;
+    }
+
     const editorId =
       OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+
+    const nLat = Number(lat), nLng = Number(lng);
 
     t.actualDurationLog.push({
       action,
@@ -716,6 +837,8 @@ router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin
       actorEmail: req.user?.email,
       actorSub: req.user?.sub || req.user?.id,
       note: note || "",
+      ...(msId ? { milestoneId: msId } : {}),
+      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
     });
 
     ensureLogIds(t);
@@ -740,7 +863,7 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const { action, at, note } = req.body || {};
+    const { action, at, note, lat, lng, milestoneId } = req.body || {};
 
     const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
@@ -758,6 +881,26 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
     }
     if (at != null) row.at = at ? new Date(at) : row.at;
     if (note != null) row.note = String(note);
+
+    if (lat != null && lng != null) {
+      const nLat = Number(lat), nLng = Number(lng);
+      if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+        row.lat = nLat; row.lng = nLng;
+      }
+    }
+
+    // milestone handling: allow null to clear, or ObjectId that belongs to this task
+    if ("milestoneId" in (req.body || {})) {
+      if (milestoneId === null) {
+        row.milestoneId = undefined;
+      } else {
+        const oid = OID(milestoneId);
+        if (!oid) return res.status(400).json({ error: "bad milestoneId" });
+        const exists = await TaskMilestone.exists({ _id: oid, taskId: t._id });
+        if (!exists) return res.status(400).json({ error: "milestone not found for this task" });
+        row.milestoneId = oid;
+      }
+    }
 
     row.editedAt = new Date();
     row.editedBy =
@@ -835,13 +978,24 @@ router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (r
 
     const file = req.file;
     if (!file) return res.status(400).json({ error: "file required" });
-    const mime = file.mimetype || "";
-    if (!mime.startsWith("image/")) {
-      return res.status(400).json({ error: "only image uploads are allowed" });
+
+    const mime = (file.mimetype || "").toLowerCase();
+    const ext = (file.originalname.split(".").pop() || "").toLowerCase();
+
+    // Accept images and geospatial files (KMZ/KML/GeoJSON)
+    const isImage = mime.startsWith("image/");
+    const isKMZ = ext === "kmz" || mime.includes("kmz") || mime === "application/zip";
+    const isKML = ext === "kml" || mime.includes("kml") || mime === "application/xml" || mime === "text/xml" || mime === "application/vnd.google-earth.kml+xml";
+    const isGJ  = ext === "geojson" || mime.includes("geo+json") || mime === "application/json";
+
+    if (!(isImage || isKMZ || isKML || isGJ)) {
+      return res.status(400).json({ error: "unsupported file type (images, .kmz, .kml, .geojson)" });
     }
 
     const relUrl = `/files/tasks/${path.basename(file.path)}`;
     const note = String(req.body?.note || "");
+    const lat = req.body?.lat, lng = req.body?.lng;
+    const nLat = Number(lat), nLng = Number(lng);
 
     const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
@@ -849,21 +1003,23 @@ router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (r
     t.attachments.push({
       filename: file.originalname,
       url: relUrl,
-      mime,
+      mime: file.mimetype || "",
       size: file.size,
       uploadedBy: req.user?.name || req.user?.email || String(req.user?._id || ""),
       uploadedAt: new Date(),
       note,
     });
 
+    // Log: "photo" for images, "fence" for geospatial files
     t.actualDurationLog.push({
-      action: "photo",
+      action: isImage ? "photo" : "fence",
       at: new Date(),
       userId,
       note,
       actorName: req.user?.name,
       actorEmail: req.user?.email,
       actorSub: req.user?.sub || req.user?.id,
+      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
     });
 
     ensureLogIds(t);

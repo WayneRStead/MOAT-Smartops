@@ -1,7 +1,9 @@
 // src/pages/Clockings.jsx
 import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom"; // ★ for Timesheet button
 import { api } from "../lib/api";
 import ClockingEditForm from "../components/ClockingEditForm";
+import { useTheme } from "../ThemeContext";
 
 const ATTENDANCE_TYPES = ["present","in","out","training","sick","leave","iod","overtime"];
 
@@ -11,7 +13,7 @@ function toLocalInput(dtLike) {
   const d = new Date(dtLike);
   const off = d.getTimezoneOffset();
   const local = new Date(d.getTime() - off * 60000);
-  return local.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:mm"
+  return local.toISOString().slice(0, 16);
 }
 function fromLocalInput(s) {
   if (!s) return null;
@@ -50,8 +52,7 @@ function rowsToCsv(rows, columns) {
 function triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
+  a.href = url; a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -65,11 +66,8 @@ async function mapWithConcurrency(items, limit, fn) {
   const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
     while (i < items.length) {
       const idx = i++;
-      try {
-        results[idx] = await fn(items[idx], idx);
-      } catch (e) {
-        results[idx] = undefined;
-      }
+      try { results[idx] = await fn(items[idx], idx); }
+      catch { results[idx] = undefined; }
     }
   });
   await Promise.all(workers);
@@ -78,41 +76,27 @@ async function mapWithConcurrency(items, limit, fn) {
 
 /** --- KML helpers --- **/
 function kmlEsc(s = "") {
-  return String(s)
-    .replace(/&/g,"&amp;")
-    .replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;");
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
-function val(v) {
-  return v === null || v === undefined ? "" : String(v);
-}
+function val(v) { return v == null ? "" : String(v); }
 function makeKmlPlacemarkFromClocking(r, opts) {
-  // requires lat/lng present
   const lat = r?.location?.lat ?? r?.lat;
   const lng = r?.location?.lng ?? r?.lng;
   if (!(Number.isFinite(lat) && Number.isFinite(lng))) return "";
   const acc = r?.location?.acc ?? r?.acc;
-
   const whenIso = r.at ? new Date(r.at).toISOString() : "";
   const user = opts.userName(r.userId) || (r.user?.name || r.user?.email || "");
   const proj = opts.projectName(r.projectId) || (r.project?.name || "");
   const lastBy = r.lastEditedBy?.name || r.lastEditedBy?.email || (r.lastEditedBy ? String(r.lastEditedBy) : "");
   const reason = r._lastEditReason || "";
-
-  const name = [
-    r.type || "clocking",
-    user ? `- ${user}` : "",
-    whenIso ? ` @ ${whenIso}` : "",
-  ].join(" ").trim();
-
+  const name = [r.type || "clocking", user && `- ${user}`, whenIso && `@ ${whenIso}`].filter(Boolean).join(" ");
   const description = [
     user && `User: ${user}`,
     proj && `Project: ${proj}`,
     r.type && `Type: ${r.type}`,
     whenIso && `When: ${whenIso}`,
-    (r.notes ? `Notes: ${r.notes}` : ""),
+    r.notes && `Notes: ${r.notes}`,
   ].filter(Boolean).join("\n");
-
   return `
     <Placemark>
       <name>${kmlEsc(name)}</name>
@@ -145,17 +129,39 @@ function makeKmlDocument(placemarks, docName = "Clockings Export") {
 </kml>`;
 }
 
+/** ★ robust getters for method + staff number **/
+function methodOf(r) {
+  const m = r?.method || r?.meta?.method || r?.source;
+  if (m) return String(m).toLowerCase();
+  if (r?.biometric === true || r?.faceMatch === true || r?.facial === true) return "biometric";
+  return "manual";
+}
+function staffNoOf(userObj) {
+  if (!userObj) return "";
+  return (
+    userObj.staffNumber ||
+    userObj.staffNo ||
+    userObj.employeeNumber ||
+    userObj.employeeNo ||
+    userObj.staff_code ||
+    ""
+  );
+}
+
 export default function Clockings() {
+  const { org } = useTheme();
+  const accent = org?.accentColor || "#2a7fff";
+
   // reference data
   const [users, setUsers] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [groups, setGroups] = useState([]);            // ✅ groups list
+  const [groups, setGroups] = useState([]);
 
   // filters for history
   const [q, setQ] = useState("");
   const [filterProjectId, setFilterProjectId] = useState("");
   const [filterUserId, setFilterUserId] = useState("");
-  const [filterGroupId, setFilterGroupId] = useState(""); // ✅ group filter
+  const [filterGroupId, setFilterGroupId] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -164,11 +170,12 @@ export default function Clockings() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // create form
+  // create form (now in modal)
+  const [createOpen, setCreateOpen] = useState(false);
   const [isBulk, setIsBulk] = useState(true);
   const [projectId, setProjectId] = useState("");
   const [type, setType] = useState("present");
-  const [at, setAt] = useState(() => toLocalInput(new Date())); // local now
+  const [at, setAt] = useState(() => toLocalInput(new Date()));
   const [notes, setNotes] = useState("");
   const [selectedUsers, setSelectedUsers] = useState([]);   // for bulk
   const [singleUser, setSingleUser] = useState("");         // for single
@@ -193,12 +200,18 @@ export default function Clockings() {
   const [auditHeader, setAuditHeader] = useState(null);
 
   // compact "reason" cache for table hover
-  const [reasonCache, setReasonCache] = useState({}); // { [clockingId]: string }
+  const [reasonCache, setReasonCache] = useState({});
 
   // export busy
   const [exportBusy, setExportBusy] = useState(false);
 
   // quick lookups
+  const userById = useMemo(() => {
+    const m = new Map();
+    users.forEach(u => m.set(String(u._id), u));
+    return id => m.get(String(id));
+  }, [users]);
+
   const userName = useMemo(() => {
     const m = new Map();
     users.forEach(u => m.set(String(u._id), u.name || u.email || u.username || String(u._id)));
@@ -211,7 +224,65 @@ export default function Clockings() {
     return id => m.get(String(id)) || "—";
   }, [projects]);
 
-  // limit user choices to selected project's members (if available)
+  /** ───────────────────────────── Block A: Groups mapping ─────────────────────────────
+   * Build:
+   *  - groupsByUserId: Map<userId, { ids: string[], names: string[] }>
+   * Handles both new schema (memberUserIds/leaderUserIds) and legacy (members).
+   */
+  const groupsByUserId = useMemo(() => {
+    const map = new Map(); // userId -> { ids: string[], names: string[] }
+
+    const add = (uid, gid, gname) => {
+      if (!uid || !gid) return;
+      const key = String(uid);
+      const rec = map.get(key) || { ids: [], names: [] };
+      const gidS = String(gid);
+      if (!rec.ids.includes(gidS)) rec.ids.push(gidS);
+      if (gname && !rec.names.includes(String(gname))) rec.names.push(String(gname));
+      map.set(key, rec);
+    };
+
+    (groups || [])
+      .filter(g => !g?.isDeleted) // only active groups
+      .forEach(g => {
+        const gid = g?._id;
+        const gname = g?.name || String(gid);
+
+        // New schema
+        const memberUserIds = Array.isArray(g?.memberUserIds) ? g.memberUserIds : [];
+        const leaderUserIds = Array.isArray(g?.leaderUserIds) ? g.leaderUserIds : [];
+
+        // Legacy: members: string[] or object[]
+        const membersLegacy = Array.isArray(g?.members) ? g.members : [];
+
+        memberUserIds.forEach(uid => add(uid, gid, gname));
+        leaderUserIds.forEach(uid => add(uid, gid, gname));
+
+        membersLegacy.forEach(m => {
+          if (!m) return;
+          if (typeof m === "string") add(m, gid, gname);
+          else {
+            const uid = m.userId || m._id || m.id;
+            if (uid) add(uid, gid, gname);
+          }
+        });
+      });
+
+    return map;
+  }, [groups]);
+
+  /** human-readable list of a user's group names */
+  const userGroupNames = (uid) => (groupsByUserId.get(String(uid))?.names || []).join(", ");
+
+  /** membership test by group _id */
+  const userGroupHas = (uid, groupId) => {
+    const rec = groupsByUserId.get(String(uid));
+    if (!rec) return false;
+    return rec.ids.includes(String(groupId));
+  };
+  /** ──────────────────────────── end Block A ──────────────────────────── */
+
+  // users eligible by project
   const eligibleUsers = useMemo(() => {
     if (!projectId) return users;
     const proj = projects.find(p => String(p._id) === String(projectId));
@@ -220,45 +291,96 @@ export default function Clockings() {
     return users.filter(u => memberIds.has(String(u._id)));
   }, [projectId, users, projects]);
 
+  // latest status per user to know who is "in"
+  const latestTypeByUser = useMemo(() => {
+    const map = new Map();
+    // assume rows are mixed; reduce to latest by at timestamp or order
+    rows.forEach(r => {
+      const key = String(r.userId);
+      const t = new Date(r.at || r.createdAt || 0).getTime();
+      const prev = map.get(key);
+      if (!prev || t > prev.t) map.set(key, { t, type: String(r.type || "").toLowerCase() });
+    });
+    return map; // Map<userId,{t,type}>
+  }, [rows]);
+
+  /** ★ restrict who can be clocked OFF */
+  const currentlyInSet = useMemo(() => {
+    const IN_TYPES = new Set(["present","in","training","overtime"]);
+    const set = new Set();
+    latestTypeByUser.forEach((v, uid) => {
+      if (IN_TYPES.has(v.type)) set.add(String(uid));
+    });
+    return set;
+  }, [latestTypeByUser]);
+
+  const eligibleUsersByType = useMemo(() => {
+    if (String(type).toLowerCase() !== "out") return eligibleUsers;
+    const only = eligibleUsers.filter(u => currentlyInSet.has(String(u._id)));
+    return only;
+  }, [type, eligibleUsers, currentlyInSet]);
+
   // load reference data
   async function loadUsers() {
-    try {
-      const { data } = await api.get("/users", { params: { limit: 1000 } });
-      setUsers(Array.isArray(data) ? data : []);
-    } catch { setUsers([]); }
+    try { const { data } = await api.get("/users", { params: { limit: 1000 } }); setUsers(Array.isArray(data) ? data : []); }
+    catch { setUsers([]); }
   }
   async function loadProjects() {
-    try {
-      const { data } = await api.get("/projects", { params: { limit: 1000 } });
-      setProjects(Array.isArray(data) ? data : []);
-    } catch { setProjects([]); }
+    try { const { data } = await api.get("/projects", { params: { limit: 1000 } }); setProjects(Array.isArray(data) ? data : []); }
+    catch { setProjects([]); }
   }
-  async function loadGroups() {                       // ✅ load groups
-    try {
-      const { data } = await api.get("/groups", { params: { limit: 1000 } });
-      setGroups(Array.isArray(data) ? data : []);
-    } catch { setGroups([]); }
+  async function loadGroups() {
+    try { const { data } = await api.get("/groups", { params: { limit: 1000 } }); setGroups(Array.isArray(data) ? data : []); }
+    catch { setGroups([]); }
   }
 
-  // build params from current filters
   function getSearchParams() {
-    const params = { limit: 500 };
-    if (q) params.q = q;
-    if (filterProjectId) params.projectId = filterProjectId;
-    if (filterUserId) params.userId = filterUserId;
-    if (filterGroupId) params.groupId = filterGroupId;   // ✅ include group
-    if (from) params.from = from; // server accepts YYYY-MM-DD per current code
-    if (to) params.to = to;
-    if (typeFilter) params.type = typeFilter;
-    return params;
-  }
+  const params = { limit: 500 };
+  if (q) params.q = q;
+  if (filterProjectId) params.projectId = filterProjectId;
+  if (filterUserId) params.userId = filterUserId;
 
-  // load history
+  // IMPORTANT:
+  // Do NOT send groupId to the backend for now.
+  // The backend's group filter likely only understands legacy fields,
+  // which drops rows for newly created groups before we can client-filter.
+  // We fetch the broader set and apply the strict client-side filter in load().
+  // if (filterGroupId) params.groupId = filterGroupId;
+  // Inclusive date range: from (start of day) ... to (END of day)
+  // Implemented by sending `to` as (selected to + 1 day), i.e. exclusive upper bound.
+  const addDays = (yyyyMmDd, n) => {
+    const d = new Date(yyyyMmDd);
+    if (isNaN(d)) return "";
+    d.setDate(d.getDate() + n);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  if (from) params.from = from;           // inclusive start
+  if (to)   params.to   = addDays(to, 1); // inclusive end by using < next day
+  if (typeFilter) params.type = typeFilter;
+
+  return params;
+}
+
   async function load() {
     setErr(""); setInfo(""); setLoading(true);
     try {
       const { data } = await api.get("/clockings", { params: getSearchParams() });
-      setRows(Array.isArray(data) ? data : (Array.isArray(data?.rows) ? data.rows : []));
+      let list = Array.isArray(data) ? data : (Array.isArray(data?.rows) ? data.rows : []);
+
+      /** ───────────────────────────── Block B: client-side group filter ─────────────────────────────
+       * Strict id-based check so new & legacy groups work immediately, even if the backend ignores groupId.
+       */
+      if (filterGroupId) {
+        const gid = String(filterGroupId);
+        list = list.filter(r => userGroupHas(r.userId, gid));
+      }
+      /** ──────────────────────────── end Block B ──────────────────────────── */
+
+      setRows(list);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     } finally {
@@ -269,42 +391,35 @@ export default function Clockings() {
   useEffect(() => {
     loadUsers();
     loadProjects();
-    loadGroups();     // ✅
+    loadGroups();
     load();
   }, []);
 
   // present location button
   function useMyLocation() {
     setErr(""); setInfo("");
-    if (!navigator.geolocation) {
-      setErr("Geolocation not supported in this browser.");
-      return;
-    }
+    if (!navigator.geolocation) { setErr("Geolocation not supported in this browser."); return; }
     navigator.geolocation.getCurrentPosition(
       pos => {
         const { latitude, longitude, accuracy } = pos.coords || {};
         setLat(latitude?.toFixed(6) ?? "");
         setLng(longitude?.toFixed(6) ?? "");
         setAcc(Number.isFinite(accuracy) ? Math.round(accuracy) : "");
-        setInfo("Location captured.");
-        setTimeout(() => setInfo(""), 1200);
+        setInfo("Location captured."); setTimeout(() => setInfo(""), 1200);
       },
       err => setErr(err?.message || "Failed to get location"),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   }
 
-  // toggle user checkbox (bulk)
+  // toggle user (pill)
   function toggleUser(id) {
-    setSelectedUsers(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
+    setSelectedUsers(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   }
 
   async function submitClocking(e) {
     e.preventDefault();
     setErr(""); setInfo("");
-
     try {
       const payloadBase = {
         type,
@@ -312,31 +427,32 @@ export default function Clockings() {
         at: fromLocalInput(at) || undefined,
         projectId: projectId || undefined,
       };
-
       const nLat = lat !== "" ? Number(lat) : undefined;
       const nLng = lng !== "" ? Number(lng) : undefined;
       const nAcc = acc !== "" ? Number(acc) : undefined;
       if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
-        payloadBase.lat = nLat;
-        payloadBase.lng = nLng;
+        payloadBase.lat = nLat; payloadBase.lng = nLng;
         if (Number.isFinite(nAcc)) payloadBase.acc = nAcc;
       }
-
       if (isBulk) {
-        if (!selectedUsers.length) return setErr("Select at least one user.");
-        await api.post("/clockings", { ...payloadBase, userIds: selectedUsers });
-        setInfo(`Clocked ${selectedUsers.length} user(s).`);
+        const pool = type.toLowerCase() === "out" ? eligibleUsersByType : eligibleUsers; // ★ restrict on OUT
+        const selected = selectedUsers.filter(id => pool.some(u => String(u._id) === String(id)));
+        if (!selected.length) return setErr(type.toLowerCase() === "out" ? "Pick users who are clocked in." : "Select at least one user.");
+        await api.post("/clockings", { ...payloadBase, userIds: selected });
+        setInfo(`Clocked ${selected.length} user(s).`);
         setSelectedUsers([]);
       } else {
-        if (!singleUser) return setErr("Pick a user.");
+        const pool = type.toLowerCase() === "out" ? eligibleUsersByType : eligibleUsers; // ★ restrict on OUT
+        if (!singleUser || !pool.some(u => String(u._id) === String(singleUser))) {
+          return setErr(type.toLowerCase() === "out" ? "Pick a user who is clocked in." : "Pick a user.");
+        }
         await api.post("/clockings", { ...payloadBase, userId: singleUser });
-        setInfo("Clocking saved.");
-        setSingleUser("");
+        setInfo("Clocking saved."); setSingleUser("");
       }
-
       setNotes("");
       setAt(toLocalInput(new Date()));
       await load();
+      setCreateOpen(false);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -354,25 +470,14 @@ export default function Clockings() {
     }
   }
 
-  // ----- Edit modal handlers -----
-  function openEdit(row) {
-    setEditingRow(row);
-    setEditOpen(true);
-  }
-  function closeEdit() {
-    setEditOpen(false);
-    setEditingRow(null);
-  }
+  function openEdit(row) { setEditingRow(row); setEditOpen(true); }
+  function closeEdit() { setEditOpen(false); setEditingRow(null); }
 
-  // ----- Audit modal handlers -----
   async function openAudit(row) {
-    setAuditOpen(true);
-    setAuditLoading(true);
-    setAuditRows([]);
+    setAuditOpen(true); setAuditLoading(true); setAuditRows([]);
     setAuditHeader({ at: row.at, userId: row.userId, projectId: row.projectId, type: row.type, _id: row._id });
     try {
       const { data } = await api.get(`/clockings/${row._id}/audit`);
-      // API shape: { lastEditedAt, lastEditedBy, editLog }
       const list = Array.isArray(data?.editLog) ? data.editLog : [];
       list.sort((a,b) => new Date(b.editedAt).getTime() - new Date(a.editedAt).getTime());
       setAuditRows(list);
@@ -387,54 +492,47 @@ export default function Clockings() {
       setAuditLoading(false);
     }
   }
-  function closeAudit() {
-    setAuditOpen(false);
-    setAuditRows([]);
-    setAuditHeader(null);
-  }
+  function closeAudit() { setAuditOpen(false); setAuditRows([]); setAuditHeader(null); }
 
-  // compact reason fetcher (lazy on hover)
   async function preloadReason(id) {
-    if (!id || reasonCache[id] !== undefined) return; // already fetched (even if empty)
+    if (!id || reasonCache[id] !== undefined) return;
     try {
       const { data } = await api.get(`/clockings/${id}/audit`);
       const list = Array.isArray(data?.editLog) ? data.editLog : [];
-      // pick newest edit with a non-empty note
       list.sort((a,b) => new Date(b.editedAt).getTime() - new Date(a.editedAt).getTime());
       const note = (list.find(x => (x.note || "").trim())?.note || "").trim();
       setReasonCache(prev => ({ ...prev, [id]: note }));
     } catch {
-      setReasonCache(prev => ({ ...prev, [id]: "" })); // avoid refetch loops on error
+      setReasonCache(prev => ({ ...prev, [id]: "" }));
     }
   }
 
-  /** ---- Export CSV ---- **/
+  /** ---- Export helpers ---- **/
+  // ★ include group, method, staffNumber in CSV
   const exportColumns = useMemo(() => ([
     { key: "_id", header: "id" },
     { key: "at", header: "at", get: r => r.at ? new Date(r.at).toISOString() : "" },
     { key: "type", header: "type" },
     { key: "user", header: "user", get: r => r.user?.name || r.user?.email || userName(r.userId) },
     { key: "project", header: "project", get: r => r.project?.name || projectName(r.projectId) },
+    { key: "group", header: "group", get: r => userGroupNames(r.userId) },          // ★
+    { key: "method", header: "method", get: r => methodOf(r) },                      // ★
+    { key: "staffNumber", header: "staffNumber", get: r => staffNoOf(userById(r.userId)) }, // ★
     { key: "lat", header: "lat", get: r => r.location?.lat ?? r.lat ?? "" },
     { key: "lng", header: "lng", get: r => r.location?.lng ?? r.lng ?? "" },
     { key: "acc", header: "acc", get: r => r.location?.acc ?? r.acc ?? "" },
     { key: "notes", header: "notes" },
     { key: "lastEditedAt", header: "lastEditedAt", get: r => r.lastEditedAt ? new Date(r.lastEditedAt).toISOString() : "" },
     { key: "lastEditedBy", header: "lastEditedBy", get: r => r.lastEditedBy?.name || r.lastEditedBy?.email || "" },
-    // ✅ include reason
     { key: "lastEditReason", header: "lastEditReason", get: r => r._lastEditReason || "" },
-  ]), [userName, projectName]);
+  ]), [userName, projectName, userById, groupsByUserId]);
 
   async function fetchAllForExport(params) {
-    const { data } = await api.get("/clockings", {
-      params: { ...params, limit: 10000 }, // bump for export
-      headers: { "cache-control": "no-cache" },
-    });
+    const { data } = await api.get("/clockings", { params: { ...params, limit: 10000 }, headers: { "cache-control": "no-cache" } });
     if (Array.isArray(data)) return data;
     if (Array.isArray(data?.rows)) return data.rows;
     return [];
   }
-
   async function fetchLatestEditReason(id) {
     if (reasonCache[id] !== undefined) return reasonCache[id] || "";
     try {
@@ -443,193 +541,104 @@ export default function Clockings() {
       list.sort((a,b) => new Date(b.editedAt).getTime() - new Date(a.editedAt).getTime());
       const note = (list.find(x => (x.note || "").trim())?.note || "").trim();
       return note;
-    } catch {
-      return "";
-    }
+    } catch { return ""; }
   }
-
   async function exportCsv() {
-    setErr("");
-    setExportBusy(true);
+    setErr(""); setExportBusy(true);
     try {
       const params = getSearchParams();
       const all = await fetchAllForExport(params);
       const reasons = await mapWithConcurrency(all, 6, async (row) => await fetchLatestEditReason(row._id));
       const withReasons = all.map((r, i) => ({ ...r, _lastEditReason: reasons[i] || "" }));
       const csv = rowsToCsv(withReasons, exportColumns);
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-      triggerDownload(blob, "clockings.csv");
+      triggerDownload(new Blob([csv], { type: "text/csv;charset=utf-8" }), "clockings.csv");
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || "Failed to export CSV.");
     } finally {
       setExportBusy(false);
     }
   }
-
-  /** ---- Export KML (points) ---- **/
   async function exportKml() {
-    setErr("");
-    setExportBusy(true);
+    setErr(""); setExportBusy(true);
     try {
       const params = getSearchParams();
       const all = await fetchAllForExport(params);
-
-      // fetch latest reasons in parallel
       const reasons = await mapWithConcurrency(all, 6, async (row) => await fetchLatestEditReason(row._id));
       const enriched = all.map((r, i) => ({ ...r, _lastEditReason: reasons[i] || "" }));
-
-      // build placemarks only for rows with a location
-      const placemarks = enriched
-        .map(r => makeKmlPlacemarkFromClocking(r, { userName, projectName }))
-        .filter(Boolean);
-
-      if (!placemarks.length) {
-        setErr("No clockings with coordinates in the current search to export.");
-        setExportBusy(false);
-        return;
-      }
-
+      const placemarks = enriched.map(r => makeKmlPlacemarkFromClocking(r, { userName, projectName })).filter(Boolean);
+      if (!placemarks.length) { setErr("No clockings with coordinates in the current search to export."); setExportBusy(false); return; }
       const kml = makeKmlDocument(placemarks, "Clockings Export");
-      const blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml;charset=utf-8" });
-      triggerDownload(blob, "clockings.kml");
+      triggerDownload(new Blob([kml], { type: "application/vnd.google-earth.kml+xml;charset=utf-8" }), "clockings.kml");
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || "Failed to export KML.");
-    } finally {
-      setExportBusy(false);
-    }
+    } finally { setExportBusy(false); }
   }
 
   return (
-    <div className="p-4 space-y-4">
-      <h1 className="text-xl font-semibold">Clockings</h1>
-      {err && <div className="text-red-600">{err}</div>}
-      {info && <div className="text-green-700">{info}</div>}
+    <div className="max-w-7xl mx-auto p-4" style={{ "--accent": accent }}>
+      {/* local styles */}
+      <style>{`
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px}
+        .btn{border:1px solid #e5e7eb;border-radius:10px;padding:8px 12px;background:#fff}
+        .btn:hover{box-shadow:0 1px 0 rgba(0,0,0,.04)}
+        .btn-sm{padding:6px 10px;border-radius:8px}
+        .btn-accent{background:var(--accent,#2a7fff);color:#fff;border-color:var(--accent,#2a7fff)}
+        .btn-danger{background:#b91c1c;color:#fff;border-color:#7f1d1d}
+        .pill{
+          border:1px solid var(--border,#e5e7eb);
+          padding:.35rem .7rem;border-radius:9999px;cursor:pointer;
+          font-weight:600;background:#fff;color:#111827;
+        }
+        .pill.active{background:var(--accent,#2a7fff);border-color:var(--accent,#2a7fff);color:#fff}
+        .table{width:100%;border-collapse:collapse}
+        .table th,.table td{padding:.5rem;border-top:1px solid #eef2f7;text-align:left}
+        .muted{color:#64748b}
 
-      {/* Create */}
-      <form onSubmit={submitClocking} className="border rounded p-3 space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm">
-            Mode
-            <select className="border p-2 ml-2" value={isBulk ? "bulk" : "single"} onChange={e => setIsBulk(e.target.value === "bulk")}>
-              <option value="bulk">Bulk (select many)</option>
-              <option value="single">Single user</option>
-            </select>
-          </label>
+        /* compact filter grid */
+        .filters-grid{
+          display:grid;
+          grid-template-columns: repeat(6, minmax(0,1fr));
+          gap:.5rem;
+        }
+        @media (max-width: 1200px){
+          .filters-grid{ grid-template-columns: repeat(3, minmax(0,1fr)); }
+        }
+        @media (max-width: 640px){
+          .filters-grid{ grid-template-columns: repeat(2, minmax(0,1fr)); }
+        }
 
-          <label className="text-sm">
-            Project
-            <select className="border p-2 ml-2" value={projectId} onChange={e => setProjectId(e.target.value)}>
-              <option value="">— none —</option>
-              {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-            </select>
-          </label>
+        /* user pills */
+        .user-pills{
+          border:1px solid #e5e7eb;border-radius:10px;max-height:40vh;overflow:auto;
+          padding:.5rem; background:#fff;
+        }
+        .user-pills .chip{
+          display:inline-flex; align-items:center; gap:.5rem;
+          border:1px solid #e5e7eb; border-radius:9999px;
+          padding:.35rem .65rem; margin:.25rem;
+          background:#fff; color:#111827; cursor:pointer;
+          user-select:none; transition:transform .05s ease;
+          max-width:100%; white-space:nowrap; text-overflow:ellipsis; overflow:hidden;
+        }
+        .user-pills .chip:active{ transform:scale(0.98); }
+        .user-pills .chip.active{
+          background:var(--accent,#2a7fff); border-color:var(--accent,#2a7fff); color:#fff;
+        }
+        .user-pills .chip .name{ overflow:hidden; text-overflow:ellipsis; }
+      `}</style>
 
-          <label className="text-sm">
-            Type
-            <select className="border p-2 ml-2" value={type} onChange={e => setType(e.target.value)}>
-              {ATTENDANCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </label>
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Clockings</h1>
+        {/* ★ moved "New clocking" out of here */}
+      </div>
 
-          <label className="text-sm">
-            Time
-            <input className="border p-2 ml-2" type="datetime-local" value={at} onChange={e => setAt(e.target.value)} />
-          </label>
-        </div>
+      {err && <div className="text-red-600 mt-2">{err}</div>}
+      {info && <div className="text-green-700 mt-2">{info}</div>}
 
-        {/* Location (optional) */}
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex items-center gap-2">
-            <button type="button" className="px-3 py-2 border rounded" onClick={useMyLocation}>Use my location</button>
-            <small className="text-gray-600">Optional</small>
-          </div>
-          <label className="text-sm">
-            Lat
-            <input className="border p-2 ml-2 w-40" value={lat} onChange={e => setLat(e.target.value)} placeholder="e.g. -26.2041" />
-          </label>
-          <label className="text-sm">
-            Lng
-            <input className="border p-2 ml-2 w-40" value={lng} onChange={e => setLng(e.target.value)} placeholder="e.g. 28.0473" />
-          </label>
-          <label className="text-sm">
-            Acc (m)
-            <input className="border p-2 ml-2 w-28" value={acc} onChange={e => setAcc(e.target.value)} placeholder="optional" />
-          </label>
-        </div>
-
-        {/* Notes */}
-        <label className="block text-sm">
-          Notes
-          <input className="border p-2 w-full" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional note…" />
-        </label>
-
-        {/* User selection */}
-        {isBulk ? (
-          <div>
-            <div className="text-sm font-medium mb-2">Select users</div>
-            <div className="grid md:grid-cols-3 gap-2">
-              {eligibleUsers.map(u => (
-                <label key={u._id} className="flex items-center gap-2 border rounded p-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedUsers.includes(u._id)}
-                    onChange={() => toggleUser(u._id)}
-                  />
-                  <span>{u.name || u.email || u.username}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <label className="block text-sm">
-            User
-            <select className="border p-2 w-full" value={singleUser} onChange={e => setSingleUser(e.target.value)}>
-              <option value="">— pick a user —</option>
-              {eligibleUsers.map(u => (
-                <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>
-              ))}
-            </select>
-          </label>
-        )}
-
-        <div>
-          <button className="px-3 py-2 bg-black text-white rounded">Save clocking</button>
-        </div>
-      </form>
-
-      {/* Filters for history */}
-      <div className="border rounded p-3 space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            className="border p-2"
-            placeholder="Search notes/type…"
-            value={q}
-            onChange={e => setQ(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && load()}
-            style={{ minWidth: 240 }}
-          />
-          <select className="border p-2" value={filterProjectId} onChange={e => setFilterProjectId(e.target.value)}>
-            <option value="">Project (any)</option>
-            {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-          </select>
-          <select className="border p-2" value={filterUserId} onChange={e => setFilterUserId(e.target.value)}>
-            <option value="">User (any)</option>
-            {users.map(u => <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>)}
-          </select>
-
-          {/* ✅ NEW: Group filter */}
-          <select className="border p-2" value={filterGroupId} onChange={e => setFilterGroupId(e.target.value)}>
-            <option value="">Group (any)</option>
-            {groups.map(g => <option key={g._id} value={g._id}>{g.name}</option>)}
-          </select>
-
-          <select className="border p-2" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
-            <option value="">Type (any)</option>
-            {ATTENDANCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <input className="border p-2" type="date" value={from} onChange={e => setFrom(e.target.value)} />
-          <input className="border p-2" type="date" value={to} onChange={e => setTo(e.target.value)} />
-          <button className="px-3 py-2 border rounded" onClick={load}>Apply</button>
+      {/* Exports toolbar */}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
           <button
             className="px-3 py-2 border rounded"
             onClick={exportCsv}
@@ -646,43 +655,101 @@ export default function Clockings() {
           >
             {exportBusy ? "Exporting…" : "Export KML"}
           </button>
+          {/* ★ New clocking inline and next to Export KML */}
+          <button className="btn btn-accent" onClick={() => setCreateOpen(true)}>New clocking</button>
+        </div>
+        {/* ★ Timesheet button (wire route later) */}
+        <div className="flex items-center gap-2">
+          <Link to="/timesheet" className="px-3 py-2 border rounded" title="Open Timesheet view">
+            Timesheet
+          </Link>
         </div>
       </div>
 
-      {/* History table */}
-      <div className="border rounded overflow-x-auto">
-        <table className="w-full text-sm">
+      {/* ===== Filters (compact 1–2 rows) ===== */}
+      <div className="card p-4 mt-3">
+        <div className="filters-grid items-center">
+          <input
+            className="border p-2 rounded"
+            placeholder="Search notes/type…"
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && load()}
+          />
+          <select className="border p-2 rounded" value={filterProjectId} onChange={e => setFilterProjectId(e.target.value)}>
+            <option value="">Project (any)</option>
+            {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+          </select>
+          <select className="border p-2 rounded" value={filterUserId} onChange={e => setFilterUserId(e.target.value)}>
+            <option value="">User (any)</option>
+            {users.map(u => <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>)}
+          </select>
+          <select className="border p-2 rounded" value={filterGroupId} onChange={e => setFilterGroupId(e.target.value)}>
+            <option value="">Group (any)</option>
+            {(groups || []).filter(g => !g?.isDeleted).map(g => <option key={g._id} value={g._id}>{g.name}</option>)}
+          </select>
+          <select className="border p-2 rounded" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+            <option value="">Type (any)</option>
+            {ATTENDANCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
+          <input
+             className="!w-48 flex-none border rounded text-sm p-1.5"
+             type="date"
+             value={from}
+             onChange={e => setFrom(e.target.value)}
+          />
+          <input
+             className="!w-48 flex-none border rounded text-sm p-1.5"
+             type="date"
+             value={to}
+             onChange={e => setTo(e.target.value)}
+          />
+        </div>
+
+        <div className="mt-3 flex items-center justify-start gap-2">
+          <button className="btn" onClick={load}>Apply</button>
+        </div>
+      </div>
+
+      {/* ===== History table ===== */}
+      <div className="card mt-3 overflow-x-auto">
+        <table className="table text-sm">
           <thead>
-            <tr className="bg-gray-50">
-              <th className="p-2 text-left">When</th>
-              <th className="p-2 text-left">User</th>
-              <th className="p-2 text-left">Project</th>
-              <th className="p-2 text-left">Type</th>
-              <th className="p-2 text-left">Location</th>
-              <th className="p-2 text-left">Notes</th>
-              <th className="p-2 text-left">Edited</th>
-              <th className="p-2 text-left">Edited by</th>
-              <th className="p-2 text-right">Actions</th>
+            <tr style={{ background: "#f9fafb" }}>
+              <th>When</th>
+              <th>User</th>
+              <th>Group</th> {/* ★ new column */}
+              <th>Project</th>
+              <th>Type</th>
+              <th>Location</th>
+              <th>Notes</th>
+              <th>Edited</th>
+              <th>Edited by</th>
+              <th className="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td className="p-4 text-center" colSpan={9}>Loading…</td></tr>
+              <tr><td className="p-4 text-center" colSpan={10}>Loading…</td></tr>
             ) : rows.length ? (
               rows.map(r => (
                 <tr key={r._id}>
-                  <td className="border-t p-2">{r.at ? new Date(r.at).toLocaleString() : "—"}</td>
-                  <td className="border-t p-2">{r.user?.name || r.user?.email || userName(r.userId)}</td>
-                  <td className="border-t p-2">{r.project?.name || projectName(r.projectId)}</td>
-                  <td className="border-t p-2">{r.type || "—"}</td>
-                  <td className="border-t p-2">
+                  <td className="border-top p-2">{r.at ? new Date(r.at).toLocaleString() : "—"}</td>
+                  <td className="border-top p-2">{r.user?.name || r.user?.email || userName(r.userId)}</td>
+                  <td className="border-top p-2">{userGroupNames(r.userId) || "—"}</td> {/* ★ */}
+                  <td className="border-top p-2">{r.project?.name || projectName(r.projectId)}</td>
+                  <td className="border-top p-2">{r.type || "—"}</td>
+                  <td className="border-top p-2">
                     {r.location && (r.location.lat != null && r.location.lng != null)
                       ? `${r.location.lat.toFixed?.(5) ?? r.location.lat}, ${r.location.lng.toFixed?.(5) ?? r.location.lng}` +
                         (r.location.acc != null ? ` (${r.location.acc}m)` : "")
                       : "—"}
                   </td>
-                  <td className="border-t p-2">{r.notes || "—"}</td>
-                  <td className="border-t p-2">
+                  <td className="border-top p-2">{r.notes || "—"}</td>
+                  <td className="border-top p-2">
                     {r.lastEditedAt ? (
                       <div className="flex items-center gap-2">
                         <span>{new Date(r.lastEditedAt).toLocaleString()}</span>
@@ -703,27 +770,139 @@ export default function Clockings() {
                       </div>
                     ) : "—"}
                   </td>
-                  <td className="border-t p-2">
+                  <td className="border-top p-2">
                     {r.lastEditedBy?.name || r.lastEditedBy?.email || (r.lastEditedBy ? String(r.lastEditedBy) : "—")}
                   </td>
-                  <td className="border-t p-2 text-right whitespace-nowrap">
-                    <button className="px-2 py-1 border rounded mr-2" onClick={() => openAudit(r)}>Audit</button>
-                    <button className="px-2 py-1 border rounded mr-2" onClick={() => openEdit(r)}>Edit</button>
-                    <button className="px-2 py-1 border rounded" onClick={() => del(r._id)}>Delete</button>
+                  <td className="border-top p-2 text-right whitespace-nowrap">
+                    <button className="btn btn-sm mr-2" onClick={() => openAudit(r)}>Audit</button>
+                    <button className="btn btn-sm mr-2" onClick={() => openEdit(r)}>Edit</button>
+                    <button className="btn btn-sm" onClick={() => del(r._id)}>Delete</button>
                   </td>
                 </tr>
               ))
             ) : (
-              <tr><td className="p-4 text-center" colSpan={9}>No clockings</td></tr>
+              <tr><td className="p-4 text-center" colSpan={10}>No clockings</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
+      {/* ===== Create Modal (lightbox) ===== */}
+      {createOpen && (
+        <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold">New clocking</h3>
+              <button className="text-sm underline" onClick={() => setCreateOpen(false)}>Close</button>
+            </div>
+
+            <form onSubmit={submitClocking} className="space-y-3">
+              {/* Row 1: Mode | Project | Type | Time | Save */}
+              <div className="flex items-end justify-between gap-3 flex-wrap">
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="text-sm">
+                    Mode
+                    <select className="border p-2 ml-2 rounded" value={isBulk ? "bulk" : "single"} onChange={e => setIsBulk(e.target.value === "bulk")}>
+                      <option value="bulk">Bulk (select many)</option>
+                      <option value="single">Single user</option>
+                    </select>
+                  </label>
+                  <label className="text-sm">
+                    Project
+                    <select className="border p-2 ml-2 rounded" value={projectId} onChange={e => setProjectId(e.target.value)}>
+                      <option value="">— none —</option>
+                      {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm">
+                    Type
+                    <select className="border p-2 ml-2 rounded" value={type} onChange={e => setType(e.target.value)}>
+                      {ATTENDANCE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm">
+                    Time
+                    <input className="border p-2 ml-2 rounded" type="datetime-local" value={at} onChange={e => setAt(e.target.value)} />
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="btn btn-accent" type="submit">Save clocking</button>
+                </div>
+              </div>
+
+              {/* Location + Notes */}
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="text-sm flex flex-col items-start">
+                  <span className="muted mb-1">Optional</span>
+                  <button type="button" className="btn" onClick={useMyLocation}>Use my location</button>
+                </label>
+
+                <label className="text-sm">
+                  Lat
+                  <input className="border p-2 ml-2 rounded w-40" value={lat} onChange={e => setLat(e.target.value)} placeholder="e.g. -26.2041" />
+                </label>
+                <label className="text-sm">
+                  Lng
+                  <input className="border p-2 ml-2 rounded w-40" value={lng} onChange={e => setLng(e.target.value)} placeholder="e.g. 28.0473" />
+                </label>
+                <label className="text-sm">
+                  Acc (m)
+                  <input className="border p-2 ml-2 rounded w-28" value={acc} onChange={e => setAcc(e.target.value)} placeholder="optional" />
+                </label>
+              </div>
+
+              <label className="block text-sm">
+                Notes
+                <input className="border p-2 rounded w-full" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional note…" />
+              </label>
+
+              {/* User selection — pill toggles */}
+              {isBulk ? (
+                <div>
+                  <div className="text-sm font-medium mb-2">Select users</div>
+                  <div className="user-pills">
+                    {(type.toLowerCase() === "out" ? eligibleUsersByType : eligibleUsers).map(u => { // ★ restrict on OUT
+                      const active = selectedUsers.includes(u._id);
+                      return (
+                        <button
+                          key={u._id}
+                          type="button"
+                          className={`chip ${active ? "active" : ""}`}
+                          onClick={() => toggleUser(u._id)}
+                          title={u.name || u.email || u.username}
+                          aria-pressed={active}
+                        >
+                          <span className="name">{u.name || u.email || u.username}</span>
+                          {active && <span aria-hidden="true">✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <label className="block text-sm">
+                  User
+                  <select
+                    className="border p-2 rounded w-full"
+                    value={singleUser}
+                    onChange={e => setSingleUser(e.target.value)}
+                  >
+                    <option value="">— pick a user —</option>
+                    {(type.toLowerCase() === "out" ? eligibleUsersByType : eligibleUsers).map(u => ( // ★ restrict on OUT
+                      <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Edit Modal */}
       {editOpen && editingRow && (
         <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4">
-          <div className="bg-white rounded shadow-xl w-full max-w-2xl p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold">Edit clocking</h3>
               <button className="text-sm underline" onClick={closeEdit}>Close</button>
@@ -747,7 +926,7 @@ export default function Clockings() {
       {/* Audit Modal */}
       {auditOpen && (
         <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4">
-          <div className="bg-white rounded shadow-xl w-full max-w-3xl p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold">Clocking audit</h3>
               <button className="text-sm underline" onClick={closeAudit}>Close</button>
@@ -782,8 +961,7 @@ export default function Clockings() {
                       </div>
                       {r.note && (
                         <div>
-                          <b>Reason:</b>{" "}
-                          <span className="italic text-gray-700">{r.note}</span>
+                          <b>Reason:</b> <span className="italic text-gray-700">{r.note}</span>
                         </div>
                       )}
                     </div>
@@ -800,12 +978,8 @@ export default function Clockings() {
                           {(r.changes || []).map((c, i2) => (
                             <tr key={i2}>
                               <td className="border-t p-1 align-top font-mono">{c.field}</td>
-                              <td className="border-t p-1 align-top font-mono whitespace-pre-wrap break-words">
-                                {fmtVal(c.before)}
-                              </td>
-                              <td className="border-t p-1 align-top font-mono whitespace-pre-wrap break-words">
-                                {fmtVal(c.after)}
-                              </td>
+                              <td className="border-t p-1 align-top font-mono whitespace-pre-wrap break-words">{fmtVal(c.before)}</td>
+                              <td className="border-t p-1 align-top font-mono whitespace-pre-wrap break-words">{fmtVal(c.after)}</td>
                             </tr>
                           ))}
                         </tbody>

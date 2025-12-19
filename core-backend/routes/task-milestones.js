@@ -9,12 +9,12 @@ const router = express.Router({ mergeParams: true });
 /* -------------------- helpers -------------------- */
 
 const STATUS = ['pending', 'started', 'paused', 'paused - problem', 'finished'];
+
 function normalizeStatus(v) {
   if (v == null) return undefined;
   const s = String(v).toLowerCase();
   if (s === 'planned' || s === 'plan') return 'pending';
   if (s === 'complete' || s === 'completed') return 'finished';
-  // only accept known statuses; otherwise leave undefined so we don't set it
   return STATUS.includes(s) ? s : undefined;
 }
 
@@ -39,7 +39,7 @@ function asObjectIdArray(arr) {
 }
 
 /**
- * Accepts every alias the frontend might send and returns
+ * Accept every alias the frontend might send and return
  * the canonical fields our model/routes use.
  */
 function pickFields(src = {}) {
@@ -67,14 +67,14 @@ function pickFields(src = {}) {
     parseDate(src.plannedEndAt) ||
     parseDate(src.endDate);
 
-  // actual end (aliases)
-  out.endActual =
-    parseDate(src.endActual) ||
+  // actual end (aliases → canonical: actualEndAt)
+  out.actualEndAt =
     parseDate(src.actualEndAt) ||
+    parseDate(src.endActual) ||
     parseDate(src.completedAt) ||
     parseDate(src.finishedAt);
 
-  // status (normalize "planned"->"pending", "completed"->"finished", validate enum)
+  // status (normalize & validate)
   const norm = normalizeStatus(src.status);
   if (norm) out.status = norm;
 
@@ -162,8 +162,8 @@ router.get('/:taskId/milestones', async (req, res) => {
 
 /**
  * POST /tasks/:taskId/milestones
- * Accepts aliases from the client and mirrors both dependsOn/requires and isRoadblock/roadblock
- * so the model is happy regardless of field naming.
+ * Accepts aliases from the client and mirrors fields so the model is happy
+ * regardless of field naming.
  */
 router.post('/:taskId/milestones', async (req, res) => {
   try {
@@ -176,9 +176,13 @@ router.post('/:taskId/milestones', async (req, res) => {
     const errMsg = await validate(task, fields);
     if (errMsg) return res.status(400).json({ error: errMsg });
 
-    // auto-stamp actual end if finished and not provided
-    if (fields.status === 'finished' && !fields.endActual) {
-      fields.endActual = new Date();
+    // auto-stamp actual when finishing (if not provided)
+    if (fields.status === 'finished' && !fields.actualEndAt) {
+      fields.actualEndAt = new Date();
+    }
+    // if actual provided but no status, mark finished
+    if (fields.actualEndAt && !fields.status) {
+      fields.status = 'finished';
     }
 
     const created = await TaskMilestone.create({
@@ -188,15 +192,14 @@ router.post('/:taskId/milestones', async (req, res) => {
 
       startPlanned: fields.startPlanned,
       endPlanned: fields.endPlanned,
-      endActual: fields.endActual ?? undefined,
+      actualEndAt: fields.actualEndAt ?? undefined,
 
       status: fields.status ?? 'pending',
 
-      // mirror both names for compatibility with different schemas
-      isRoadblock: !!fields.isRoadblock,
+      // schema field is `roadblock`
       roadblock: !!fields.isRoadblock,
 
-      dependsOn: fields.dependsOn || [],
+      // schema field is `requires`
       requires: fields.dependsOn || [],
     });
 
@@ -212,6 +215,10 @@ router.post('/:taskId/milestones', async (req, res) => {
 
 /**
  * PATCH /tasks/:taskId/milestones/:milestoneId
+ * Keeps status and actualEndAt in sync in BOTH directions:
+ * - status -> finished (without explicit actual) => stamp actualEndAt now
+ * - status -> not finished (without explicit actual) => clear actualEndAt
+ * - explicit actualEndAt provided => keep it; if non-null and no status provided, force status=finished
  */
 router.patch('/:taskId/milestones/:milestoneId', async (req, res) => {
   try {
@@ -232,33 +239,52 @@ router.patch('/:taskId/milestones/:milestoneId', async (req, res) => {
     });
     if (!doc) return res.status(404).json({ error: 'Milestone not found' });
 
-    // Merge existing doc with incoming body, then re-pick/normalize
+    // Merge existing doc with incoming body, then normalize into canonical fields
     const merged = pickFields({ ...doc.toObject(), ...(req.body || {}) });
     const errMsg = await validate(task, merged, doc._id);
     if (errMsg) return res.status(400).json({ error: errMsg });
 
-    // if status flips to finished and no endActual, stamp now
-    if (normalizeStatus(req.body?.status) === 'finished' && !merged.endActual) {
-      merged.endActual = new Date();
-    }
+    const incomingStatus = normalizeStatus(req.body?.status); // undefined | 'pending' | ... | 'finished'
+    const clientProvidedActual =
+      'actualEndAt' in (req.body || {}) ||
+      'endActual'   in (req.body || {}) ||
+      'completedAt' in (req.body || {}) ||
+      'finishedAt'  in (req.body || {});
 
-    // Assign (and mirror the dual field names)
+    // --- Auto-sync rules between status and actualEndAt ---
+    if (clientProvidedActual) {
+      // If client explicitly gives an actual end, keep it and ensure status is finished when it’s non-null (and status not explicitly sent)
+      if (merged.actualEndAt && !incomingStatus) {
+        merged.status = 'finished';
+      }
+    } else if (incomingStatus) {
+      if (incomingStatus === 'finished') {
+        // No explicit actual provided -> stamp now if we don't already have one
+        if (!merged.actualEndAt) merged.actualEndAt = new Date();
+      } else {
+        // Moving away from finished with no explicit actual -> clear the actual
+        merged.actualEndAt = null;
+      }
+      merged.status = incomingStatus; // apply normalized status
+    }
+    // ------------------------------------------------------
+
+    // Persist canonical fields
     if (merged.name != null) doc.name = merged.name;
 
     if (merged.startPlanned != null) doc.startPlanned = merged.startPlanned;
-    if (merged.endPlanned != null) doc.endPlanned = merged.endPlanned;
-    if (merged.endActual != null) doc.endActual = merged.endActual;
+    if (merged.endPlanned != null)   doc.endPlanned   = merged.endPlanned;
+
+    if ('actualEndAt' in merged)     doc.actualEndAt  = merged.actualEndAt; // allow null to clear
 
     if (merged.status) doc.status = merged.status;
 
     if (merged.isRoadblock != null) {
-      doc.isRoadblock = !!merged.isRoadblock;
       doc.roadblock = !!merged.isRoadblock;
     }
 
     if (merged.dependsOn != null) {
-      doc.dependsOn = merged.dependsOn;
-      doc.requires = merged.dependsOn;
+      doc.requires = merged.dependsOn; // canonical field in schema
     }
 
     await doc.save();
@@ -294,10 +320,10 @@ router.delete('/:taskId/milestones/:milestoneId', async (req, res) => {
     });
     if (!removed) return res.status(404).json({ error: 'Milestone not found' });
 
-    // Clean up dependencies in either field name
+    // Clean up dependencies (schema uses `requires`)
     await TaskMilestone.updateMany(
       { taskId: task._id, ...(orgId ? { orgId } : {}) },
-      { $pull: { dependsOn: removed._id, requires: removed._id } }
+      { $pull: { requires: removed._id } }
     );
 
     return res.json({ ok: true });

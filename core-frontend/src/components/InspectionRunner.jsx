@@ -1,487 +1,978 @@
-// src/components/InspectionRunner.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { api, listProjects, listProjectTasks, listTaskMilestones } from "../lib/api";
+// core-frontend/src/components/InspectionRunner.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { runForm as apiRunForm } from "../lib/inspectionApi.js";
 
-// feature detection
-const hasBarcode = typeof window !== "undefined" && "BarcodeDetector" in window;
-const hasNfc = typeof window !== "undefined" && "NDEFReader" in window;
+// ---------- EDIT THESE IF YOUR API PATHS DIFFER ----------
+const ENDPOINTS = {
+  projects: "/api/projects",
+  tasks: "/api/tasks", // prefer ?projectId=.. ; fallback /projects/:id/tasks
+  milestonesQ: "/api/milestones", // optional fallback: ?taskId=...
+  assessedUsers: "/api/inspections/candidates/assessed-users", // GL+ candidates
+  assets: "/api/assets",
+};
+// --------------------------------------------------------
 
-function normalizeTemplate(tpl) {
-  if (!tpl) return null;
-  const fields = Array.isArray(tpl.fields) ? tpl.fields : [];
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
 
-  const norm = fields.map((f, idx) => {
-    const baseType  = String(f.type || "passfail").toLowerCase();
-    const valueType = baseType === "number" ? "number" : baseType === "text" ? "text" : null;
+const hasBarcodeDetector = () =>
+  typeof window !== "undefined" && "BarcodeDetector" in window;
 
-    const allowPhoto = !!(f.allowPhoto || f.photo);
-    const allowScan  = !!(f.allowScan  || f.scan  || f.type === "scan");
-    const allowText  = !!(f.allowText  || f.text);
+function dateValue(d) {
+  try {
+    if (!d) return "";
+    const dt = typeof d === "string" ? new Date(d) : d;
+    return dt.toISOString().slice(0, 10);
+  } catch {
+    return "";
+  }
+}
 
-    const reqOnFail = {
-      note:  !!(f.failReqNote  || f.requireOnFailNote  || f.requireNoteOnFail  || f.reqOnFailNote  || (f.failReqs?.note)),
-      photo: !!(f.failReqPhoto || f.requireOnFailPhoto || f.requirePhotoOnFail || f.reqOnFailPhoto || (f.failReqs?.photo)),
-      scan:  !!(f.failReqScan  || f.requireOnFailScan  || f.requireScanOnFail  || f.reqOnFailScan  || (f.failReqs?.scan)),
-      value: !!(f.failReqValue || f.requireOnFailValue || f.requireValueOnFail || f.reqOnFailValue || (f.failReqs?.value)),
-    };
+function authedHeaders() {
+  const token = localStorage.getItem("token");
+  const orgId = localStorage.getItem("orgId");
+  return {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(orgId ? { "X-Org-Id": orgId } : {}),
+  };
+}
 
-    const critical = !!(f.critical || f.isCritical);
+async function authedJsonGET(url, params) {
+  const qs = params
+    ? "?" +
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== null && v !== "")
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join("&")
+    : "";
+  const res = await fetch(url + qs, {
+    method: "GET",
+    credentials: "include",
+    headers: authedHeaders(),
+  });
+  if (!res.ok) throw new Error(`GET ${url}${qs} -> ${res.status}`);
+  return res.json();
+}
 
-    return {
-      id: String(f.id || f._id || idx),
-      label: f.label || f.title || `Question ${idx + 1}`,
-      type: "passfail",
-      required: !!f.required,
-      allowPhoto,
-      allowScan,
-      allowText,
-      valueType,
-      reqOnFail,
-      critical,
-      meta: f.meta || {},
-    };
+async function lookupAssetByQuery(q) {
+  if (!q) return null;
+  try {
+    const rows = await authedJsonGET(ENDPOINTS.assets, { q });
+    if (Array.isArray(rows) && rows.length) return rows[0];
+  } catch {}
+  return null;
+}
+
+function labelOf(obj) {
+  return obj?.name || obj?.title || obj?.label || obj?.email || obj?.username || obj?._id || "";
+}
+
+function useDebounced(value, ms = 250) {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
+
+export default function InspectionRunner({ form, onSubmit, onSaved }) {
+  const subjectType = String(form?.subject?.type || "none").toLowerCase(); // none | vehicle | asset | performance
+  const subjectLocked = !!form?.subject?.lockToId;
+  const lockedLabel = form?.subject?.lockLabel || "";
+
+  /* ----------------------------- item state ---------------------------- */
+  const [items, setItems] = useState(() =>
+    (form?.items || []).map((it) => ({
+      tpl: {
+        allowPhoto: !!it.allowPhoto,
+        allowScan: !!it.allowScan,
+        allowNote: it.allowNote !== undefined ? !!it.allowNote : true,
+        requireEvidenceOnFail: !!it.requireEvidenceOnFail,
+        requireCorrectiveOnFail:
+          it.requireCorrectiveOnFail !== undefined ? !!it.requireCorrectiveOnFail : true,
+        criticalOnFail: !!it.criticalOnFail,
+      },
+      label: it.label || "",
+      result: "na",
+      evidence: { photoUrl: "", scanRef: "", note: "" },
+      correctiveAction: "",
+      criticalTriggered: false,
+      assetMatch: null,
+      scanning: false,
+    }))
+  );
+
+  useEffect(() => {
+    setItems(
+      (form?.items || []).map((it) => ({
+        tpl: {
+          allowPhoto: !!it.allowPhoto,
+          allowScan: !!it.allowScan,
+          allowNote: it.allowNote !== undefined ? !!it.allowNote : true,
+          requireEvidenceOnFail: !!it.requireEvidenceOnFail,
+          requireCorrectiveOnFail:
+            it.requireCorrectiveOnFail !== undefined ? !!it.requireCorrectiveOnFail : true,
+          criticalOnFail: !!it.criticalOnFail,
+        },
+        label: it.label || "",
+        result: "na",
+        evidence: { photoUrl: "", scanRef: "", note: "" },
+        correctiveAction: "",
+        criticalTriggered: false,
+        assetMatch: null,
+        scanning: false,
+      }))
+    );
+  }, [form?._id]);
+
+  /* ----------------------------- link state ---------------------------- */
+  const isScoped = form?.scope?.type === "scoped";
+  const [links, setLinks] = useState({
+    projectId: isScoped ? form?.scope?.projectId || "" : "",
+    taskId: isScoped ? form?.scope?.taskId || "" : "",
+    milestoneId: isScoped ? form?.scope?.milestoneId || "" : "",
   });
 
-  const formType = (tpl.formType || tpl.type || "standard").toLowerCase();
-  return { ...tpl, fields: norm, formType };
-}
-
-function readFilesAsDataURLs(files) {
-  const list = Array.from(files || []);
-  return Promise.all(
-    list.map(
-      (file) =>
-        new Promise((res, rej) => {
-          const r = new FileReader();
-          r.onload = () => res({ name: file.name, type: file.type, dataUrl: r.result });
-          r.onerror = rej;
-          r.readAsDataURL(file);
-        })
-    )
-  );
-}
-
-export default function InspectionRunner({
-  template,
-  projectId: projectIdProp,
-  taskId: taskIdProp,
-  onSaved,
-  pmNoteEnabled = true,
-}) {
-  const tpl = useMemo(() => normalizeTemplate(template), [template]);
-
-  const blankAns = { result: null, pass: null, note: "", scans: [], photos: [], value: "", extraText: "" };
-  const [answers, setAnswers] = useState(() => new Map());
-
-  // Header selections
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [milestones, setMilestones] = useState([]);
 
-  const scopedProjectId = String(tpl?.scope?.projectIds?.[0] ?? "") || null;
-  const scopedTaskId = String(tpl?.scope?.taskIds?.[0] ?? "") || null;
-  const isGlobal = !!tpl?.scope?.isGlobal || (!scopedProjectId && !scopedTaskId);
+  // Human-readable labels (so scoped renders actual names, not placeholders)
+  const [selLabels, setSelLabels] = useState({ project: "", task: "", milestone: "" });
 
-  const [projectId, setProjectId] = useState(projectIdProp || scopedProjectId || "");
-  const [taskId, setTaskId] = useState(taskIdProp || scopedTaskId || "");
-  const [milestoneId, setMilestoneId] = useState("");
-
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
-  const [pmNote, setPmNote] = useState("");
-  const [startedAt] = useState(() => new Date().toISOString());
-  const [followUpAt, setFollowUpAt] = useState(""); // required when signoff + critical failure
-
-  // init answers
+  // Load projects once
   useEffect(() => {
-    const m = new Map();
-    tpl?.fields.forEach((f) => m.set(f.id, { ...blankAns }));
-    setAnswers(m);
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await authedJsonGET(ENDPOINTS.projects);
+        if (!cancelled) setProjects(Array.isArray(p) ? p : []);
+      } catch {
+        if (!cancelled) setProjects([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Load tasks when project changes
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!links.projectId) {
+        if (!isScoped) setTasks([]);
+        setMilestones([]);
+        return;
+      }
+      try {
+        const t = await authedJsonGET(ENDPOINTS.tasks, { projectId: links.projectId });
+        if (!cancelled) setTasks(Array.isArray(t) ? t : []);
+      } catch {
+        try {
+          const t2 = await authedJsonGET(`${ENDPOINTS.projects}/${links.projectId}/tasks`);
+          if (!cancelled) setTasks(Array.isArray(t2) ? t2 : []);
+        } catch {
+          if (!cancelled) setTasks([]);
+        }
+      } finally {
+        if (!cancelled) setMilestones([]);
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tpl]);
+  }, [links.projectId]);
 
-  // load projects for global forms
+  // Load milestones when task changes (with fallback)
   useEffect(() => {
-    let alive = true;
+    let cancelled = false;
     (async () => {
-      if (!isGlobal) return;
-      try { const ps = await listProjects({ limit: 1000 }); if (alive) setProjects(ps); } catch {}
-    })();
-    return () => { alive = false; };
-  }, [isGlobal]);
-
-  // load tasks by project
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        if (!projectId) { setTasks([]); setTaskId(""); return; }
-        const ts = await listProjectTasks(projectId, { limit: 1000 });
-        if (alive) setTasks(ts);
-      } catch { if (alive) setTasks([]); }
-    })();
-    return () => { alive = false; };
-  }, [projectId]);
-
-  // load milestones by task
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        if (!taskId) { setMilestones([]); setMilestoneId(""); return; }
-        const ms = await listTaskMilestones(taskId);
-        if (alive) setMilestones(ms);
-      } catch { if (alive) setMilestones([]); }
-    })();
-    return () => { alive = false; };
-  }, [taskId]);
-
-  if (!tpl) return <div className="text-gray-600">Loading…</div>;
-
-  function setResult(id, result) {
-    setAnswers((prev) => {
-      const next = new Map(prev);
-      const cur = next.get(id) || { ...blankAns };
-      let passVal = null;
-      if (result === "pass") passVal = true;
-      if (result === "fail") passVal = false;
-      next.set(id, { ...cur, result, pass: passVal });
-      return next;
-    });
-  }
-
-  function upd(id, patch) {
-    setAnswers((prev) => {
-      const next = new Map(prev);
-      const cur = next.get(id) || { ...blankAns };
-      next.set(id, { ...cur, ...patch });
-      return next;
-    });
-  }
-
-  async function doScan(id) {
-    setErr("");
-    try {
-      if (hasBarcode) {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        const track = stream.getVideoTracks()[0];
-        if (typeof ImageCapture === "undefined") {
-          track.stop();
-          throw new Error("Camera capture not supported by this browser.");
-        }
-        const imageCapture = new ImageCapture(track);
-        const det = new window.BarcodeDetector({
-          formats: ["qr_code", "code_128", "code_39", "ean_13", "ean_8", "upc_a", "upc_e"],
-        });
-        const photo = await imageCapture.grabFrame();
-        track.stop();
-        const codes = await det.detect(photo);
-        if (codes && codes.length) {
-          const val = codes.map((c) => c.rawValue).join(", ");
-          upd(id, { scans: [ ...(answers.get(id)?.scans || []), { type: "barcode", value: val, at: new Date().toISOString() } ] });
-          return;
-        }
-        setErr("Nothing detected from camera. Try again or use manual entry.");
+      if (!links.taskId) {
+        if (!isScoped) setMilestones([]);
         return;
       }
-      if (hasNfc) {
-        const reader = new window.NDEFReader();
-        await reader.scan();
-        reader.onreading = (event) => {
-          let text = "";
-          for (const rec of event.message.records) {
-            try { text += new TextDecoder().decode(rec.data); } catch {}
+      try {
+        const m2 = await authedJsonGET(`${ENDPOINTS.tasks}/${links.taskId}/milestones`);
+        if (!cancelled) setMilestones(Array.isArray(m2) ? m2 : []);
+      } catch {
+        try {
+          const mQ = await authedJsonGET(ENDPOINTS.milestonesQ, { taskId: links.taskId });
+          if (!cancelled) setMilestones(Array.isArray(mQ) ? mQ : []);
+        } catch {
+          if (!cancelled) setMilestones([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [links.taskId, isScoped]);
+
+  // Resolve labels for scoped values or single fetch
+  useEffect(() => {
+    let cancelled = false;
+
+    const currentProject = projects.find((p) => (p._id || p.id) === links.projectId) || null;
+    const currentTask = tasks.find((t) => (t._id || t.id) === links.taskId) || null;
+    const currentMilestone = milestones.find((m) => (m._id || m.id) === links.milestoneId) || null;
+
+    const nextLabels = {
+      project: labelOf(currentProject),
+      task: labelOf(currentTask),
+      milestone: labelOf(currentMilestone),
+    };
+    setSelLabels(nextLabels);
+
+    (async () => {
+      try {
+        if (!isScoped) return;
+        if (!nextLabels.project && links.projectId) {
+          const p = await authedJsonGET(`${ENDPOINTS.projects}/${links.projectId}`);
+          if (!cancelled) setSelLabels((s) => ({ ...s, project: labelOf(p) }));
+        }
+        if (!nextLabels.task && links.taskId) {
+          const t = await authedJsonGET(`${ENDPOINTS.tasks}/${links.taskId}`);
+          if (!cancelled) setSelLabels((s) => ({ ...s, task: labelOf(t) }));
+        }
+        if (!nextLabels.milestone && links.taskId && links.milestoneId) {
+          try {
+            const mlist = await authedJsonGET(`${ENDPOINTS.tasks}/${links.taskId}/milestones`);
+            const m = Array.isArray(mlist) ? mlist.find((x) => (x._id || x.id) === links.milestoneId) : null;
+            if (!cancelled && m) setSelLabels((s) => ({ ...s, milestone: labelOf(m) }));
+          } catch {
+            try {
+              const mQ = await authedJsonGET(ENDPOINTS.milestonesQ, { taskId: links.taskId });
+              const m = Array.isArray(mQ) ? mQ.find((x) => (x._id || x.id) === links.milestoneId) : null;
+              if (!cancelled && m) setSelLabels((s) => ({ ...s, milestone: labelOf(m) }));
+            } catch {}
           }
-          upd(id, { scans: [ ...(answers.get(id)?.scans || []), { type: "nfc", value: text || "(nfc tag)", at: new Date().toISOString() } ] });
-        };
-        return;
+        }
+      } catch {}
+    })();
+
+    return () => { cancelled = true; };
+  }, [projects, tasks, milestones, links, isScoped]);
+
+  /* ----------------------------- SUBJECT UI ----------------------------- */
+  // Vehicle/Asset dynamic choice (when not locked)
+  const [subjectId, setSubjectId] = useState("");        // free text id/code
+  const [subjectLabel, setSubjectLabel] = useState("");  // friendly label
+  const [assetLookupBusy, setAssetLookupBusy] = useState(false);
+
+  // Performance assessed user (when not locked)
+  const [assessedQuery, setAssessedQuery] = useState("");
+  const debQ = useDebounced(assessedQuery, 250);
+  const [assessedOptions, setAssessedOptions] = useState([]);
+  const [assessedId, setAssessedId] = useState("");      // selected user id
+  const [assessedName, setAssessedName] = useState("");  // selected name/email label
+
+  // If locked in form, pre-populate subject fields
+  useEffect(() => {
+    if (subjectLocked) {
+      setSubjectId(String(form?.subject?.lockToId || ""));
+      setSubjectLabel(lockedLabel || String(form?.subject?.lockToId || ""));
+      setAssessedId(String(form?.subject?.lockToId || ""));
+      setAssessedName(lockedLabel || String(form?.subject?.lockToId || ""));
+    } else {
+      // clear on form change
+      setSubjectId("");
+      setSubjectLabel("");
+      setAssessedId("");
+      setAssessedName("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form?._id, subjectLocked]);
+
+  // Search GL+ users for Performance
+  useEffect(() => {
+    let cancelled = false;
+    if (subjectType !== "performance" || subjectLocked) return;
+    (async () => {
+      try {
+        const rows = await authedJsonGET(ENDPOINTS.assessedUsers, {
+          minRole: "group-leader",
+          q: debQ || "",
+          limit: 50,
+        });
+        if (!cancelled) setAssessedOptions(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!cancelled) setAssessedOptions([]);
       }
-      setErr("Scanning not supported on this device/browser.");
-    } catch (e) {
-      setErr(e?.message || "Scan failed");
-    }
-  }
+    })();
+    return () => { cancelled = true; };
+  }, [debQ, subjectType, subjectLocked]);
 
-  // validation
-  function validateBeforeSave() {
-    for (const f of tpl.fields) {
-      const a = answers.get(f.id);
-      if (f.required && (!a || a.result == null)) {
-        return `Please answer: ${f.label}`;
-      }
-    }
-
-    const criticalFailed = tpl.fields.some((f) => {
-      const a = answers.get(f.id);
-      return f.critical && a?.result === "fail";
-    });
-
-    for (const f of tpl.fields) {
-      const a = answers.get(f.id) || {};
-      if (a.result !== "fail") continue;
-
-      if (f.reqOnFail?.note && !a.note?.trim())             return `Corrective action required for: ${f.label}`;
-      if (f.reqOnFail?.photo && !(Array.isArray(a.photos) && a.photos.length)) return `At least one photo is required for: ${f.label}`;
-      if (f.reqOnFail?.scan &&  !(Array.isArray(a.scans)  && a.scans.length))  return `A scan/code is required for: ${f.label}`;
-      if (f.reqOnFail?.value) {
-        if (f.valueType === "number") {
-          if (!Number.isFinite(Number(a.value))) return `A numeric value is required for: ${f.label}`;
-        } else if (!String(a.value ?? "").trim()) return `A value is required for: ${f.label}`;
-      }
-    }
-
-    if (tpl.formType === "signoff" && criticalFailed && !followUpAt) {
-      return "Follow-up date is required when a critical item fails.";
-    }
-    return "";
-  }
-
-  async function attachPhotos(id, files) {
+  async function tryAssetLookup() {
+    if (!subjectId || subjectType === "performance" || subjectLocked) return;
+    setAssetLookupBusy(true);
     try {
-      const arr = await readFilesAsDataURLs(files);
-      const prev = answers.get(id)?.photos || [];
-      upd(id, { photos: [...prev, ...arr] });
-    } catch (e) {
-      setErr(e?.message || "Failed to read photos");
+      const asset = await lookupAssetByQuery(subjectId.trim());
+      if (asset) {
+        setSubjectLabel(labelOf(asset));
+      } else {
+        // keep whatever was typed
+        if (!subjectLabel) setSubjectLabel(subjectId.trim());
+      }
+    } finally {
+      setAssetLookupBusy(false);
     }
   }
 
-  async function save() {
-    setErr("");
-    const v = validateBeforeSave();
-    if (v) { setErr(v); return; }
+  /* ------------------------- GEO (lat/lng capture) ------------------------- */
+  const [geo, setGeo] = useState({ lat: null, lng: null, status: "idle" }); // idle | ok | denied | error
+  useEffect(() => {
+    let mounted = true;
+    if (!navigator.geolocation) {
+      if (mounted) setGeo((g) => ({ ...g, status: "error" }));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (!mounted) return;
+        const { latitude, longitude } = pos.coords || {};
+        setGeo({ lat: latitude ?? null, lng: longitude ?? null, status: "ok" });
+      },
+      () => {
+        if (!mounted) setGeo((g) => ({ ...g, status: "error" }));
+        else setGeo((g) => ({ ...g, status: "denied" }));
+      },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 60000 }
+    );
+    return () => { mounted = false; };
+  }, []);
 
+  /* --------------------- follow-up / signature / save -------------------- */
+  const [followUpDate, setFollowUpDate] = useState(null);
+  const [confirmNote, setConfirmNote] = useState(false);
+  const currentUser = window.__CURRENT_USER__ || { name: "Inspector", email: "", roles: ["user"] };
+  const [signName, setSignName] = useState(currentUser.name || currentUser.email || "");
+  const [signatureDataUrl, setSignatureDataUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+    let drawing = false;
+    function start(e) {
+      drawing = true;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+    }
+    function move(e) {
+      if (!drawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      const y = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+    function end() {
+      drawing = false;
+      setSignatureDataUrl(canvas.toDataURL("image/png"));
+    }
+    canvas.addEventListener("mousedown", start);
+    canvas.addEventListener("mousemove", move);
+    canvas.addEventListener("mouseup", end);
+    canvas.addEventListener("mouseleave", end);
+    canvas.addEventListener("touchstart", start, { passive: true });
+    canvas.addEventListener("touchmove", move, { passive: true });
+    canvas.addEventListener("touchend", end);
+    return () => {
+      canvas.removeEventListener("mousedown", start);
+      canvas.removeEventListener("mousemove", move);
+      canvas.removeEventListener("mouseup", end);
+      canvas.removeEventListener("mouseleave", end);
+      canvas.removeEventListener("touchstart", start);
+      canvas.removeEventListener("touchmove", move);
+      canvas.removeEventListener("touchend", end);
+    };
+  }, []);
+
+  const setItem = (idx, patch) => {
+    setItems((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  };
+  const setItemEvidence = (idx, evPatch) => {
+    setItems((prev) =>
+      prev.map((r, i) => (i === idx ? { ...r, evidence: { ...r.evidence, ...evPatch } } : r))
+    );
+  };
+
+  const handleResult = (idx, val) => {
+    const tpl = items[idx].tpl;
+    const isFail = val === "fail";
+    setItem(idx, {
+      result: val,
+      criticalTriggered: isFail && tpl.criticalOnFail ? true : false,
+    });
+  };
+
+  async function handlePhoto(idx, file) {
+    if (!file) return;
+    const dataUrl = await fileToDataUrl(file);
+    setItemEvidence(idx, { photoUrl: dataUrl });
+  }
+
+  async function handleScanLookup(idx) {
+    const code = items[idx]?.evidence?.scanRef || "";
+    if (!code.trim()) return;
+    try {
+      const asset = await lookupAssetByQuery(code.trim());
+      setItem(idx, { assetMatch: asset || null });
+    } catch {
+      setItem(idx, { assetMatch: null });
+    }
+  }
+
+  function Scanner({ onClose, onDetected }) {
+    const videoRef = useRef(null);
+    const rafRef = useRef(0);
+    const [err, setErr] = useState("");
+    useEffect(() => {
+      let stream;
+      let detector;
+      let cancelled = false;
+      const start = async () => {
+        try {
+          if (!hasBarcodeDetector()) {
+            setErr("This browser doesn't support camera barcode scanning. Type the code manually.");
+            return;
+          }
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" } },
+            audio: false,
+          });
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            await videoRef.current.play();
+          }
+          detector = new window.BarcodeDetector({
+            formats: ["qr_code", "code_128", "ean_13", "upc_a"],
+          });
+          const tick = async () => {
+            if (cancelled) return;
+            try {
+              const bitmap = await createImageBitmap(videoRef.current);
+              const codes = await detector.detect(bitmap);
+              if (codes && codes.length) {
+                onDetected(codes[0].rawValue || "");
+                return;
+              }
+            } catch {}
+            rafRef.current = requestAnimationFrame(tick);
+          };
+          rafRef.current = requestAnimationFrame(tick);
+        } catch {
+          setErr("Unable to access camera. Type the code manually.");
+        }
+      };
+      start();
+      return () => {
+        cancelled = true;
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        if (videoRef.current) videoRef.current.pause();
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+      };
+    }, [onDetected]);
+    return (
+      <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center">
+        <div className="bg-white rounded-xl p-4 w/full max-w-md">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-medium">Scan code</div>
+            <button className="btn btn-ghost btn-sm" onClick={onClose}>Close</button>
+          </div>
+          {err ? <div className="text-sm text-red-600">{err}</div> : <video ref={videoRef} className="w-full rounded" />}
+          <p className="mt-2 text-xs text-gray-500">
+            Point the camera at a QR/barcode. If nothing happens, type the code manually.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  const [scannerForIdx, setScannerForIdx] = useState(null);
+
+  // Photo lightbox
+  const [lightboxUrl, setLightboxUrl] = useState("");
+
+  function validateBeforeSave() {
+    let needsFollowUp = false;
+    for (let i = 0; i < items.length; i++) {
+      const r = items[i];
+      if (r.result === "fail") {
+        if (r.tpl.requireEvidenceOnFail) {
+          const hasAny = !!(r.evidence.photoUrl || r.evidence.scanRef || r.evidence.note);
+          if (!hasAny) return { ok: false, message: `Item ${i + 1} requires evidence on Fail.` };
+        }
+        if (r.tpl.requireCorrectiveOnFail) {
+          if (!String(r.correctiveAction || "").trim()) {
+            return { ok: false, message: `Item ${i + 1} requires a corrective action on Fail.` };
+          }
+        }
+        if (r.tpl.criticalOnFail) needsFollowUp = true;
+      }
+    }
+    if (needsFollowUp && !followUpDate) {
+      return { ok: false, message: "A follow-up date is required due to critical failures." };
+    }
+    if (!confirmNote) return { ok: false, message: "Please confirm the accuracy note before saving." };
+    if (!signName.trim()) return { ok: false, message: "Inspector name is required." };
+
+    // Subject validations when not locked:
+    if (!subjectLocked) {
+      if (subjectType === "performance") {
+        if (!assessedId) return { ok: false, message: "Please select a user to assess." };
+      } else if (subjectType === "vehicle" || subjectType === "asset") {
+        if (!subjectId) return { ok: false, message: `Please select a ${subjectType}.` };
+      }
+    }
+    return { ok: true };
+  }
+
+  async function handleSave() {
+    setError("");
+    const chk = validateBeforeSave();
+    if (!chk.ok) { setError(chk.message); return; }
     setSaving(true);
     try {
-      const now = new Date().toISOString();
-      const criticalFailed = tpl.fields.some((f) => {
-        const a = answers.get(f.id);
-        return f.critical && a?.result === "fail";
-      });
+      // subjectAtRun
+      let subjectAtRun = { type: "none" };
+      if (subjectType !== "none") {
+        if (subjectLocked) {
+          subjectAtRun = {
+            type: subjectType,
+            id: form?.subject?.lockToId,
+            label: lockedLabel || "",
+          };
+        } else if (subjectType === "performance") {
+          subjectAtRun = { type: "performance", id: assessedId, label: assessedName || "" };
+        } else {
+          // vehicle/asset
+          subjectAtRun = { type: subjectType, id: subjectId, label: subjectLabel || subjectId };
+        }
+      }
 
       const payload = {
-        templateId: tpl._id || tpl.id,
-        templateTitle: tpl.title || tpl.name,
-        formType: tpl.formType, // "standard" | "signoff"
-        projectId: projectId || null,
-        taskId: taskId || null,
-        milestoneId: milestoneId || "",
-        startedAt,
-        submittedAt: now,
-        managerNote: pmNote || "",
-        status: (tpl.formType === "signoff" && criticalFailed) ? "needs-follow-up" : "submitted",
-        signoff: (tpl.formType === "signoff") ? {
-          criticalFailed,
-          followUpAt: criticalFailed ? followUpAt : null,
-        } : undefined,
-        answers: tpl.fields.map((f) => {
-          const a = answers.get(f.id) || {};
-          return {
-            fieldId: f.id,
-            label: f.label,
-            result: a.result ?? null,
-            pass: a.pass,
-            note: a.note || "",
-            scans: a.scans || [],
-            photos: a.photos || [],
-            value: a.value ?? "",
-            extraText: a.extraText ?? "",
-            critical: !!f.critical,
-          };
-        }),
+        links,
+        subjectAtRun,
+        // include location for backend KMZ/geo
+        ...(Number.isFinite(+geo.lat) && Number.isFinite(+geo.lng)
+          ? { lat: +geo.lat, lng: +geo.lng }
+          : {}),
+        items: items.map((r, idx) => ({
+          // send itemId so backend can match template exactly
+          itemId: form?.items?.[idx]?._id,
+          label: r.label,
+          result: r.result,
+          evidence: {
+            photoUrl: r.evidence.photoUrl || "",
+            scanRef: r.evidence.scanRef || "",
+            note: r.evidence.note || "",
+          },
+          correctiveAction: r.correctiveAction || "",
+          criticalOnFail: !!r.tpl.criticalOnFail,
+        })),
+        followUpDate: followUpDate || null,
+        signoff: {
+          confirmed: true,
+          name: signName,
+          date: new Date().toISOString(),
+          signatureDataUrl: signatureDataUrl || "",
+        },
       };
 
-      const { data } = await api.post("/inspections/submissions", payload);
-      onSaved?.(data);
+      const submission = onSubmit
+        ? await onSubmit(payload)
+        : await apiRunForm(form._id, payload);
+
+      if (onSaved) onSaved(submission);
+      alert("Inspection saved.");
     } catch (e) {
-      setErr(e?.response?.data?.error || e?.message || "Save failed");
+      setError(e?.response?.data?.error || e?.message || "Save failed.");
     } finally {
       setSaving(false);
     }
   }
 
-  const pillBase = "px-3 py-1 rounded-full border text-sm cursor-pointer select-none";
-  const pillSelected = { background: "#0f172a", color: "white", borderColor: "#0f172a" };
-  const pillNeutral  = { background: "#f3f4f6", color: "#111827", borderColor: "#9ca3af" };
+  const overall = useMemo(() => {
+    let hasFail = false;
+    for (const it of items) if (it.result === "fail") { hasFail = true; break; }
+    return hasFail ? "fail" : "pass";
+  }, [items]);
+
+  // Selected state: dark gray + white text
+  const choiceBtn = (Type, current) =>
+    `btn btn-xs ${
+      current === Type
+        ? "bg-gray-800 text-white border-gray-800 hover:bg-gray-700 hover:border-gray-700"
+        : "btn-outline"
+    }`;
 
   return (
-    <div className="print-container space-y-4">
-      {/* Top bar (hidden on print) */}
-      <div className="no-print flex items-center gap-2">
-        <button type="button" className="px-3 py-2 border rounded" onClick={() => window.print()}>
-          Print / Export
+    <div className="space-y-6">
+      {/* Summary */}
+      <div className="rounded-xl border p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-lg font-medium">{form?.title}</div>
+            {form?.description && <div className="text-sm text-gray-600">{form.description}</div>}
+          </div>
+          <div className={`text-sm font-semibold ${overall === "pass" ? "text-green-600" : "text-red-600"}`}>
+            {overall.toUpperCase()}
+          </div>
+        </div>
+
+        {/* Links (scoped shows resolved names) */}
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          {/* Project */}
+          <label className="block">
+            <div className="text-sm font-medium">Project</div>
+            {isScoped ? (
+              <div className="input input-bordered bg-gray-50">{selLabels.project || "—"}</div>
+            ) : (
+              <select
+                className="select select-bordered w-full"
+                value={links.projectId}
+                onChange={(e) => setLinks({ projectId: e.target.value, taskId: "", milestoneId: "" })}
+              >
+                <option value="">- Select project -</option>
+                {projects.map((p) => (
+                  <option key={p._id || p.id} value={p._id || p.id}>
+                    {labelOf(p)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+
+          {/* Task */}
+          <label className="block">
+            <div className="text-sm font-medium">Task</div>
+            {isScoped ? (
+              <div className="input input-bordered bg-gray-50">{selLabels.task || "—"}</div>
+            ) : (
+              <select
+                className="select select-bordered w-full"
+                value={links.taskId}
+                onChange={(e) => setLinks((l) => ({ ...l, taskId: e.target.value, milestoneId: "" }))}
+                disabled={!links.projectId}
+              >
+                <option value="">{links.projectId ? "- Select task -" : "- Select project first -"}</option>
+                {tasks.map((t) => (
+                  <option key={t._id || t.id} value={t._id || t.id}>
+                    {labelOf(t)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+
+          {/* Milestone */}
+          <label className="block">
+            <div className="text-sm font-medium">Milestone</div>
+            {isScoped ? (
+              <div className="input input-bordered bg-gray-50">{selLabels.milestone || "—"}</div>
+            ) : (
+              <select
+                className="select select-bordered w-full"
+                value={links.milestoneId}
+                onChange={(e) => setLinks((l) => ({ ...l, milestoneId: e.target.value }))}
+                disabled={!links.taskId}
+              >
+                <option value="">{links.taskId ? "- Select milestone -" : "- Select task first -"}</option>
+                {milestones.map((m) => (
+                  <option key={m._id || m.id} value={m._id || m.id}>
+                    {labelOf(m)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+        </div>
+
+        {/* Subject selector */}
+        {subjectType !== "none" && (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="text-sm font-medium capitalize">
+                {subjectType === "performance" ? "Assessed User (GL+)" : subjectType}
+              </div>
+
+              {/* Locked subject */}
+              {subjectLocked ? (
+                <div className="input input-bordered bg-gray-50">{lockedLabel || subjectId || "Locked"}</div>
+              ) : subjectType === "performance" ? (
+                <>
+                  <input
+                    className="input input-bordered w-full mb-2"
+                    placeholder="Search name or email…"
+                    value={assessedQuery}
+                    onChange={(e) => setAssessedQuery(e.target.value)}
+                  />
+                  <select
+                    className="select select-bordered w-full"
+                    value={assessedId}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setAssessedId(val);
+                      const opt = assessedOptions.find((x) => String(x._id) === String(val));
+                      setAssessedName(opt ? (opt.name || opt.email || opt.username || val) : "");
+                    }}
+                  >
+                    <option value="">- Select user -</option>
+                    {assessedOptions.map((u) => (
+                      <option key={u._id} value={u._id}>
+                        {u.name || u.email || u.username || u._id}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <input
+                      className="input input-bordered w-full"
+                      placeholder={`Enter ${subjectType} id / code / name…`}
+                      value={subjectId}
+                      onChange={(e) => setSubjectId(e.target.value)}
+                      onBlur={tryAssetLookup}
+                    />
+                    <button
+                      type="button"
+                      className={`btn btn-outline ${assetLookupBusy ? "loading" : ""}`}
+                      onClick={tryAssetLookup}
+                      disabled={!subjectId}
+                    >
+                      Lookup
+                    </button>
+                  </div>
+                  {subjectLabel ? (
+                    <div className="text-xs text-gray-600 mt-1">Selected: {subjectLabel}</div>
+                  ) : (
+                    <div className="text-xs text-gray-400 mt-1">Will use the typed value if not found.</div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Geo display */}
+            <div>
+              <div className="text-sm font-medium">Location (auto)</div>
+              <div className="input input-bordered bg-gray-50">
+                {geo.status === "ok" && Number.isFinite(+geo.lat) && Number.isFinite(+geo.lng)
+                  ? `${geo.lat.toFixed(6)}, ${geo.lng.toFixed(6)}`
+                  : geo.status === "denied"
+                  ? "Permission denied (location optional)"
+                  : "Capturing…"}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Items */}
+      <div className="space-y-3">
+        {items.map((r, idx) => (
+          <div key={idx} className="rounded-xl border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="font-medium">
+                {idx + 1}. {r.label || `Item ${idx + 1}`}
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" className={choiceBtn("pass", r.result)} aria-pressed={r.result === "pass"} onClick={() => handleResult(idx, "pass")}>
+                  Pass
+                </button>
+                <button type="button" className={choiceBtn("na", r.result)} aria-pressed={r.result === "na"} onClick={() => handleResult(idx, "na")}>
+                  N/A
+                </button>
+                <button type="button" className={choiceBtn("fail", r.result)} aria-pressed={r.result === "fail"} onClick={() => handleResult(idx, "fail")}>
+                  Fail
+                </button>
+              </div>
+            </div>
+
+            {/* Evidence */}
+            <div className="grid gap-3 sm:grid-cols-3">
+              {r.tpl.allowPhoto && (
+                <div>
+                  <div className="text-sm font-medium">Photo</div>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="file-input file-input-bordered file-input-sm w-full"
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0];
+                      if (f) await handlePhoto(idx, f);
+                    }}
+                  />
+                  {r.evidence.photoUrl && (
+                    <img
+                      src={r.evidence.photoUrl}
+                      alt="evidence"
+                      className="mt-2 border rounded max-h-24 max-w-full object-contain cursor-zoom-in"
+                      onClick={() => setLightboxUrl(r.evidence.photoUrl)}
+                    />
+                  )}
+                </div>
+              )}
+
+              {r.tpl.allowScan && (
+                <div>
+                  <div className="text-sm font-medium">Scan (QR/Barcode/RFID code)</div>
+                  <div className="flex gap-2">
+                    <input
+                      className="input input-bordered input-sm flex-1"
+                      placeholder="Enter or scan a code…"
+                      value={r.evidence.scanRef}
+                      onChange={(e) => setItemEvidence(idx, { scanRef: e.target.value })}
+                    />
+                    {hasBarcodeDetector() && (
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => setScannerForIdx(idx)}
+                        title="Scan using camera"
+                      >
+                        Scan
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button type="button" className="btn btn-ghost btn-xs" onClick={() => handleScanLookup(idx)}>
+                      Lookup asset
+                    </button>
+                    {r.assetMatch ? (
+                      <span className="text-xs text-gray-600">
+                        {r.assetMatch.name || r.assetMatch.title || "Asset"} —{" "}
+                        {r.assetMatch.barcode || r.assetMatch.tag || r.assetMatch._id}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">No asset loaded</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {r.tpl.allowNote && (
+                <div>
+                  <div className="text-sm font-medium">Note</div>
+                  <textarea
+                    className="textarea textarea-bordered textarea-sm w-full"
+                    rows={3}
+                    placeholder="Optional note…"
+                    value={r.evidence.note}
+                    onChange={(e) => setItemEvidence(idx, { note: e.target.value })}
+                  />
+                </div>
+              )}
+            </div>
+
+            {r.result === "fail" && (
+              <div>
+                <div className="text-sm font-medium">Corrective Action</div>
+                <textarea
+                  className="textarea textarea-bordered textarea-sm w-full"
+                  rows={3}
+                  placeholder="Describe the corrective action…"
+                  value={r.correctiveAction}
+                  onChange={(e) => setItem(idx, { correctiveAction: e.target.value })}
+                />
+              </div>
+            )}
+
+            {r.tpl.criticalOnFail && r.result === "fail" && (
+              <div className="text-sm text-red-600">
+                Critical failure — this will cause the inspection to fail. Please schedule a follow-up date below.
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Follow-up */}
+      <div className="rounded-xl border p-4">
+        <div className="font-medium mb-1">Follow-up (if any critical failures)</div>
+        <input
+          type="date"
+          className="input input-bordered"
+          value={dateValue(followUpDate)}
+          onChange={(e) => setFollowUpDate(e.target.value ? new Date(e.target.value) : null)}
+        />
+      </div>
+
+      {/* Confirmation / Signature */}
+      <div className="rounded-xl border p-4 space-y-3">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={confirmNote} onChange={(e) => setConfirmNote(e.target.checked)} />
+          <span>I confirm the above is accurate to the best of my knowledge.</span>
+        </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <div className="text-sm font-medium">Inspector Name</div>
+            <input className="input input-bordered w-full" value={signName} onChange={(e) => setSignName(e.target.value)} />
+          </label>
+          <label className="block">
+            <div className="text-sm font-medium">Signature</div>
+            <div className="border rounded overflow-hidden">
+              <canvas ref={canvasRef} width={600} height={180} className="w-full h-32" />
+            </div>
+            <div className="mt-1">
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => {
+                  const c = canvasRef.current;
+                  if (c) {
+                    const ctx = c.getContext("2d");
+                    ctx.clearRect(0, 0, c.width, c.height);
+                    setSignatureDataUrl("");
+                  }
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      {error && <div className="alert alert-error">{error}</div>}
+      <div className="flex items-center justify-end gap-2">
+        <button className="btn" onClick={() => window.print()}>
+          Print / Export PDF
         </button>
-        <button disabled={saving} className="px-3 py-2 border rounded disabled:opacity-50" onClick={save}>
+        <button className={`btn btn-primary ${saving ? "loading" : ""}`} onClick={handleSave}>
           {saving ? "Saving…" : "Save inspection"}
         </button>
       </div>
 
-      {/* Header */}
-      <div>
-        <h2 className="text-lg font-semibold">{tpl.title || tpl.name}</h2>
-        <div className="text-sm text-gray-600">
-          Version {tpl.version ?? 1} · {isGlobal ? "Global form" : "Scoped form"} · Started {new Date(startedAt).toLocaleString()}
-        </div>
-      </div>
+      {/* Scanner modal */}
+      {scannerForIdx != null && (
+        <Scanner
+          onClose={() => setScannerForIdx(null)}
+          onDetected={(code) => {
+            setItemEvidence(scannerForIdx, { scanRef: code || "" });
+            setScannerForIdx(null);
+          }}
+        />
+      )}
 
-      {/* Project / Task / Milestone */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <label className="text-sm block">
-          Project
-          {isGlobal ? (
-            <select className="border p-2 w-full mt-1" value={projectId} onChange={(e)=>setProjectId(e.target.value)}>
-              <option value="">— Select project —</option>
-              {projects.map((p) => (
-                <option key={p._id || p.id} value={p._id || p.id}>{p.name || p.title || p._id || p.id}</option>
-              ))}
-            </select>
-          ) : (
-            <input className="border p-2 w-full mt-1" disabled value={projectId || ""} />
-          )}
-        </label>
-
-        <label className="text-sm block">
-          Task
-          {isGlobal ? (
-            <select className="border p-2 w-full mt-1" value={taskId} onChange={(e)=>setTaskId(e.target.value)} disabled={!projectId}>
-              <option value="">— Select task —</option>
-              {tasks.map((t) => (
-                <option key={t._id || t.id} value={t._id || t.id}>{t.title || t.name || t._id || t.id}</option>
-              ))}
-            </select>
-          ) : (
-            <input className="border p-2 w-full mt-1" disabled value={taskId || ""} />
-          )}
-        </label>
-
-        <label className="text-sm block">
-          Milestone
-          <select className="border p-2 w-full mt-1" value={milestoneId} onChange={(e)=>setMilestoneId(e.target.value)} disabled={!taskId || milestones.length === 0}>
-            <option value="">{milestones.length ? "— Select milestone —" : "No milestones"}</option>
-            {milestones.map((m) => (<option key={m.id} value={m.id}>{m.name}</option>))}
-          </select>
-        </label>
-      </div>
-
-      {err && <div className="text-red-600">{err}</div>}
-
-      {/* Checklist */}
-      <div className="space-y-3">
-        {tpl.fields.map((f) => {
-          const a = answers.get(f.id) || { ...blankAns };
-          const failing = a.result === "fail";
-
-          const needs = {
-            note:  failing && f.reqOnFail?.note  && !(a.note || "").trim(),
-            photo: failing && f.reqOnFail?.photo && !(Array.isArray(a.photos) && a.photos.length),
-            scan:  failing && f.reqOnFail?.scan  && !(Array.isArray(a.scans)  && a.scans.length),
-            value: failing && f.reqOnFail?.value && (f.valueType === "number" ? !Number.isFinite(Number(a.value)) : !String(a.value ?? "").trim()),
-          };
-
-          return (
-            <div key={f.id} className="border rounded p-3 space-y-3 print-break-avoid">
-              <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">
-                  {f.label} {f.critical && <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">CRITICAL</span>}
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <button type="button" className={pillBase} style={a.result === "pass" ? pillSelected : pillNeutral} onClick={()=>setResult(f.id,"pass")}>Pass</button>
-                  <button type="button" className={pillBase} style={a.result === "fail" ? pillSelected : pillNeutral} onClick={()=>setResult(f.id,"fail")}>Fail</button>
-                  <button type="button" className={pillBase} style={a.result === "na"   ? pillSelected : pillNeutral} onClick={()=>setResult(f.id,"na")}>N/A</button>
-                </div>
-              </div>
-
-              {/* Optional extra text (independent of fail) */}
-              {f.allowText && (
-                <label className="text-sm block">
-                  Additional text
-                  <input className="border p-2 w-full mt-1" type="text" value={a.extraText || ""} onChange={(e)=>upd(f.id,{extraText:e.target.value})} placeholder="Enter details…" />
-                </label>
-              )}
-
-              {/* Evidence — now ONLY visible when the item FAILS */}
-              {failing && (f.allowScan || f.allowPhoto || f.valueType) && (
-                <div className="space-y-3">
-                  {/* Value */}
-                  {f.valueType && (
-                    <label className="text-sm block">
-                      {f.valueType === "number" ? "Measured value" : "Value"}
-                      <input
-                        className="border p-2 w-full mt-1"
-                        type={f.valueType === "number" ? "number" : "text"}
-                        value={a.value ?? ""}
-                        onChange={(e)=>upd(f.id,{value:e.target.value})}
-                        placeholder={f.valueType === "number" ? "0.0" : "Type a value…"}
-                      />
-                      {needs.value && <div className="text-xs text-red-600 mt-1">Required on fail</div>}
-                    </label>
-                  )}
-
-                  {/* Scan */}
-                  {f.allowScan && (
-                    <div className="flex items-end gap-2">
-                      <label className="text-sm flex-1">
-                        Scan / code value (manual)
-                        <input
-                          className="border p-2 w-full mt-1"
-                          value={a.scans?.[a.scans.length - 1]?.value || ""}
-                          onChange={(e)=>{
-                            const last = { type: "manual", value: e.target.value, at: new Date().toISOString() };
-                            const prev = (a.scans || []).filter((s)=>s.type!=="manual");
-                            upd(f.id, { scans: [...prev, last] });
-                          }}
-                          placeholder="Scan result or enter value…"
-                        />
-                        {needs.scan && <div className="text-xs text-red-600 mt-1">Required on fail</div>}
-                      </label>
-                      <button type="button" className="px-3 py-2 border rounded" onClick={()=>doScan(f.id)} title="Use device camera / NFC when supported">Scan</button>
-                    </div>
-                  )}
-
-                  {/* Photos */}
-                  {f.allowPhoto && (
-                    <div className="text-sm">
-                      <label className="block">
-                        Add photos
-                        <input className="border p-2 w-full mt-1" type="file" accept="image/*" multiple onChange={(e)=>attachPhotos(f.id, e.target.files)} />
-                      </label>
-                      {(a.photos || []).length > 0 && (
-                        <div className="flex flex-wrap gap-2 mt-2">
-                          {a.photos.map((p, i)=>(
-                            <img key={i} src={p.dataUrl} alt={p.name} title={p.name} style={{ width:120, height:90, objectFit:"cover", borderRadius:6, border:"1px solid #ddd" }} />
-                          ))}
-                        </div>
-                      )}
-                      {needs.photo && <div className="text-xs text-red-600 mt-1">At least one photo required on fail</div>}
-                    </div>
-                  )}
-
-                  {/* Corrective action */}
-                  <label className="text-sm block">
-                    Corrective action
-                    <textarea className="border p-2 w-full mt-1" rows={3} value={a.note || ""} onChange={(e)=>upd(f.id,{note:e.target.value})} placeholder="Describe the corrective action…" />
-                    {needs.note && <div className="text-xs text-red-600 mt-1">Required on fail</div>}
-                  </label>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* PM section + follow-up for sign-off failures */}
-      {pmNoteEnabled && (
-        <div className="space-y-3">
-          {tpl.formType === "signoff" && tpl.fields.some(f => f.critical && (answers.get(f.id)?.result === "fail")) && (
-            <label className="text-sm block">
-              Follow-up inspection date (required — critical item failed)
-              <input className="border p-2 w-full mt-1" type="date" value={followUpAt} onChange={(e)=>setFollowUpAt(e.target.value)} />
-            </label>
-          )}
-          <label className="text-sm block">
-            Project manager note (optional)
-            <textarea className="border p-2 w-full mt-1" rows={3} value={pmNote} onChange={(e)=>setPmNote(e.target.value)} placeholder="PM commentary…" />
-          </label>
+      {/* Photo lightbox */}
+      {lightboxUrl && (
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center" onClick={() => setLightboxUrl("")}>
+          <img src={lightboxUrl} alt="preview" className="max-w-[90vw] max-h-[90vh] object-contain rounded shadow-lg" />
         </div>
       )}
     </div>

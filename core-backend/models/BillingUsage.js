@@ -1,4 +1,6 @@
-const mongoose = require('mongoose');
+// core-backend/models/BillingUsage.js
+const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
 const BillingUsageSchema = new mongoose.Schema({
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Org', index: true, required: true },
@@ -13,7 +15,6 @@ const BillingUsageSchema = new mongoose.Schema({
     notifications_email: { type: Number, default: 0 },
     storage_gb_month:    { type: Number, default: 0 }
   },
-  // optional audit lines for transparency
   lines: [{
     code: String, qty: Number, unit: Number, subtotal: Number, meta: Object
   }],

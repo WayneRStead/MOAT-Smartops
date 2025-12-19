@@ -8,6 +8,7 @@ export default function GeoFencePreview({
   height = 360,
   className = "",
   reloadKey,
+  fitAllNonce, // bump this number to refit to all current overlays
 
   // Interactivity
   allowPicking = false,
@@ -53,6 +54,10 @@ export default function GeoFencePreview({
   overlayStyleResolver,
   hoverMetaResolver,
 
+  // Imperative-ish camera control (safe no-op if omitted)
+  // Pass { projectId, nonce: Date.now() } to zoom to a project's fences
+  focusRequest,
+
   onLoaded,
 }) {
   const containerRef = useRef(null);
@@ -68,7 +73,7 @@ export default function GeoFencePreview({
   const [projectFences, setProjectFences] = useState([]);
   const [taskFences, setTaskFences] = useState([]);
 
-  // NEW: layer visibility toggles
+  // Layer visibility toggles
   const [showProject, setShowProject] = useState(true);
   const [showTask, setShowTask] = useState(true);
   // In a task view, the task layer is always visible (no toggle)
@@ -304,6 +309,40 @@ export default function GeoFencePreview({
     return Number.isFinite(n) ? n : Number(pointRadiusMeters) || 25;
   };
 
+  /* ===== NEW: Status-aware colour helpers (RAG) ===== */
+  const HEX = {
+    red:   "#ef4444",
+    amber: "#f59e0b",
+    green: "#10b981",
+    gray:  "#6b7280",
+  };
+  const rgba = (hex, a=0.18) => {
+    const m = String(hex||"").replace("#",""); if (m.length!==6) return `rgba(0,0,0,${a})`;
+    const r = parseInt(m.slice(0,2),16), g = parseInt(m.slice(2,4),16), b = parseInt(m.slice(4,6),16);
+    return `rgba(${r},${g},${b},${a})`;
+  };
+  function statusFromOverlay(overlay){
+    const s = String(overlay?.meta?.status ?? overlay?.status ?? overlay?.meta?.rag ?? "").toLowerCase();
+    return s;
+  }
+  function statusStyle(overlay){
+    const s = statusFromOverlay(overlay);
+    if (!s) return {};
+    // critical / overdue / fail
+    if (/\b(fail|critical|overdue|iod|problem)\b/.test(s)) {
+      return { color: HEX.red, fillColor: rgba(HEX.red, 0.12), className: "gf-critical-pulse" };
+    }
+    // paused / maintenance / blocked
+    if (/\b(paused|maintenance|blocked|hold)\b/.test(s)) {
+      return { color: HEX.amber, fillColor: rgba(HEX.amber, 0.12), dashArray: "6,6" };
+    }
+    // finished / closed / pass / healthy / active
+    if (/\b(finished|closed|pass|healthy|active|started|open)\b/.test(s)) {
+      return { color: HEX.green, fillColor: rgba(HEX.green, 0.12) };
+    }
+    return {};
+  }
+
   /* ------------------------------------- Init map ------------------------------------ */
   useEffect(() => {
     if (!L || !containerRef.current || mapRef.current) return;
@@ -363,6 +402,7 @@ export default function GeoFencePreview({
       dashArray: s?.dashArray ?? null,
       fillColor: s?.fillColor ?? s?.color ?? "#000",
       fillOpacity: Number.isFinite(Number(s?.fillOpacity)) ? Number(s.fillOpacity) : 0.1,
+      className: s?.className || undefined, // NEW: allow class on paths for CSS effects
     };
   }
   function styleFromOverlay(overlay, baseStyle) {
@@ -376,7 +416,18 @@ export default function GeoFencePreview({
     const dashArray = fromResolver.dashArray ?? o.dashArray ?? base.dashArray;
     const fillOpacity = Number.isFinite(fromResolver.fillOpacity) ? fromResolver.fillOpacity
                       : Number.isFinite(o.fillOpacity) ? Number(o.fillOpacity) : base.fillOpacity;
-    return { color, fillColor, weight, dashArray, fillOpacity };
+    const className = fromResolver.className ?? o.className ?? base.className;
+
+    // NEW: apply status-aware overrides last
+    const stat = statusStyle(overlay);
+    return {
+      color: stat.color ?? color,
+      fillColor: stat.fillColor ?? fillColor,
+      weight,
+      dashArray: stat.dashArray ?? dashArray,
+      fillOpacity,
+      className: stat.className ?? className,
+    };
   }
 
   /* --------------------------------- Labels & visibility -------------------------------- */
@@ -509,7 +560,7 @@ export default function GeoFencePreview({
         if (pt) {
           const dot = L.circleMarker([pt.lat, pt.lng], {
             radius: pointPixelRadius,
-            color: st.color, weight: 1, fillColor: st.color, fillOpacity: 1,
+            color: st.color, weight: 1, fillColor: st.color, fillOpacity: 1, className: st.className,
           }).addTo(targetLayer);
           bindHoverTooltip(dot, f);
           if (labelMode === "always" && name) {
@@ -544,7 +595,7 @@ export default function GeoFencePreview({
       drew = true;
     }
 
-    // Extra overlays
+    // Extra overlays (status-aware per feature)
     drawSet(extraFences, { color: "#ef4444", fillColor: "#ef4444", weight: 2, fillOpacity: 0.15 }, layerExtraRef.current, true, true);
 
     // Fallback
@@ -593,10 +644,77 @@ export default function GeoFencePreview({
     showProject, taskVisible,
   ]);
 
+  /* --------------------------- Focus request (zoom to project) --------------------------- */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !L || !focusRequest) return;
+
+    const pid = String(focusRequest.projectId || "");
+    if (!pid) return;
+
+    // Prefer extraFences for the project; fall back to fetched project fences if matching
+    const candidates = (extraFences || []).filter(f => String(f?.meta?.projectId || "") === pid);
+    const useFences = candidates.length ? candidates : (String(projectId || "") === pid ? projectFences : []);
+
+    if (!useFences.length) return;
+
+    try {
+      const b = L.latLngBounds([]);
+      for (const f of useFences) {
+        const type = String(f?.type || f?.kind || f?.geometry?.type || "").toLowerCase();
+        if (type === "polygon" || f?.polygon || (f?.geometry && f.geometry.type === "Polygon")) {
+          const latlngs = normalizePolygonLatLng(f.polygon || f.geometry || f.coordinates);
+          if (latlngs && latlngs.length) b.extend(latlngs);
+          continue;
+        }
+        if (type === "line" || type === "polyline" || Array.isArray(f?.line) || Array.isArray(f?.path)) {
+          const latlngs = toPolyline(f);
+          if (latlngs && latlngs.length) b.extend(latlngs);
+          continue;
+        }
+        const c = toCircle(f);
+        if (c) {
+          const circle = L.circle([c.lat, c.lng], { radius: c.radius });
+          const cb = circle.getBounds?.();
+          if (cb?.isValid()) b.extend(cb);
+          continue;
+        }
+        const pt = toPoint(f);
+        if (pt) b.extend([[pt.lat, pt.lng]]);
+      }
+      if (b.isValid()) map.fitBounds(b.pad(0.2), { animate: true });
+    } catch { /* ignore */ }
+  }, [focusRequest, L, extraFences, projectFences, projectId]);
+
+  /* --------------------------- Refit-to-all on demand --------------------------- */
+  useEffect(() => {
+    const map = mapRef.current;
+    const lp = layerProjectRef.current;
+    const lt = layerTaskRef.current;
+    const lx = layerExtraRef.current;
+    if (!L || !map || !lp || !lt || !lx) return;
+
+    try {
+      const bounds = L.latLngBounds([]);
+      [lp, lt, lx].forEach(group => {
+        group.eachLayer(layer => {
+          if (layer?.getBounds?.() && layer.getBounds().isValid()) {
+            bounds.extend(layer.getBounds());
+          } else if (layer?.getLatLng?.()) {
+            bounds.extend(L.latLngBounds([layer.getLatLng()]));
+          }
+        });
+      });
+      if (bounds.isValid()) {
+        map.fitBounds(bounds.pad(0.15), { animate: false });
+        setTimeout(() => { try { map.invalidateSize(false); } catch {} }, 50);
+      }
+    } catch { /* ignore */ }
+  }, [fitAllNonce, L]);
+
   /* -------------------------------------- Legend -------------------------------------- */
   const Swatch = ({ stroke, fill, dashed }) => (
     <span className="inline-flex items-center gap-1">
-      {/* fill square with stroke border */}
       <span
         style={{
           display: "inline-block",
@@ -607,7 +725,6 @@ export default function GeoFencePreview({
           borderRadius: 3,
         }}
       />
-      {/* small line sample */}
       <span
         style={{
           width: 16,
@@ -655,6 +772,15 @@ export default function GeoFencePreview({
 
   return (
     <div className={`relative z-0 ${className}`} style={{ height }}>
+      {/* NEW: CSS for subtle pulsing of critical overlays (SVG stroke/fill opacity) */}
+      <style>{`
+        @keyframes gfPulseStroke { 0%{stroke-opacity:1;} 50%{stroke-opacity:0.35;} 100%{stroke-opacity:1;} }
+        @keyframes gfPulseFill   { 0%{fill-opacity:.16;} 50%{fill-opacity:.05;} 100%{fill-opacity:.16;} }
+        .gf-critical-pulse {
+          animation: gfPulseStroke 1200ms ease-in-out infinite, gfPulseFill 1200ms ease-in-out infinite;
+        }
+      `}</style>
+
       {err ? (
         <div className="h-full w-full flex items-center justify-center text-sm text-gray-600 bg-gray-100 rounded">{err}</div>
       ) : (

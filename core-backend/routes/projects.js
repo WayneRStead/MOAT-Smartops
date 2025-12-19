@@ -1,4 +1,3 @@
-// core-backend/routes/projects.js
 const express = require("express");
 const mongoose = require("mongoose");
 const multer = require("multer");
@@ -37,6 +36,13 @@ function orgScope(orgId) {
   const s = String(orgId);
   if (!mongoose.Types.ObjectId.isValid(s)) return {};
   return { orgId: new mongoose.Types.ObjectId(s) };
+}
+
+// Normalize nullable id fields from request body (accept "", null to clear)
+function readNullableId(val) {
+  if (val === null || val === "" || typeof val === "undefined") return null;
+  if (!isId(val)) return "INVALID";
+  return toObjectId(val);
 }
 
 /* ---- geofence shape helpers (same shapes used by tasks) ---- */
@@ -225,6 +231,14 @@ router.post("/", requireAuth, allowRoles("manager","admin","superadmin"), async 
       ? new mongoose.Types.ObjectId(String(orgIdRaw))
       : orgIdRaw;
 
+    // manager + members (new)
+    const managerId = readNullableId(b.manager ?? b.managerId);
+    if (managerId === "INVALID") return res.status(400).json({ error: "invalid manager id" });
+
+    const members = Array.isArray(b.members)
+      ? b.members.filter(isId).map(toObjectId)
+      : [];
+
     const doc = new Project({
       orgId,
       name: String(b.name).trim(),
@@ -236,6 +250,8 @@ router.post("/", requireAuth, allowRoles("manager","admin","superadmin"), async 
       endDate:   b.endDate   ? new Date(b.endDate)   : undefined,
       clientId:  toObjectId(b.clientId),
       groupId:   toObjectId(b.groupId),
+      manager:   managerId || undefined,
+      members,
     });
 
     await doc.save();
@@ -246,37 +262,91 @@ router.post("/", requireAuth, allowRoles("manager","admin","superadmin"), async 
   }
 });
 
-/* ----------------------------- UPDATE ----------------------------- */
+/* ---------------------- UPDATE HELPERS (PUT/PATCH) ---------------------- */
+
+async function applyProjectUpdates(p, b, res) {
+  if (b.name         != null) p.name = String(b.name).trim();
+  if (b.description  != null) p.description = String(b.description);
+  if (b.status       != null) p.status = normalizeStatus(b.status);
+  if (b.tags         != null) p.tags = Array.isArray(b.tags) ? b.tags : [];
+
+  if (Object.prototype.hasOwnProperty.call(b, "startDate"))
+    p.startDate = b.startDate ? new Date(b.startDate) : undefined;
+  if (Object.prototype.hasOwnProperty.call(b, "endDate"))
+    p.endDate = b.endDate ? new Date(b.endDate) : undefined;
+
+  if (p.startDate && p.endDate && p.endDate < p.startDate) {
+    return res.status(400).json({ error: "endDate cannot be before startDate" });
+  }
+
+  if (b.clientId !== undefined) p.clientId = toObjectId(b.clientId);
+  if (b.groupId  !== undefined) p.groupId  = toObjectId(b.groupId);
+
+  if (b.geoFences !== undefined) p.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
+
+  // NEW: manager + members
+  if (Object.prototype.hasOwnProperty.call(b, "manager") || Object.prototype.hasOwnProperty.call(b, "managerId")) {
+    const mid = readNullableId(b.manager ?? b.managerId);
+    if (mid === "INVALID") return res.status(400).json({ error: "invalid manager id" });
+    p.manager = mid || undefined; // allow clear with null/""
+  }
+
+  if (Object.prototype.hasOwnProperty.call(b, "members")) {
+    if (!Array.isArray(b.members)) return res.status(400).json({ error: "members must be an array of ids" });
+    p.members = b.members.filter(isId).map(toObjectId);
+  }
+
+  await p.save();
+  return null;
+}
+
+/* ----------------------------- UPDATE (PUT) ----------------------------- */
 // PUT /api/projects/:id
 router.put("/:id", requireAuth, allowRoles("manager","admin","superadmin"), async (req, res) => {
   try {
     const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
     if (!p) return res.status(404).json({ error: "Not found" });
 
-    const b = req.body || {};
-    if (b.name         != null) p.name = String(b.name).trim();
-    if (b.description  != null) p.description = String(b.description);
-    if (b.status       != null) p.status = normalizeStatus(b.status);
-    if (b.tags         != null) p.tags = Array.isArray(b.tags) ? b.tags : [];
-
-    if (Object.prototype.hasOwnProperty.call(b, "startDate"))
-      p.startDate = b.startDate ? new Date(b.startDate) : undefined;
-    if (Object.prototype.hasOwnProperty.call(b, "endDate"))
-      p.endDate = b.endDate ? new Date(b.endDate) : undefined;
-
-    if (p.startDate && p.endDate && p.endDate < p.startDate) {
-      return res.status(400).json({ error: "endDate cannot be before startDate" });
-    }
-
-    if (b.clientId !== undefined) p.clientId = toObjectId(b.clientId);
-    if (b.groupId  !== undefined) p.groupId  = toObjectId(b.groupId);
-
-    if (b.geoFences !== undefined) p.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
-
-    await p.save();
+    const err = await applyProjectUpdates(p, req.body || {}, res);
+    if (err) return; // response already sent
     res.json(p.toObject());
   } catch (e) {
     console.error("PUT /projects/:id error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ----------------------------- UPDATE (PATCH) ----------------------------- */
+// PATCH /api/projects/:id  (partial update)
+router.patch("/:id", requireAuth, allowRoles("manager","admin","superadmin"), async (req, res) => {
+  try {
+    const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
+    if (!p) return res.status(404).json({ error: "Not found" });
+
+    const err = await applyProjectUpdates(p, req.body || {}, res);
+    if (err) return;
+    res.json(p.toObject());
+  } catch (e) {
+    console.error("PATCH /projects/:id error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ------------------------- MANAGER ONLY ENDPOINT ------------------------- */
+// PATCH /api/projects/:id/manager  { manager: "<userId|null|''>" }
+router.patch("/:id/manager", requireAuth, allowRoles("manager","admin","superadmin"), async (req, res) => {
+  try {
+    const p = await Project.findOne({ _id: req.params.id, ...orgScope(req.user?.orgId) });
+    if (!p) return res.status(404).json({ error: "Not found" });
+
+    const mid = readNullableId(req.body?.manager ?? req.body?.managerId);
+    if (mid === "INVALID") return res.status(400).json({ error: "invalid manager id" });
+
+    p.manager = mid || undefined;
+    await p.save();
+    res.json(p.toObject());
+  } catch (e) {
+    console.error("PATCH /projects/:id/manager error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });

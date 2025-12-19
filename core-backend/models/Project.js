@@ -1,4 +1,3 @@
-// core-backend/models/Project.js
 const mongoose = require("mongoose");
 
 /* ---------- Back-compat UI-style fences (kept) ---------- */

@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 
+/* ---------- Small bits ---------- */
 function TagPill({ t }) {
   return <span className="text-xs px-2 py-1 rounded bg-gray-200 mr-1">{t}</span>;
 }
@@ -88,6 +89,7 @@ function normCircle(raw) {
   return { center: { lat, lng }, radius: r };
 }
 
+/* ---------- Page ---------- */
 export default function Projects() {
   const navigate = useNavigate();
 
@@ -106,7 +108,7 @@ export default function Projects() {
   // NEW: simple toggle to show always-on name labels on the map
   const [showNames, setShowNames] = useState(false);
 
-  // --- Create / Edit form (unchanged logic) ---
+  // Create/Edit lightbox
   const emptyForm = {
     name: "",
     description: "",
@@ -119,7 +121,9 @@ export default function Projects() {
   };
   const [form, setForm] = useState(emptyForm);
   const [editing, setEditing] = useState(null);
+  const [modalOpen, setModalOpen] = useState(false);
 
+  /* ---------- Data ---------- */
   async function load() {
     setErr(""); setInfo("");
     try {
@@ -148,59 +152,19 @@ export default function Projects() {
     })();
   }, []);
 
-  function resetForm() {
-    setForm(emptyForm);
+  const activeTags = useMemo(() => {
+    const set = new Set();
+    rows.forEach((r) => (r.tags || []).forEach((t) => set.add(t)));
+    return Array.from(set);
+  }, [rows]);
+
+  /* ---------- Modal helpers ---------- */
+  function openCreate() {
     setEditing(null);
+    setForm(emptyForm);
+    setModalOpen(true);
   }
-
-  async function create(e) {
-    e.preventDefault();
-    setErr(""); setInfo("");
-    try {
-      const payload = {
-        name: form.name.trim(),
-        description: form.description || "",
-        status: form.status || "active",
-        startDate: form.startDate || undefined,
-        endDate: form.endDate || undefined,
-        manager: form.manager || undefined,
-        members: Array.isArray(form.members) ? form.members : [],
-        tags: (form.tags || "").split(",").map((s) => s.trim()).filter(Boolean),
-      };
-      if (!payload.name) return setErr("Project name is required");
-      const { data } = await api.post("/projects", payload);
-      resetForm();
-      navigate(`/projects/${data._id}`, { replace: false });
-    } catch (e2) {
-      setErr(e2?.response?.data?.error || String(e2));
-    }
-  }
-
-  async function update(e) {
-    e.preventDefault();
-    if (!editing) return;
-    setErr(""); setInfo("");
-    try {
-      const payload = {
-        name: form.name.trim(),
-        description: form.description || "",
-        status: form.status || "active",
-        startDate: form.startDate || undefined,
-        endDate: form.endDate || undefined,
-        manager: form.manager || undefined,
-        members: Array.isArray(form.members) ? form.members : [],
-        tags: (form.tags || "").split(",").map((s) => s.trim()).filter(Boolean),
-      };
-      const { data } = await api.put(`/projects/${editing._id}`, payload);
-      setRows((prev) => prev.map((r) => (r._id === editing._id ? data : r)));
-      resetForm();
-      setInfo("Project updated.");
-    } catch (e2) {
-      setErr(e2?.response?.data?.error || String(e2));
-    }
-  }
-
-  function startEdit(p) {
+  function openEdit(p) {
     setEditing(p);
     setForm({
       name: p.name || "",
@@ -212,6 +176,47 @@ export default function Projects() {
       members: Array.isArray(p.members) ? p.members : [],
       tags: (p.tags || []).join(", "),
     });
+    setModalOpen(true);
+  }
+  function closeModal() {
+    setModalOpen(false);
+    setTimeout(() => {
+      setForm(emptyForm);
+      setEditing(null);
+    }, 150);
+  }
+
+  async function submitModal(e) {
+    e.preventDefault();
+    setErr(""); setInfo("");
+
+    try {
+      const payload = {
+        name: form.name.trim(),
+        description: form.description || "",
+        status: form.status || "active",
+        startDate: form.startDate || undefined,
+        endDate: form.endDate || undefined,
+        manager: form.manager || undefined,
+        members: Array.isArray(form.members) ? form.members : [],
+        tags: (form.tags || "").split(",").map((s) => s.trim()).filter(Boolean),
+      };
+
+      if (!payload.name) return setErr("Project name is required");
+
+      if (editing) {
+        const { data } = await api.put(`/projects/${editing._id}`, payload);
+        setRows((prev) => prev.map((r) => (r._id === editing._id ? data : r)));
+        setInfo("Project updated.");
+        closeModal();
+      } else {
+        const { data } = await api.post("/projects", payload);
+        closeModal();
+        navigate(`/projects/${data._id}`, { replace: false });
+      }
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
+    }
   }
 
   async function softDelete(id) {
@@ -237,6 +242,7 @@ export default function Projects() {
     }
   }
 
+  // NOTE: updateProjectStatus is retained for modal use / future, but not used inline in the table anymore.
   async function updateProjectStatus(id, newStatus) {
     try {
       const { data } = await api.patch(`/projects/${id}/status`, { status: newStatus });
@@ -246,23 +252,21 @@ export default function Projects() {
     }
   }
 
-  const activeTags = useMemo(() => {
-    const set = new Set();
-    rows.forEach((r) => (r.tags || []).forEach((t) => set.add(t)));
-    return Array.from(set);
-  }, [rows]);
-
-  /** ---------------------------------------------
-   *  MAP: show all projects' fences (per-project color)
-   *  --------------------------------------------- */
+  /* ---------- MAP: show all projects' fences ---------- */
   const [projGfById, setProjGfById] = useState({});
   const [projGfLoading, setProjGfLoading] = useState(false);
+  const gfReqKey = React.useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
+    const myKey = ++gfReqKey.current;
+
     async function fetchAll() {
       const ids = rows.map((r) => String(r._id)).filter(Boolean);
-      if (!ids.length) { setProjGfById({}); return; }
+      if (!ids.length) {
+        setProjGfById({});
+        setProjGfLoading(false);
+        return;
+      }
       setProjGfLoading(true);
       try {
         const next = {};
@@ -274,6 +278,7 @@ export default function Projects() {
               try {
                 const { data } = await api.get(`/projects/${pid}/geofences`, {
                   headers: { "cache-control": "no-cache" },
+                  params: { _ts: Date.now() },
                 });
                 const list =
                   (Array.isArray(data?.geoFences) && data.geoFences) ||
@@ -287,15 +292,15 @@ export default function Projects() {
             })
           );
           for (const r of res) next[r.projectId] = r.fences;
-          if (cancelled) return;
+          if (gfReqKey.current !== myKey) return; // abort applying if stale
         }
-        if (!cancelled) setProjGfById(next);
+        if (gfReqKey.current === myKey) setProjGfById(next);
       } finally {
-        if (!cancelled) setProjGfLoading(false);
+        if (gfReqKey.current === myKey) setProjGfLoading(false);
       }
     }
+
     fetchAll();
-    return () => { cancelled = true; };
   }, [rows]);
 
   // Color per project (explicit color -> palette fallback)
@@ -309,7 +314,7 @@ export default function Projects() {
     return map;
   }, [rows]);
 
-  // Build overlays for ALL listed projects (polygons / polylines / circles / points)
+  // Build overlays for ALL listed projects
   const overlays = useMemo(() => {
     const out = [];
     for (const p of rows || []) {
@@ -421,91 +426,69 @@ export default function Projects() {
       color: projectColourMap.get(pid),
     };
   }
-  // Fallback for map colors if your GeoFencePreview reads style/meta.color
   const overlayStyleResolver = (o) => o?.style || { color: o?.meta?.color, fillColor: o?.meta?.color };
 
+  /* ---------- UI ---------- */
   return (
-    <div className="p-4">
-      <h1 className="text-xl font-semibold mb-3">Projects</h1>
-      {err && <div className="text-red-600 mb-2">{err}</div>}
-      {info && <div className="text-green-700 mb-2">{info}</div>}
+    <div className="max-w-7xl mx-auto p-4">
+      <style>{`
+        .card{ background:#fff; border:1px solid #e5e7eb; border-radius:12px; }
+        .table{ width:100%; border-collapse:collapse; }
+        .table th,.table td{ padding:.5rem; border-top:1px solid #eef2f7; text-align:left; vertical-align:top; }
+        .muted{ color:#64748b; }
+        .btn{ border:1px solid #e5e7eb; border-radius:10px; padding:8px 12px; background:#fff; font-size:12px; line-height:18px; }
+        .btn-sm{ border:1px solid #e5e7eb; border-radius:8px; padding:6px 10px; background:#fff; font-size:12px; line-height:18px; }
+        .input, .select { border:1px solid #e5e7eb; border-radius:8px; padding:8px; font-size:12px; }
+        .toolbar{ display:flex; align-items:center; gap:8px; white-space:nowrap; overflow-x:auto; padding:6px; border:1px solid #e5e7eb; border-radius:12px; background:#fff; }
+        .toolbar > * { flex: 0 0 auto; }
+      `}</style>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 mb-3">
+      {/* Header to match Invoices */}
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Projects</h1>
+        <div className="text-sm text-gray-600 mt-1">Total: {rows.length}</div>
+      </div>
+
+      {/* Single-row toolbar (Invoices style) */}
+      <div className="mt-3 toolbar">
         <input
-          className="border p-2"
+          className="input"
+          style={{ width: 260 }}
           placeholder="Search name/desc/tag…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load()}
-          style={{ minWidth: 280 }}
         />
-        <select className="border p-2" value={status} onChange={(e) => setStatus(e.target.value)}>
+        <select className="select" style={{ width: 160 }} value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">Status (any)</option>
           <option value="active">active</option>
           <option value="paused">paused</option>
           <option value="closed">closed</option>
         </select>
-        <select className="border p-2" value={tag} onChange={(e) => setTag(e.target.value)}>
+        <select className="select" style={{ width: 160 }} value={tag} onChange={(e) => setTag(e.target.value)}>
           <option value="">Tag (any)</option>
           {activeTags.map((t) => (
             <option key={t} value={t}>{t}</option>
           ))}
         </select>
-        <label className="flex items-center gap-2">
+        <label className="text-sm inline-flex items-center gap-2">
           <input
             type="checkbox"
             checked={includeDeleted}
             onChange={(e) => setIncludeDeleted(e.target.checked)}
           />
-          Include deleted
+          <span>Include deleted</span>
         </label>
-        <button className="px-3 py-2 border rounded" onClick={load}>Apply</button>
+        <button className="btn" onClick={load}>Apply</button>
+        {/* Updated to match Invoices button style (bordered) */}
+        <button className="btn" onClick={openCreate}>New Project</button>
       </div>
 
-      {/* Create / Edit */}
-      <form onSubmit={editing ? update : create} className="grid md:grid-cols-3 gap-3 border rounded p-3 mb-4">
-        <label className="text-sm">Name
-          <input className="border p-2 w-full" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-        </label>
-        <label className="text-sm">Status
-          <select className="border p-2 w-full" value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
-            <option value="active">active</option>
-            <option value="paused">paused</option>
-            <option value="closed">closed</option>
-          </select>
-        </label>
-        <label className="text-sm">Tags (comma)
-          <input className="border p-2 w-full" value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="site-a, osha" />
-        </label>
-
-        <label className="text-sm md:col-span-3">Description
-          <textarea className="border p-2 w-full" rows={2} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-        </label>
-
-        <label className="text-sm">Start
-          <input className="border p-2 w-full" type="date" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
-        </label>
-        <label className="text-sm">End
-          <input className="border p-2 w-full" type="date" value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
-        </label>
-
-        <div className="md:col-span-3 text-xs text-gray-600 border-t pt-3">
-          After creating a project, you'll be taken to its detail page to set the location/fences.
-        </div>
-
-        <div className="flex items-center gap-2 md:col-span-3">
-          <button className="px-3 py-2 bg-black text-white rounded">{editing ? "Update" : "Create"}</button>
-          {editing && (
-            <button type="button" className="px-3 py-2 border rounded" onClick={resetForm}>
-              Cancel
-            </button>
-          )}
-        </div>
-      </form>
+      {err && <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm">{err}</div>}
+      {info && <div className="mt-2 rounded border border-green-200 bg-green-100 p-2 text-sm">{info}</div>}
 
       {/* ORG MAP */}
-      <div className="border rounded p-3 mb-4">
+      <div className="card p-3 mt-3">
         <div className="flex items-center justify-between">
           <div className="font-semibold">Organization Map</div>
           <div className="flex items-center gap-4 text-sm">
@@ -524,9 +507,9 @@ export default function Projects() {
 
         {/* Legend */}
         {legendItems.length > 0 && (
-          <div className="sticky top-2 z-10 mt-2 max-h-28 overflow-auto rounded border bg-white/90 backdrop-blur px-3 py-2 text-xs shadow-sm">
+          <div className="sticky top-2 z-10 mt-2 max-h-28 overflow-auto bg-white/90 backdrop-blur px-3 py-2 text-xs shadow-sm">
             <div className="font-medium mb-1">Project Legend</div>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-x-4 gap-y-1">
               {legendItems.map((it) => (
                 <div key={it.id} className="inline-flex items-center gap-2">
                   <svg width="14" height="14" aria-hidden focusable="false">
@@ -540,102 +523,181 @@ export default function Projects() {
         )}
 
         <SafeGeoFencePreview
-          // no single projectId; we render via extraFences
           height={360}
           className="rounded"
-          // Make sure map refreshes appropriately when data changes
           reloadKey={`${rows.length}:${Object.keys(projGfById).length}:${overlays.length}:${showNames}`}
-          // We rely on extraFences to draw everything with per-feature color
           extraFences={overlays}
-          // These two are used by the enhanced GeoFencePreview builds in your repo
           overlayStyleResolver={(o) => overlayStyleResolver(o)}
           hoverMetaResolver={(o) => hoverMetaResolver(o)}
-          // keep the built-in hover labels enabled (uses meta.label)
           enableHoverLabels={true}
-          // NEW: always-on label support (from your updated GeoFencePreview.jsx)
           labelMode={showNames ? "always" : "hover"}
-          labelMinZoom={8}              // tweak if you want labels only when zoomed in enough
+          labelMinZoom={8}
           labelClassName="gf-label"
-          // no picking on org overview
           allowPicking={false}
           legend={false}
         />
       </div>
 
-      {/* Table */}
-      <table className="w-full border text-sm">
-        <thead>
-          <tr className="bg-gray-50">
-            <th className="border p-2 text-left">Name</th>
-            <th className="border p-2 text-left">Status</th>
-            <th className="border p-2 text-left">Tags</th>
-            <th className="border p-2 text-left">Dates</th>
-            <th className="border p-2 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((p) => (
-            <tr key={p._id} className={p.deletedAt ? "opacity-60" : ""}>
-              <td className="border p-2">
-                <Link to={`/projects/${p._id}`} className="underline">{p.name}</Link>
-                {p.description && <div className="text-xs text-gray-600">{p.description}</div>}
-                {p.deletedAt && (
-                  <div className="text-xs text-red-700">
-                    deleted {new Date(p.deletedAt).toLocaleString()}
-                  </div>
-                )}
-              </td>
-              <td className="border p-2">
-                <select
-                  className="border p-1"
-                  value={p.status}
-                  onChange={(e) => updateProjectStatus(p._id, e.target.value)}
-                  disabled={!!p.deletedAt}
-                >
-                  <option value="active">active</option>
-                  <option value="paused">paused</option>
-                  <option value="closed">closed</option>
-                </select>
-              </td>
-              <td className="border p-2">
-                {(p.tags || []).length
-                  ? (p.tags || []).map((t) => <TagPill key={t} t={t} />)
-                  : <span className="text-gray-500">—</span>}
-              </td>
-              <td className="border p-2">
-                <div className="text-xs">
-                  {p.startDate ? `Start: ${new Date(p.startDate).toLocaleDateString()}` : "Start: —"}
-                  <br />
-                  {p.endDate ? `End: ${new Date(p.endDate).toLocaleDateString()}` : "End: —"}
+      {/* Table — matches Invoices layout */}
+      <div className="card mt-3 overflow-x-auto">
+        <table className="table text-sm">
+          <thead>
+            <tr style={{ background: "#f9fafb" }}>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Tags</th>
+              <th>Dates</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? (
+              rows.map((p) => (
+                <tr key={p._id} className={p.deletedAt ? "opacity-60" : ""}>
+                  <td className="p-2 align-top">
+                    {/* keep as Link (do NOT change to button) */}
+                    <Link to={`/projects/${p._id}`} className="underline">{p.name}</Link>
+                    {p.description && <div className="text-xs text-gray-600">{p.description}</div>}
+                    {p.deletedAt && (
+                      <div className="text-xs text-red-700">
+                        deleted {new Date(p.deletedAt).toLocaleString()}
+                      </div>
+                    )}
+                  </td>
+
+                  {/* STATUS — display only (non-editable) */}
+                  <td className="p-2 align-top">
+                    <span className="inline-block text-xs px-2 py-1 rounded bg-gray-100 border border-gray-200">
+                      {p.status || "—"}
+                    </span>
+                  </td>
+
+                  <td className="p-2 align-top">
+                    {(p.tags || []).length
+                      ? (p.tags || []).map((t) => <TagPill key={t} t={t} />)
+                      : <span className="text-gray-500">—</span>}
+                  </td>
+                  <td className="p-2 align-top">
+                    <div className="text-xs">
+                      {p.startDate ? `Start: ${new Date(p.startDate).toLocaleDateString()}` : "Start: —"}
+                      <br />
+                      {p.endDate ? `End: ${new Date(p.endDate).toLocaleDateString()}` : "End: —"}
+                    </div>
+                  </td>
+
+                  {/* ACTIONS — remove "Edit" button, keep Delete/Restore */}
+                  <td className="p-2 text-right align-top">
+                    {!p.deletedAt ? (
+                      <>
+                        {/* Edit removed as requested */}
+                        <button className="btn-sm" onClick={() => softDelete(p._id)}>Delete</button>
+                      </>
+                    ) : (
+                      <button className="btn-sm" onClick={() => restore(p._id)}>Restore</button>
+                    )}
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td className="p-4 text-center text-gray-600" colSpan={5}>
+                  No projects
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Create / Edit Project Lightbox */}
+      {modalOpen && (
+        <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4" onClick={closeModal}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-4" onClick={(e)=>e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold">{editing ? "Edit Project" : "Create Project"}</h3>
+              <button className="text-sm underline" onClick={closeModal}>Close</button>
+            </div>
+
+            <form onSubmit={submitModal} className="grid gap-3">
+              <label className="text-sm">
+                Name
+                <input
+                  className="border p-2 rounded w-full mt-1"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="Project name"
+                  required
+                />
+              </label>
+
+              <label className="text-sm">
+                Description
+                <textarea
+                  className="border p-2 rounded w-full mt-1"
+                  rows={2}
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  placeholder="Optional details"
+                />
+              </label>
+
+              <div className="flex gap-3 flex-wrap">
+                <label className="text-sm">
+                  Status
+                  <select
+                    className="border p-2 rounded ml-2"
+                    value={form.status}
+                    onChange={(e) => setForm({ ...form, status: e.target.value })}
+                  >
+                    <option value="active">active</option>
+                    <option value="paused">paused</option>
+                    <option value="closed">closed</option>
+                  </select>
+                </label>
+                <label className="text-sm">
+                  Start
+                  <input
+                    type="date"
+                    className="border p-2 rounded ml-2"
+                    value={form.startDate}
+                    onChange={(e) => setForm({ ...form, startDate: e.target.value })}
+                  />
+                </label>
+                <label className="text-sm">
+                  End
+                  <input
+                    type="date"
+                    className="border p-2 rounded ml-2"
+                    value={form.endDate}
+                    onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+                  />
+                </label>
+              </div>
+
+              <label className="text-sm">
+                Tags (comma)
+                <input
+                  className="border p-2 rounded w-full mt-1"
+                  value={form.tags}
+                  onChange={(e) => setForm({ ...form, tags: e.target.value })}
+                  placeholder="site-a, osha"
+                />
+              </label>
+
+              {!editing && (
+                <div className="text-xs text-gray-600">
+                  After creating a project, you'll be taken to its detail page to set the location/fences.
                 </div>
-              </td>
-              <td className="border p-2 text-right">
-                {!p.deletedAt ? (
-                  <>
-                    <button className="px-2 py-1 border rounded mr-2" onClick={() => startEdit(p)}>
-                      Edit
-                    </button>
-                    <button className="px-2 py-1 border rounded" onClick={() => softDelete(p._id)}>
-                      Delete
-                    </button>
-                  </>
-                ) : (
-                  <button className="px-2 py-1 border rounded" onClick={() => restore(p._id)}>
-                    Restore
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-          {!rows.length && (
-            <tr>
-              <td className="p-4 text-center" colSpan={5}>
-                No projects
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+              )}
+
+              <div className="flex justify-end gap-2 mt-2">
+                <button type="button" className="btn" onClick={closeModal}>Cancel</button>
+                <button type="submit" className="btn">{editing ? "Update" : "Create"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

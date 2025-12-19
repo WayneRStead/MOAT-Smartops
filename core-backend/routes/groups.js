@@ -1,8 +1,7 @@
-// core-backend/routes/groups.js
 const express = require('express');
 const mongoose = require('mongoose');
 const Group = require('../models/Group');
-const User = require('../models/User'); // optional, handy if you later validate users
+const User = require('../models/User');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -13,16 +12,29 @@ console.log('[routes/groups] mongo-backed groups router loaded');
 const asOid = (x) =>
   (mongoose.Types.ObjectId.isValid(String(x)) ? new mongoose.Types.ObjectId(String(x)) : null);
 
-const wantsObjectId = (model, p) => model?.schema?.path(p)?.instance === 'ObjectId';
+const schemaInstance = (model, p) => model?.schema?.path(p)?.instance;
 
+/**
+ * Build an org filter that works even if the schema uses Schema.Types.Mixed
+ * and orgId values have historically been saved as either ObjectId or String.
+ */
 function orgFilterFromReq(model, req) {
   if (!model?.schema?.path('orgId')) return {};
   const raw = req.user?.orgId;
   if (!raw) return {};
+
   const s = String(raw);
-  // Superadmin / cross-org view
-  if (s.toLowerCase() === 'root') return {};
-  if (wantsObjectId(model, 'orgId')) {
+  const inst = schemaInstance(model, 'orgId');
+
+  // If orgId is Mixed, match BOTH string and ObjectId forms so legacy + new data are visible.
+  if (inst === 'Mixed' || !inst) {
+    const arr = [s];
+    if (mongoose.Types.ObjectId.isValid(s)) arr.push(new mongoose.Types.ObjectId(s));
+    return { orgId: { $in: arr } };
+  }
+
+  // If orgId is ObjectId, use ObjectId; else use string
+  if (inst === 'ObjectId') {
     return mongoose.Types.ObjectId.isValid(s) ? { orgId: new mongoose.Types.ObjectId(s) } : {};
   }
   return { orgId: s };
@@ -30,28 +42,34 @@ function orgFilterFromReq(model, req) {
 
 /**
  * For writes: decide which orgId to store.
- * - If token has a real orgId => use it.
- * - If token has "root" => accept org from body, headers (x-org-id/x-org/x-orgid), or query (?orgId=).
- * Returns { ok: true, orgId } or { ok: false, error }.
+ * - Normal tokens: store as ObjectId if schema is ObjectId, else store as string.
+ * - If schema is Mixed, prefer ObjectId when the token looks like one (keeps it consistent going forward),
+ *   but still allows old string data to coexist (reads handle both via orgFilterFromReq).
+ * - Superadmin "root" can supply org via body/header/query.
  */
 function resolveOrgForWrite(model, req, bodyOrgId) {
   const p = model?.schema?.path('orgId');
-  if (!p) return { ok: true, orgId: undefined }; // model not org-scoped
+  if (!p) return { ok: true, orgId: undefined };
 
-  const tokenOrg = String(req.user?.orgId || '');
+  const inst = p.instance; // 'Mixed' | 'ObjectId' | 'String' ...
+  const tokenOrgRaw = req.user?.orgId ? String(req.user.orgId) : '';
 
-  // Normal org-scoped token → use it directly
-  if (tokenOrg && tokenOrg.toLowerCase() !== 'root') {
-    if (p.instance === 'ObjectId') {
-      if (!mongoose.Types.ObjectId.isValid(tokenOrg)) {
-        return { ok: false, error: 'Invalid orgId on token' };
-      }
-      return { ok: true, orgId: new mongoose.Types.ObjectId(tokenOrg) };
+  // Normal org-scoped token (not root)
+  if (tokenOrgRaw && tokenOrgRaw.toLowerCase() !== 'root') {
+    if (inst === 'ObjectId') {
+      if (!mongoose.Types.ObjectId.isValid(tokenOrgRaw)) return { ok: false, error: 'Invalid orgId on token' };
+      return { ok: true, orgId: new mongoose.Types.ObjectId(tokenOrgRaw) };
     }
-    return { ok: true, orgId: tokenOrg };
+    if (inst === 'Mixed') {
+      return mongoose.Types.ObjectId.isValid(tokenOrgRaw)
+        ? { ok: true, orgId: new mongoose.Types.ObjectId(tokenOrgRaw) }
+        : { ok: true, orgId: tokenOrgRaw };
+    }
+    // String or others
+    return { ok: true, orgId: tokenOrgRaw };
   }
 
-  // Superadmin ("root") token → allow body, header, or query
+  // Superadmin ("root"): accept body/header/query
   const headerOrg =
     req.headers['x-org-id'] ||
     req.headers['x-org'] ||
@@ -64,11 +82,14 @@ function resolveOrgForWrite(model, req, bodyOrgId) {
   const supplied = suppliedRaw != null ? String(suppliedRaw) : '';
   if (!supplied) return { ok: false, error: 'orgId is required (superadmin token)' };
 
-  if (p.instance === 'ObjectId') {
-    if (!mongoose.Types.ObjectId.isValid(supplied)) {
-      return { ok: false, error: 'Invalid orgId format' };
-    }
+  if (inst === 'ObjectId') {
+    if (!mongoose.Types.ObjectId.isValid(supplied)) return { ok: false, error: 'Invalid orgId format' };
     return { ok: true, orgId: new mongoose.Types.ObjectId(supplied) };
+  }
+  if (inst === 'Mixed') {
+    return mongoose.Types.ObjectId.isValid(supplied)
+      ? { ok: true, orgId: new mongoose.Types.ObjectId(supplied) }
+      : { ok: true, orgId: supplied };
   }
   return { ok: true, orgId: supplied };
 }
@@ -168,7 +189,7 @@ router.post('/', requireAuth, requireRole('admin', 'superadmin'), async (req, re
     const doc = new Group({
       name: String(name).trim(),
       description: description || '',
-      leaderUserIds: leaders, // preferred field
+      leaderUserIds: leaders,
       memberUserIds: members,
       isDeleted: false,
       createdBy: req.user?.email || String(req.user?._id || ''),
@@ -185,7 +206,7 @@ router.post('/', requireAuth, requireRole('admin', 'superadmin'), async (req, re
     res.status(201).json(doc);
   } catch (e) {
     console.error('POST /groups error:', e);
-    if (e && e.code === 11000) return res.status(400).json({ error: 'Group name already exists' });
+    if (e && e.code === 11000) return res.status(400).json({ error: 'Group name already exists in this org' });
     if (e?.name === 'CastError') return res.status(400).json({ error: 'Invalid ID format' });
     res.status(500).json({ error: 'Server error' });
   }
@@ -226,7 +247,6 @@ router.put('/:id', requireAuth, requireRole('admin', 'superadmin'), async (req, 
 
     g.updatedBy = req.user?.email || String(req.user?._id || '');
 
-    // Ensure orgId for legacy docs (or if superadmin wants to assign)
     if (!g.orgId) {
       if (!ensureOrgOnDoc(Group, g, req, bodyOrgId)) {
         return res
@@ -239,7 +259,7 @@ router.put('/:id', requireAuth, requireRole('admin', 'superadmin'), async (req, 
     res.json(g);
   } catch (e) {
     console.error('PUT /groups/:id error:', e);
-    if (e && e.code === 11000) return res.status(400).json({ error: 'Group name already exists' });
+    if (e && e.code === 11000) return res.status(400).json({ error: 'Group name already exists in this org' });
     if (e?.name === 'CastError') return res.status(400).json({ error: 'Invalid ID format' });
     res.status(500).json({ error: 'Server error' });
   }
@@ -321,7 +341,7 @@ router.delete('/:id/members/:userId', requireAuth, requireRole('admin', 'superad
 router.post('/:id/leader', requireAuth, requireRole('admin', 'superadmin'), async (req, res) => {
   try {
     const id = asOid(req.params.id);
-    const leader = asOid(req.body?.userId); // add single leader (helper)
+    const leader = asOid(req.body?.userId); // single leader
     if (!id) return res.status(400).json({ error: 'Invalid group id' });
 
     const g = await Group.findOne({
@@ -331,11 +351,7 @@ router.post('/:id/leader', requireAuth, requireRole('admin', 'superadmin'), asyn
     });
     if (!g) return res.status(404).json({ error: 'Not found' });
 
-    if (leader) {
-      g.leaderUserIds = uniqueSet([...(g.leaderUserIds || []), leader]);
-    } else {
-      g.leaderUserIds = []; // if no userId supplied, clear leaders
-    }
+    g.leaderUserIds = leader ? [leader] : [];
     g.updatedBy = req.user?.email || String(req.user?._id || '');
     await g.save();
     res.json(g);

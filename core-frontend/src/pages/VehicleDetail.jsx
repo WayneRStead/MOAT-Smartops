@@ -8,28 +8,84 @@ import {
   startTrip,
   endTrip,
   uploadTripPhoto,
-} from "../lib/vehicleTrips"; // trips API
+  updateTrip as compatUpdateTrip,
+} from "../lib/vehicleTrips";
 import { listPurchases, createPurchase, deletePurchase, listVendors } from "../lib/purchases";
 
+/* ---------- Small UI bits ---------- */
 function StatusBadge({ value }) {
   const map = {
     active: "bg-green-100 text-green-800",
     workshop: "bg-amber-100 text-amber-800",
     retired: "bg-gray-200 text-gray-800",
+    stolen: "bg-purple-200 text-purple-800",
   };
-  const cls = map[value] || "bg-gray-100 text-gray-800";
-  return <span className={`text-xs px-2 py-1 rounded ${cls}`}>{value}</span>;
+  const cls = map[value] || "bg-gray-200 text-gray-800";
+  return <span className={`chip ${cls}`}>{String(value || "—").toUpperCase()}</span>;
+}
+
+/* HeaderRow with no stray whitespace (prevents hydration warnings) */
+function HeaderRow({ headers }) {
+  return (
+    <tr>
+      {headers.map((h) => (
+        <th key={h} className="border-b border-border p-2 text-left">
+          {h}
+        </th>
+      ))}
+    </tr>
+  );
+}
+
+/* Tiny modal / lightbox */
+function Modal({ open, title, onClose, children, footer }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.35)" }} onClick={onClose} />
+      <div className="relative z-10 w-full max-w-2xl rounded-2xl border border-border bg-white p-4 shadow-xl">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-lg font-semibold">{title}</div>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="space-y-3">{children}</div>
+        {footer && <div className="mt-4 flex items-center justify-end gap-2">{footer}</div>}
+      </div>
+    </div>
+  );
 }
 
 /* Resolve backend-relative URLs (for thumbnails) */
 function toAbsoluteUrl(u) {
   if (!u) return "";
   if (/^https?:\/\//i.test(u)) return u;
-  const base = (api?.defaults?.baseURL || "").replace(/\/api\/?$/i, "");
-  return u.startsWith("/") ? base + u : u;
+  const baseFromApi = (api?.defaults?.baseURL || "").replace(/\/api\/?$/i, "").replace(/\/+$/, "");
+  const base =
+    baseFromApi ||
+    (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.host}` : "");
+  return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
 
-/* ---- Service Reminder helpers (status + current ODO) ---- */
+/* --- Geolocation helper (non-blocking) --- */
+function getGeo(timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords || {};
+        if (typeof latitude === "number" && typeof longitude === "number") {
+          resolve({ lat: latitude, lng: longitude, accuracy });
+        } else resolve(null);
+      },
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 10000 }
+    );
+  });
+}
+
+/* ---- Odometer helpers ---- */
 function startOfToday() {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
@@ -48,9 +104,7 @@ function latestOdoFromTrips(trips) {
 function latestOdoFromEntries(entries) {
   let max = null;
   (entries || []).forEach((e) => {
-    const vals = [e?.odometer, e?.odometerEnd, e?.odometerStart]
-      .map(Number)
-      .filter(Number.isFinite);
+    const vals = [e?.odometer, e?.odometerEnd, e?.odometerStart].map(Number).filter(Number.isFinite);
     vals.forEach((v) => {
       if (max == null || v > max) max = v;
     });
@@ -58,7 +112,7 @@ function latestOdoFromEntries(entries) {
   return max;
 }
 
-/* --- Reminder parsing helpers (category / completion / recurrence / pair) --- */
+/* --- Reminder helpers ---- */
 function parseReminderCategory(notes = "") {
   const m = notes.match(/\(\s*Type:\s*([^)]+?)\s*\)/i);
   return m ? m[1].trim().toLowerCase() : "";
@@ -122,9 +176,8 @@ function reminderStatus(rem, currentOdo, today = startOfToday()) {
   return { code: "ok", badgeClass: "bg-green-100 text-green-800", label: "OK" };
 }
 
-/* ----- Logbook display helpers (back-compat) ----- */
+/* ----- Logbook helpers ----- */
 const LOG_TYPES = ["service", "repair", "inspection", "registration", "incident", "tyres", "other"];
-
 function resolveEntryType(e) {
   if (e?.type) return e.type;
   const t = String(e?.title || "").toLowerCase();
@@ -136,16 +189,13 @@ function resolveEntryType(e) {
   if (tagHit) return tagHit;
   return "other";
 }
-
 /** Parse "(Vendor: ...)" and "(Cost: ...)" out of notes when backend doesn't have fields */
 function parseVendorCostFromNotes(notes = "") {
   let clean = notes;
   let vendor = undefined;
   let cost = undefined;
-
   const vendorRx = /\(\s*Vendor:\s*([^)]+?)\s*\)/i;
   const costRx = /\(\s*Cost:\s*([^)]+?)\s*\)/i;
-
   const vMatch = clean.match(vendorRx);
   if (vMatch) {
     vendor = vMatch[1].trim();
@@ -158,11 +208,9 @@ function parseVendorCostFromNotes(notes = "") {
     cost = Number.isFinite(n) ? n : raw;
     clean = clean.replace(costRx, "").trim();
   }
-
   clean = clean.replace(/\s{2,}/g, " ").trim();
   return { vendor, cost, notesClean: clean };
 }
-
 function entryDisplay(e) {
   const parsed = parseVendorCostFromNotes(e?.notes || "");
   return {
@@ -176,7 +224,7 @@ function entryDisplay(e) {
   };
 }
 
-// ---------- label helpers usable before useMemo ----------
+/* ---------- label helpers ---------- */
 function userLabelFrom(users, uidOrObj) {
   if (!uidOrObj) return "—";
   if (typeof uidOrObj === "object" && (uidOrObj.name || uidOrObj.email)) {
@@ -200,7 +248,6 @@ function taskLabelFrom(tasks, tidOrObj) {
   const t = tasks.find((x) => String(x._id) === tid);
   return t ? (t.title || tid) : tid;
 }
-
 export default function VehicleDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -227,6 +274,7 @@ export default function VehicleDetail() {
     recurDays: "",
     recurKm: "",
   });
+  const [showCompletedReminders, setShowCompletedReminders] = useState(false);
 
   // Reminders inline edit
   const [rEditId, setREditId] = useState("");
@@ -242,12 +290,13 @@ export default function VehicleDetail() {
     recurKm: "",
   });
 
-  // Logbook (non-travel)
+  // Logbook
   const [entries, setEntries] = useState([]);
   const [lbErr, setLbErr] = useState("");
   const [lbInfo, setLbInfo] = useState("");
 
-  // Create log entry (non-travel)
+  // Create log entry (modal)
+  const [lbModalOpen, setLbModalOpen] = useState(false);
   const [lbForm, setLbForm] = useState({
     type: "service",
     ts: new Date().toISOString().slice(0, 16),
@@ -285,14 +334,23 @@ export default function VehicleDetail() {
   const [endFile, setEndFile] = useState(null);
   const [tripNotes, setTripNotes] = useState("");
 
-  // Optional project/task selection for a trip (defaults to vehicle’s current)
+  // NEW: trip usage (business/private)
+  const [tripUsage, setTripUsage] = useState("business"); // default
+
+  // Trip create modals
+  const [startTripOpen, setStartTripOpen] = useState(false);
+  const [endTripOpen, setEndTripOpen] = useState(false);
+
+  // Optional project/task selection for a trip
   const [tripProjectId, setTripProjectId] = useState("");
   const [tripTaskId, setTripTaskId] = useState("");
 
-  // Trip filter UI state (search for Vehicle Trips)
+  // Trip filter UI state
   const [tripDriverFilter, setTripDriverFilter] = useState("");
   const [tripProjectFilter, setTripProjectFilter] = useState("");
   const [tripTaskFilter, setTripTaskFilter] = useState("");
+  const [tripDateFrom, setTripDateFrom] = useState("");
+  const [tripDateTo, setTripDateTo] = useState("");
 
   // Trip inline edit
   const [tripEditId, setTripEditId] = useState("");
@@ -305,6 +363,7 @@ export default function VehicleDetail() {
     projectId: "",
     taskId: "",
     notes: "",
+    usage: "business",
   });
 
   // ---------- Purchases state ----------
@@ -313,6 +372,11 @@ export default function VehicleDetail() {
   const [pErr, setPErr] = useState("");
   const [pInfo, setPInfo] = useState("");
   const PURCHASE_TYPES = ["service", "repair", "tyres", "parts", "fuel", "toll", "registration", "other"];
+  const [pPhotoFile, setPPhotoFile] = useState(null); // for "Add purchase"
+  const [editPhotoFile, setEditPhotoFile] = useState(null); // for inline "Edit purchase"
+
+  // Purchases modal
+  const [purchaseModalOpen, setPurchaseModalOpen] = useState(false);
 
   const [pForm, setPForm] = useState({
     vendorId: "",
@@ -337,18 +401,45 @@ export default function VehicleDetail() {
     notes: "",
   });
 
+  // Inspections
+  const [inspections, setInspections] = useState([]);
+  const [inspErr, setInspErr] = useState("");
+  const [inspInfo, setInspInfo] = useState("");
+
   useEffect(() => {
     setTripProjectId(v?.projectId || "");
     setTripTaskId(v?.taskId || "");
     setPForm((f) => ({ ...f, projectId: v?.projectId || "", taskId: v?.taskId || "" }));
   }, [v?.projectId, v?.taskId]);
 
+  const [inspModalOpen, setInspModalOpen] = useState(false);
+  const [inspModalHtml, setInspModalHtml] = useState("");
+  const [inspModalTitle, setInspModalTitle] = useState("");
+
+  async function openInspectionLightbox(insp) {
+    try {
+      const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
+      const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
+      setInspModalTitle(insp.title || insp.templateName || "Inspection");
+      setInspModalHtml(String(html));
+      setInspModalOpen(true);
+    } catch (e) {
+      setInspModalTitle("Inspection");
+      setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
+      setInspModalOpen(true);
+    }
+  }
+
   // ----- Loaders -----
   async function load() {
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
       const { data } = await api.get(`/vehicles/${id}`);
-      setV(data);
+      setV((prev) => {
+        const type = data?.type ?? data?.vehicleType ?? prev?.type ?? "";
+        return { ...data, type };
+      });
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -357,35 +448,47 @@ export default function VehicleDetail() {
     try {
       const { data } = await api.get("/projects", { params: { limit: 1000 } });
       setProjects(Array.isArray(data) ? data : []);
-    } catch { setProjects([]); }
+    } catch {
+      setProjects([]);
+    }
   }
   async function loadUsers() {
     try {
       const { data } = await api.get("/users", { params: { limit: 1000 } });
       setUsers(Array.isArray(data) ? data : []);
-    } catch { setUsers([]); }
+    } catch {
+      setUsers([]);
+    }
   }
   async function loadTasks() {
     try {
       const { data } = await api.get("/tasks", { params: { limit: 1000 } });
       setTasks(Array.isArray(data) ? data : []);
-    } catch { setTasks([]); }
+    } catch {
+      setTasks([]);
+    }
   }
   async function loadReminders() {
-    setRErr(""); setRInfo("");
+    setRErr("");
+    setRInfo("");
     try {
       const { data } = await api.get(`/vehicles/${id}/reminders`);
       setReminders(data.reminders || []);
       setNextDue(data.nextDue || null);
-    } catch (e) { setRErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setRErr(e?.response?.data?.error || String(e));
+    }
   }
   async function loadLogbook() {
-    setLbErr(""); setLbInfo("");
+    setLbErr("");
+    setLbInfo("");
     try {
       const params = { vehicleId: id, limit: 200 };
       const { data } = await api.get("/logbook", { params });
       setEntries(Array.isArray(data) ? data : []);
-    } catch (e) { setLbErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setLbErr(e?.response?.data?.error || String(e));
+    }
   }
 
   // Purchases loaders
@@ -398,7 +501,8 @@ export default function VehicleDetail() {
     }
   }
   async function loadPurchasesList() {
-    setPErr(""); setPInfo("");
+    setPErr("");
+    setPInfo("");
     try {
       const data = await listPurchases({ vehicleId: id, limit: 200 });
       setPurchases(Array.isArray(data) ? data : []);
@@ -407,14 +511,70 @@ export default function VehicleDetail() {
     }
   }
 
-  /* -------- Trips loader -------- */
-  async function loadTrips() {
-    setTripErr(""); setTripsLoading(true);
+  // REPLACE: loadInspections to quietly try multiple APIs and fall back to logbook 'inspection' entries
+async function loadInspections() {
+  setInspErr("");
+  setInspInfo("");
+
+  async function tryGet(url, params) {
     try {
-      const open = await getOpenTrip(id).catch(() => null);
-      setOpenTrip(open || null);
+      const { data } = await api.get(url, { params });
+      if (Array.isArray(data)) return data;
+      if (Array.isArray(data?.items)) return data.items;
+      return Array.isArray(data?.rows) ? data.rows : data;
+    } catch (e) {
+      if (e?.response?.status === 404) return { _404: true };
+      return { _err: e };
+    }
+  }
+
+  // 1) Try likely endpoints
+  const paramsA = { vehicleId: id, limit: 200 };
+  const paramsB = { subjectType: "vehicle", subjectId: id, limit: 200 };
+
+  let res =
+    (await tryGet("/inspections", paramsA)) ||
+    (await tryGet("/inspection", paramsA)) ||
+    (await tryGet("/inspections", paramsB)) ||
+    (await tryGet("/inspection", paramsB));
+
+  // 2) If all 404 or error, fallback: derive from logbook entries of type 'inspection'
+  if (!Array.isArray(res)) {
+    const fromLogbook = (entries || [])
+      .filter((e) => (e?.type || "").toLowerCase() === "inspection")
+      .map((e) => ({
+        _id: e._id,
+        ts: e.ts || e.date,
+        title: e.title || "Inspection",
+        userId: e.userId || e.user,
+        status: e.status || e.result || (e.notes ? "recorded" : "—"),
+        _source: "logbook",
+      }));
+    setInspections(fromLogbook);
+    return;
+  }
+
+  setInspections(res);
+}
+
+  /* -------- Trips loader (robust to 404 on /open) -------- */
+  async function loadTrips() {
+    setTripErr("");
+    setTripsLoading(true);
+    try {
+      let open = null;
+      try {
+        open = await getOpenTrip(id);
+      } catch (e) {
+        if (e?.response?.status !== 404) throw e;
+      }
       const data = await listTrips(id, { limit: 200 }).catch(() => []);
-      setTrips(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      if (!open) {
+        open = list.find((t) => !t.endedAt); // derive open trip if endpoint missing
+      }
+      setOpenTrip(open || null);
+      setTrips(list);
     } catch (e) {
       setTripErr(e?.response?.data?.error || String(e));
     } finally {
@@ -432,6 +592,7 @@ export default function VehicleDetail() {
     loadTrips();
     loadVendorsList();
     loadPurchasesList();
+    loadInspections();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -442,15 +603,21 @@ export default function VehicleDetail() {
       setV(data);
       setInfo("Saved");
       setTimeout(() => setInfo(""), 1200);
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
   }
-  async function setStatus(newStatus) { await save({ status: newStatus }); }
+  async function setStatus(newStatus) {
+    await save({ status: newStatus });
+  }
   async function del() {
     if (!confirm("Delete this vehicle?")) return;
     try {
       await api.delete(`/vehicles/${id}`);
       navigate("/vehicles");
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
   }
 
   /* -------- Recurrence helpers -------- */
@@ -461,44 +628,42 @@ export default function VehicleDetail() {
     return d.toISOString().slice(0, 10);
   }
   async function generateNextFromRecurringTokens(sourceReminderNotes, completedDateISO, odoAtCompletion) {
-    const cat = (parseReminderCategory(sourceReminderNotes) || "service");
+    const cat = parseReminderCategory(sourceReminderNotes) || "service";
     const recurDays = parseRecurDays(sourceReminderNotes);
     const recurKm = parseRecurKm(sourceReminderNotes);
-
     if (!recurDays && !recurKm) return;
-
-    const pairId = recurDays && recurKm ? Math.random().toString(36).slice(2, 8) + "-" + Date.now().toString(36) : "";
-
+    const pairId =
+      recurDays && recurKm
+        ? Math.random().toString(36).slice(2, 8) + "-" + Date.now().toString(36)
+        : "";
     const baseTokens = [
       `(Type: ${cat})`,
       recurDays ? `(RecurDays: ${recurDays})` : "",
       recurKm ? `(RecurKm: ${recurKm})` : "",
       pairId ? `(Pair: ${pairId})` : "",
-    ].filter(Boolean).join(" ");
-
+    ]
+      .filter(Boolean)
+      .join(" ");
     if (recurDays) {
       const nextDate = addDaysISO(completedDateISO, recurDays);
-      await api.post(`/vehicles/${id}/reminders`, {
-        kind: "date",
-        dueDate: nextDate,
-        notes: baseTokens,
-      }).catch(()=>{});
+      await api
+        .post(`/vehicles/${id}/reminders`, { kind: "date", dueDate: nextDate, notes: baseTokens })
+        .catch(() => {});
     }
     if (recurKm) {
       const odoBase = Number(odoAtCompletion ?? currentOdo ?? 0);
       const dueKm = odoBase + Number(recurKm);
-      await api.post(`/vehicles/${id}/reminders`, {
-        kind: "odometer",
-        dueOdometer: dueKm,
-        notes: baseTokens,
-      }).catch(()=>{});
+      await api
+        .post(`/vehicles/${id}/reminders`, { kind: "odometer", dueOdometer: dueKm, notes: baseTokens })
+        .catch(() => {});
     }
   }
 
   // ----- Reminders CRUD -----
   async function addReminder(e) {
     e.preventDefault();
-    setRErr(""); setRInfo("");
+    setRErr("");
+    setRInfo("");
     try {
       const typeToken = rForm.category ? ` (Type: ${rForm.category})` : "";
       const recurTokens =
@@ -507,11 +672,10 @@ export default function VehicleDetail() {
               rForm.recurKm ? ` (RecurKm: ${Number(rForm.recurKm)})` : ""
             }`
           : "";
-
       const payload = {
         kind: rForm.kind,
-        dueDate: rForm.kind === 'date' ? rForm.dueDate : undefined,
-        dueOdometer: rForm.kind === 'odometer' ? Number(rForm.dueOdometer) : undefined,
+        dueDate: rForm.kind === "date" ? rForm.dueDate : undefined,
+        dueOdometer: rForm.kind === "odometer" ? Number(rForm.dueOdometer) : undefined,
         notes: `${rForm.notes || ""}${typeToken}${recurTokens}`.trim(),
       };
       const { data } = await api.post(`/vehicles/${id}/reminders`, payload);
@@ -528,14 +692,18 @@ export default function VehicleDetail() {
         recurKm: "",
       });
       setRInfo("Reminder added.");
-    } catch (e) { setRErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setRErr(e?.response?.data?.error || String(e));
+    }
   }
   async function toggleReminderActive(rid, active) {
     try {
       const { data } = await api.put(`/vehicles/${id}/reminders/${rid}`, { active });
       setReminders(data.reminders || []);
       setNextDue(data.nextDue || null);
-    } catch (e) { setRErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setRErr(e?.response?.data?.error || String(e));
+    }
   }
   async function deleteReminder(rid) {
     if (!confirm("Delete this reminder?")) return;
@@ -543,7 +711,9 @@ export default function VehicleDetail() {
       const { data } = await api.delete(`/vehicles/${id}/reminders/${rid}`);
       setReminders(data.reminders || []);
       setNextDue(data.nextDue || null);
-    } catch (e) { setRErr(e?.response?.data?.error || String(e)); }
+    } catch (e) {
+      setRErr(e?.response?.data?.error || String(e));
+    }
   }
 
   // Reminders inline edit helpers
@@ -565,7 +735,7 @@ export default function VehicleDetail() {
       dueOdometer: r.kind === "odometer" && r.dueOdometer != null ? String(r.dueOdometer) : "",
       notes: baseNotes,
       _completedToken: parseReminderCompletedOn(r.notes || "") || "",
-      recurring: (recurDays || recurKm) ? true : false,
+      recurring: recurDays || recurKm ? true : false,
       recurDays: recurDays ? String(recurDays) : "",
       recurKm: recurKm ? String(recurKm) : "",
     });
@@ -573,34 +743,38 @@ export default function VehicleDetail() {
   function cancelEditReminder() {
     setREditId("");
     setREditForm({
-      kind: "date", category: "service", dueDate: "", dueOdometer: "", notes: "", _completedToken: "",
-      recurring: false, recurDays: "", recurKm: ""
+      kind: "date",
+      category: "service",
+      dueDate: "",
+      dueOdometer: "",
+      notes: "",
+      _completedToken: "",
+      recurring: false,
+      recurDays: "",
+      recurKm: "",
     });
   }
   async function saveEditReminder() {
     if (!rEditId) return;
-    setRErr(""); setRInfo("");
+    setRErr("");
+    setRInfo("");
     try {
       const original = reminders.find((x) => String(x._id) === String(rEditId));
-      const completedToken = rEditForm._completedToken
-        || parseReminderCompletedOn(original?.notes || "")
-        || "";
+      const completedToken =
+        rEditForm._completedToken || parseReminderCompletedOn(original?.notes || "") || "";
       const typeToken = rEditForm.category ? ` (Type: ${rEditForm.category})` : "";
       const completedTag = completedToken ? ` (Completed: ${completedToken})` : "";
-
       const recurTokens =
         rEditForm.recurring && rEditForm.category === "service"
           ? `${rEditForm.recurDays ? ` (RecurDays: ${Number(rEditForm.recurDays)})` : ""}${
               rEditForm.recurKm ? ` (RecurKm: ${Number(rEditForm.recurKm)})` : ""
             }`
           : "";
-
       const newNotes = `${rEditForm.notes || ""}${typeToken}${recurTokens}${completedTag}`.trim();
-
       const patch = { notes: newNotes };
       if (original?.kind === "date") patch.dueDate = rEditForm.dueDate || "";
-      if (original?.kind === "odometer") patch.dueOdometer = rEditForm.dueOdometer !== "" ? Number(rEditForm.dueOdometer) : null;
-
+      if (original?.kind === "odometer")
+        patch.dueOdometer = rEditForm.dueOdometer !== "" ? Number(rEditForm.dueOdometer) : null;
       const { data } = await api.put(`/vehicles/${id}/reminders/${rEditId}`, patch);
       setReminders(data.reminders || []);
       setNextDue(data.nextDue || null);
@@ -610,26 +784,23 @@ export default function VehicleDetail() {
       setRErr(e2?.response?.data?.error || String(e2));
     }
   }
-
-  // ----- Logbook helpers (non-travel) -----
+  // ----- Logbook CRUD -----
   async function createEntry(e) {
-    e.preventDefault();
-    setLbErr(""); setLbInfo("");
-
+    e?.preventDefault?.();
+    setLbErr("");
+    setLbInfo("");
     try {
       const tagList = (lbForm.tags || "")
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-
       const costNum = lbForm.cost !== "" ? Number(lbForm.cost) : undefined;
       const odoNum = lbForm.odometer !== "" ? Number(lbForm.odometer) : undefined;
-
-      const title = (lbForm.type || "other").charAt(0).toUpperCase() + (lbForm.type || "other").slice(1);
+      const title =
+        (lbForm.type || "other").charAt(0).toUpperCase() + (lbForm.type || "other").slice(1);
       const prettyCost = Number.isFinite(costNum) ? ` (Cost: ${costNum})` : "";
       const prettyVendor = lbForm.vendor ? ` (Vendor: ${lbForm.vendor})` : "";
       const combinedNotes = `${lbForm.notes || ""}${prettyVendor}${prettyCost}`.trim();
-
       const payload = {
         vehicleId: id,
         title,
@@ -643,40 +814,45 @@ export default function VehicleDetail() {
         odometerEnd: odoNum,
         odometer: odoNum,
       };
-
       const { data } = await api.post("/logbook", payload);
       setEntries((prev) => [data, ...prev]);
-
       if (lbForm.completeReminderId) {
-        const r = (reminders || []).find(x => String(x._id) === String(lbForm.completeReminderId));
+        const r = (reminders || []).find((x) => String(x._id) === String(lbForm.completeReminderId));
         const existingNotes = r?.notes || "";
-        const completedDate = lbForm.ts ? lbForm.ts.slice(0, 10) : new Date().toISOString().slice(0, 10);
-
-        // 1) Mark selected reminder completed
-        const withoutCompleted = existingNotes.replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "").trim();
+        const completedDate = lbForm.ts
+          ? lbForm.ts.slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+        const withoutCompleted = existingNotes.replace(
+          /\(\s*Completed:\s*[^)]+?\)\s*/i,
+          ""
+        );
         const newNotes = `${withoutCompleted} (Completed: ${completedDate})`.trim();
-        await api.put(`/vehicles/${id}/reminders/${lbForm.completeReminderId}`, { active: false, notes: newNotes });
-
-        // 2) Close sibling if paired
+        await api.put(`/vehicles/${id}/reminders/${lbForm.completeReminderId}`, {
+          active: false,
+          notes: newNotes,
+        });
         const pairId = parsePairId(existingNotes);
         if (pairId) {
           const siblings = (reminders || []).filter(
-            rr => rr.active && String(rr._id) !== String(lbForm.completeReminderId) && parsePairId(rr.notes || "") === pairId
+            (rr) =>
+              rr.active &&
+              String(rr._id) !== String(lbForm.completeReminderId) &&
+              parsePairId(rr.notes || "") === pairId
           );
           for (const sib of siblings) {
-            const sibBase = (sib.notes || "").replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "").trim();
+            const sibBase = (sib.notes || "")
+              .replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "")
+              .trim();
             const sibNote = `${sibBase} (Completed: ${completedDate})`.trim();
-            await api.put(`/vehicles/${id}/reminders/${sib._id}`, { active: false, notes: sibNote }).catch(()=>{});
+            await api
+              .put(`/vehicles/${id}/reminders/${sib._id}`, { active: false, notes: sibNote })
+              .catch(() => {});
           }
         }
-
-        // 3) Auto-generate next reminder(s)
         const odoForNext = lbForm.odometer !== "" ? Number(lbForm.odometer) : currentOdo;
         await generateNextFromRecurringTokens(existingNotes, completedDate, odoForNext);
-
         await loadReminders();
       }
-
       setLbForm({
         type: "service",
         ts: new Date().toISOString().slice(0, 16),
@@ -688,13 +864,15 @@ export default function VehicleDetail() {
         completeReminderId: "",
       });
       setLbInfo("Log entry added.");
+      setLbModalOpen(false);
     } catch (e2) {
       setLbErr(e2?.response?.data?.error || String(e2));
     }
   }
   async function deleteEntry(entryId) {
     if (!confirm("Delete this log entry?")) return;
-    setLbErr(""); setLbInfo("");
+    setLbErr("");
+    setLbInfo("");
     try {
       await api.delete(`/logbook/${entryId}`);
       setEntries((prev) => prev.filter((x) => x._id !== entryId));
@@ -703,15 +881,17 @@ export default function VehicleDetail() {
       setLbErr(e2?.response?.data?.error || String(e2));
     }
   }
-
-  // Logbook inline edit helpers
   function beginEditEntry(entry) {
     const d = entryDisplay(entry);
-    const tagRest = (entry.tags || []).filter((t) => t && t.toLowerCase() !== (d.type || "").toLowerCase());
+    const tagRest = (entry.tags || []).filter(
+      (t) => t && t.toLowerCase() !== (d.type || "").toLowerCase()
+    );
     setLbEditId(entry._id);
     setLbEditForm({
       type: d.type || "other",
-      ts: entry.ts ? new Date(entry.ts).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16),
+      ts: entry.ts
+        ? new Date(entry.ts).toISOString().slice(0, 16)
+        : new Date().toISOString().slice(0, 16),
       odometer: d.odometer ?? "",
       cost: d.cost ?? "",
       vendor: d.vendor ?? "",
@@ -722,26 +902,31 @@ export default function VehicleDetail() {
   function cancelLbEdit() {
     setLbEditId("");
     setLbEditForm({
-      type: "service", ts: "", odometer: "", cost: "", vendor: "", tags: "", notes: ""
+      type: "service",
+      ts: "",
+      odometer: "",
+      cost: "",
+      vendor: "",
+      tags: "",
+      notes: "",
     });
   }
   async function saveLbEdit() {
     if (!lbEditId) return;
-    setLbErr(""); setLbInfo("");
+    setLbErr("");
+    setLbInfo("");
     try {
       const tagList = (lbEditForm.tags || "")
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-
       const costNum = lbEditForm.cost !== "" ? Number(lbEditForm.cost) : undefined;
       const odoNum = lbEditForm.odometer !== "" ? Number(lbEditForm.odometer) : undefined;
-
-      const title = (lbEditForm.type || "other").charAt(0).toUpperCase() + (lbEditForm.type || "other").slice(1);
+      const title =
+        (lbEditForm.type || "other").charAt(0).toUpperCase() + (lbEditForm.type || "other").slice(1);
       const prettyCost = Number.isFinite(costNum) ? ` (Cost: ${costNum})` : "";
       const prettyVendor = lbEditForm.vendor ? ` (Vendor: ${lbEditForm.vendor})` : "";
       const combinedNotes = `${lbEditForm.notes || ""}${prettyVendor}${prettyCost}`.trim();
-
       const patch = {
         title,
         type: lbEditForm.type,
@@ -754,7 +939,6 @@ export default function VehicleDetail() {
         odometerEnd: odoNum,
         odometer: odoNum,
       };
-
       const { data } = await api.put(`/logbook/${lbEditId}`, patch);
       setEntries((prev) => prev.map((x) => (String(x._id) === String(lbEditId) ? data : x)));
       setLbInfo("Log entry updated.");
@@ -764,12 +948,14 @@ export default function VehicleDetail() {
     }
   }
 
-  // Quick-add presets
-  function preset(kind) {
-    const ts = new Date().toISOString().slice(0, 16);
-    if (kind === "fuel") setLbForm((f) => ({ ...f, type: "other", tags: "fuel", ts }));
-    if (kind === "service") setLbForm((f) => ({ ...f, type: "service", tags: "service", ts }));
-    if (kind === "tyres") setLbForm((f) => ({ ...f, type: "tyres", tags: "tyre", ts }));
+  // NEW: Usage helpers (private/business) inferred from tags or explicit field
+  function getUsageFromTrip(t) {
+    const tags = (t?.tags || []).map((x) => String(x).toLowerCase());
+    if (String(t?.usage || "").toLowerCase() === "private") return "private";
+    if (String(t?.usage || "").toLowerCase() === "business") return "business";
+    if (tags.includes("private")) return "private";
+    if (tags.includes("business")) return "business";
+    return "business";
   }
 
   /* ---------------- Trips actions ---------------- */
@@ -783,20 +969,32 @@ export default function VehicleDetail() {
         const { url } = await uploadTripPhoto(startFile);
         startPhotoUrl = url;
       }
+      const g = await getGeo().catch(() => null);
+      const usageTag = tripUsage === "private" ? "private" : "business";
       const payload = {
         odoStart: Number(odoStart),
         projectId: tripProjectId || undefined,
         taskId: tripTaskId || undefined,
         startPhotoUrl,
-        tags: ["general"],
+        tags: [usageTag], // put usage in tags for visibility
+        ...(g
+          ? {
+              startLocation: { type: "Point", coordinates: [g.lng, g.lat] },
+              startLng: g.lng,
+              startLat: g.lat,
+              startAccuracy: g.accuracy,
+            }
+          : {}),
       };
       await startTrip(id, payload);
       setOdoStart("");
       setStartFile(null);
       setTripNotes("");
+      setTripUsage("business");
       await loadTrips();
       setTripInfo("Trip started.");
       setTimeout(() => setTripInfo(""), 1500);
+      setStartTripOpen(false);
     } catch (e2) {
       setTripErr(e2?.response?.data?.error || String(e2));
     }
@@ -813,12 +1011,20 @@ export default function VehicleDetail() {
         const { url } = await uploadTripPhoto(endFile);
         endPhotoUrl = url;
       }
+      const g = await getGeo().catch(() => null);
       const patch = {
         odoEnd: Number(odoEnd),
         endPhotoUrl,
+        ...(tripNotes && tripNotes.trim() ? { notes: tripNotes.trim() } : {}),
+        ...(g
+          ? {
+              endLocation: { type: "Point", coordinates: [g.lng, g.lat] },
+              endLng: g.lng,
+              endLat: g.lat,
+              endAccuracy: g.accuracy,
+            }
+          : {}),
       };
-      if (tripNotes && tripNotes.trim() !== "") patch.notes = tripNotes.trim();
-
       await endTrip(id, openTrip._id, patch);
       setOdoEnd("");
       setEndFile(null);
@@ -826,26 +1032,16 @@ export default function VehicleDetail() {
       await loadTrips();
       setTripInfo("Trip ended.");
       setTimeout(() => setTripInfo(""), 1500);
+      setEndTripOpen(false);
     } catch (e2) {
       setTripErr(e2?.response?.data?.error || String(e2));
     }
   }
 
-     // Trip inline edit helpers
+  // Trip inline edit helpers
   async function apiUpdateTrip(_vehId, tripId, patch) {
-    // keep driverId mirror + remove undefineds
-    const clean = Object.fromEntries(
-      Object.entries({
-        ...patch,
-        driverId: patch?.driverUserId || patch?.driverId || undefined,
-      }).filter(([, v]) => v !== undefined)
-    );
-
-    // single canonical endpoint (router exposes /vehicleTrips/:id; api baseURL includes /api)
-    const { data } = await api.patch(`/vehicleTrips/${tripId}`, clean);
-    return data;
+    return compatUpdateTrip(tripId, patch, { vehicleId: _vehId });
   }
-
   function beginEditTrip(t) {
     setTripInfo("");
     setTripErr("");
@@ -859,12 +1055,21 @@ export default function VehicleDetail() {
       projectId: String(t.projectId || ""),
       taskId: String(t.taskId || ""),
       notes: t.notes || "",
+      usage: getUsageFromTrip(t),
     });
   }
   function cancelEditTrip() {
     setTripEditId("");
     setTripEditForm({
-      startedAt: "", endedAt: "", odoStart: "", odoEnd: "", driverUserId: "", projectId: "", taskId: "", notes: ""
+      startedAt: "",
+      endedAt: "",
+      odoStart: "",
+      odoEnd: "",
+      driverUserId: "",
+      projectId: "",
+      taskId: "",
+      notes: "",
+      usage: "business",
     });
   }
   async function saveEditTrip() {
@@ -873,17 +1078,19 @@ export default function VehicleDetail() {
     setTripInfo("");
     setTripSaving(true);
     try {
+      const usageTag = tripEditForm.usage === "private" ? "private" : "business";
       const patch = {
         startedAt: tripEditForm.startedAt ? new Date(tripEditForm.startedAt).toISOString() : undefined,
         endedAt: tripEditForm.endedAt ? new Date(tripEditForm.endedAt).toISOString() : undefined,
         odoStart: tripEditForm.odoStart !== "" ? Number(tripEditForm.odoStart) : undefined,
         odoEnd: tripEditForm.odoEnd !== "" ? Number(tripEditForm.odoEnd) : undefined,
         driverUserId: tripEditForm.driverUserId || undefined,
-        // also include driverId to satisfy APIs that use this field name
         driverId: tripEditForm.driverUserId || undefined,
         projectId: tripEditForm.projectId || undefined,
         taskId: tripEditForm.taskId || undefined,
         notes: tripEditForm.notes || undefined,
+        tags: [usageTag],
+        usage: usageTag,
       };
       await apiUpdateTrip(id, tripEditId, patch);
       await loadTrips();
@@ -906,37 +1113,37 @@ export default function VehicleDetail() {
   const tasksForVehicleProject = useMemo(() => {
     const pid = v?.projectId || "";
     if (!pid) return tasks;
-    return tasks.filter(t => String(t.projectId) === String(pid));
+    return tasks.filter((t) => String(t.projectId) === String(pid));
   }, [tasks, v?.projectId]);
 
   const tasksForTripProject = useMemo(() => {
     const pid = tripProjectId || "";
     if (!pid) return tasks;
-    return tasks.filter(t => String(t.projectId) === String(pid));
+    return tasks.filter((t) => String(t.projectId) === String(pid));
   }, [tasks, tripProjectId]);
 
   const tasksForTripEditProject = useMemo(() => {
     const pid = tripEditForm.projectId || "";
     if (!pid) return tasks;
-    return tasks.filter(t => String(t.projectId) === String(pid));
+    return tasks.filter((t) => String(t.projectId) === String(pid));
   }, [tasks, tripEditForm.projectId]);
 
   const tasksForPurchaseProject = useMemo(() => {
     const pid = pForm.projectId || "";
     if (!pid) return tasks;
-    return tasks.filter(t => String(t.projectId) === String(pid));
+    return tasks.filter((t) => String(t.projectId) === String(pid));
   }, [tasks, pForm.projectId]);
 
   const tasksForPurchaseEditProject = useMemo(() => {
     const pid = editForm.projectId || "";
     if (!pid) return tasks;
-    return tasks.filter(t => String(t.projectId) === String(pid));
+    return tasks.filter((t) => String(t.projectId) === String(pid));
   }, [tasks, editForm.projectId]);
 
   function taskMatchesProject(tid, pid) {
     if (!tid) return true;
     if (!pid) return true;
-    const t = tasks.find(x => String(x._id) === String(tid));
+    const t = tasks.find((x) => String(x._id) === String(tid));
     return t ? String(t.projectId) === String(pid) : false;
   }
 
@@ -950,29 +1157,48 @@ export default function VehicleDetail() {
     return Math.max(tMax, lMax);
   }, [trips, entries]);
 
+  const lastServiceDate = useMemo(() => {
+    const svc = (entries || [])
+      .filter((e) => resolveEntryType(e) === "service" && e.ts)
+      .sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    return svc[0]?.ts || null;
+  }, [entries]);
+
   const tripDriverOptions = useMemo(() => {
-    const ids = Array.from(new Set(trips.map(t => t.driverUserId || t.driverId).filter(Boolean).map(String)));
-    return ids.map(id => ({ id, label: userLabel(id) }));
+    const ids = Array.from(
+      new Set(trips.map((t) => t.driverUserId || t.driverId).filter(Boolean).map(String))
+    );
+    return ids.map((id) => ({ id, label: userLabel(id) }));
   }, [trips, users]);
   const tripProjectOptions = useMemo(() => {
-    const ids = Array.from(new Set(trips.map(t => t.projectId).filter(Boolean).map(String)));
-    return ids.map(id => ({ id, label: projectLabel(id) }));
+    const ids = Array.from(new Set(trips.map((t) => t.projectId).filter(Boolean).map(String)));
+    return ids.map((id) => ({ id, label: projectLabel(id) }));
   }, [trips, projects]);
   const tripTaskOptions = useMemo(() => {
-    const ids = Array.from(new Set(trips.map(t => t.taskId).filter(Boolean).map(String)));
-    return ids.map(id => ({ id, label: taskLabel(id) }));
+    const ids = Array.from(new Set(trips.map((t) => t.taskId).filter(Boolean).map(String)));
+    return ids.map((id) => ({ id, label: taskLabel(id) }));
   }, [trips, tasks]);
 
   const filteredTrips = useMemo(() => {
-    return trips.filter(t => {
-      if (tripDriverFilter && String(t.driverUserId || t.driverId) !== String(tripDriverFilter)) return false;
+    return trips.filter((t) => {
+      if (tripDriverFilter && String(t.driverUserId || t.driverId) !== String(tripDriverFilter))
+        return false;
       if (tripProjectFilter && String(t.projectId) !== String(tripProjectFilter)) return false;
       if (tripTaskFilter && String(t.taskId) !== String(tripTaskFilter)) return false;
+      if (tripDateFrom) {
+        const from = new Date(tripDateFrom);
+        if (t.startedAt && new Date(t.startedAt) < from) return false;
+      }
+      if (tripDateTo) {
+        const to = new Date(tripDateTo);
+        to.setHours(23, 59, 59, 999);
+        if (t.startedAt && new Date(t.startedAt) > to) return false;
+      }
       return true;
     });
-  }, [trips, tripDriverFilter, tripProjectFilter, tripTaskFilter]);
+  }, [trips, tripDriverFilter, tripProjectFilter, tripTaskFilter, tripDateFrom, tripDateTo]);
 
-  // Exporters (unchanged)
+  // --------- Exports ----------
   function exportLogbookCsv() {
     const rows = [
       ["When", "Type", "Odometer (km)", "Cost", "Vendor", "Tags", "Notes"],
@@ -989,12 +1215,16 @@ export default function VehicleDetail() {
         ];
       }),
     ];
-    const csv = rows.map((r) =>
-      r.map((cell) => {
-        const s = String(cell ?? "");
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      }).join(",")
-    ).join("\n");
+    const csv = rows
+      .map((r) =>
+        r
+          .map((cell) => {
+            const s = String(cell ?? "");
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          })
+          .join(",")
+      )
+      .join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1004,37 +1234,180 @@ export default function VehicleDetail() {
     URL.revokeObjectURL(url);
   }
 
-  function exportTripCsv() {
-    const rows = [
-      ["Started","Ended","Odometer Start","Odometer End","Distance (km)","Driver","Project","Task","Notes","Start Photo","End Photo"],
-      ...filteredTrips.map((t) => [
+  // ADD: Export Trips CSV with usage + coordinates
+function exportTripCsv() {
+  const rows = [
+    [
+      "Started",
+      "Ended",
+      "OdoStart",
+      "OdoEnd",
+      "Distance(km)",
+      "Driver",
+      "Project",
+      "Task",
+      "Usage",
+      "StartLng",
+      "StartLat",
+      "EndLng",
+      "EndLat",
+      "Notes",
+    ],
+    ...filteredTrips.map((t) => {
+      const start = pickLngLat(t.startLocation || {}, "") || pickLngLat(t, "start") || [ "", "" ];
+      const end   = pickLngLat(t.endLocation   || {}, "") || pickLngLat(t, "end")   || [ "", "" ];
+      const usage = getUsageFromTrip(t);
+      const who   = userLabel(t.driverUserId || t.driverId);
+      const proj  = projectLabel(t.projectId);
+      const task  = taskLabel(t.taskId);
+      const dist  = t.distance ?? (t.odoStart != null && t.odoEnd != null
+        ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart))
+        : "");
+      return [
         t.startedAt ? new Date(t.startedAt).toISOString() : "",
-        t.endedAt ? new Date(t.endedAt).toISOString() : "",
+        t.endedAt   ? new Date(t.endedAt).toISOString()   : "",
         t.odoStart ?? "",
         t.odoEnd ?? "",
-        t.distance ?? (t.odoStart != null && t.odoEnd != null ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart)) : ""),
-        userLabel(t.driverUserId || t.driverId),
-        projectLabel(t.projectId),
-        taskLabel(t.taskId),
+        dist,
+        who,
+        proj,
+        task,
+        usage,
+        start[0],
+        start[1],
+        end[0],
+        end[1],
         (t.notes || "").replace(/\r?\n/g, " "),
-        t.startPhoto?.url ? toAbsoluteUrl(t.startPhoto.url) : "",
-        t.endPhoto?.url ? toAbsoluteUrl(t.endPhoto.url) : "",
-      ]),
+      ];
+    }),
+  ];
+
+  const csv = rows
+    .map((r) =>
+      r
+        .map((cell) => {
+          const s = String(cell ?? "");
+          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        })
+        .join(",")
+    )
+    .join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vehicle_${v?.reg || id}_trips.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+  // Robust coordinate picker
+  function pickLngLat(obj, prefix) {
+    if (!obj) return null;
+    if (obj.coordinates && Array.isArray(obj.coordinates) && obj.coordinates.length >= 2) {
+      const [lng, lat] = obj.coordinates;
+      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat)))
+        return [Number(lng), Number(lat)];
+    }
+    const cand = [
+      [obj[`${prefix}Lng`], obj[`${prefix}Lat`]],
+      [obj[`${prefix}Lon`], obj[`${prefix}Lat`]],
+      [obj[`${prefix}Long`], obj[`${prefix}Lat`]],
+      [obj[`${prefix}_lng`], obj[`${prefix}_lat`]],
+      [obj[`${prefix}_lon`], obj[`${prefix}_lat`]],
+      [obj[`${prefix}_long`], obj[`${prefix}_lat`]],
     ];
-    const csv = rows.map((r) =>
-      r.map((cell) => {
-        const s = String(cell ?? "");
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      }).join(",")
-    ).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `vehicle_${id}_trips.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    for (const [lng, lat] of cand) {
+      if (
+        lng != null &&
+        lat != null &&
+        Number.isFinite(Number(lng)) &&
+        Number.isFinite(Number(lat))
+      ) {
+        return [Number(lng), Number(lat)];
+      }
+    }
+    const nested = obj[prefix];
+    if (nested && nested.lng != null && nested.lat != null) {
+      const { lng, lat } = nested;
+      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat)))
+        return [Number(lng), Number(lat)];
+    }
+    return null;
   }
+
+  // REPLACE: exportTripsKml with stronger coordinate discovery
+function exportTripsKml() {
+  const esc = (s) => String(s ?? "").replace(/[<&>]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+  const header = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Vehicle ${esc(v?.reg || id)} Trips</name>`;
+  const footer = `</Document></kml>`;
+
+  const items = filteredTrips.flatMap((t, i) => {
+    const start =
+      pickLngLat(t.startLocation || {}, "") ||
+      pickLngLat(t, "start") ||
+      pickLngLat({ start: { lng: t?.start?.lng, lat: t?.start?.lat } }, "start") ||
+      null;
+
+    const end =
+      pickLngLat(t.endLocation || {}, "") ||
+      pickLngLat(t, "end") ||
+      pickLngLat({ end: { lng: t?.end?.lng, lat: t?.end?.lat } }, "end") ||
+      null;
+
+    const who   = userLabel(t.driverUserId || t.driverId);
+    const proj  = projectLabel(t.projectId);
+    const task  = taskLabel(t.taskId);
+    const usage = getUsageFromTrip(t);
+    const dist  = t.distance ?? (t.odoStart != null && t.odoEnd != null
+      ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart))
+      : "");
+
+    const desc = [
+      `<b>Started</b>: ${t.startedAt ? new Date(t.startedAt).toLocaleString() : "—"}`,
+      `<b>Ended</b>: ${t.endedAt ? new Date(t.endedAt).toLocaleString() : "—"}`,
+      `<b>Odo</b>: ${t.odoStart ?? "—"} → ${t.odoEnd ?? "—"}`,
+      `<b>Distance</b>: ${dist || "—"} km`,
+      `<b>Driver</b>: ${esc(who)}`,
+      `<b>Project</b>: ${esc(proj)}`,
+      `<b>Task</b>: ${esc(task)}`,
+      `<b>Usage</b>: ${esc(usage)}`,
+      t.notes ? `<b>Notes</b>: ${esc(t.notes)}` : "",
+    ].filter(Boolean).join("<br/>");
+
+    const name = `Trip ${i + 1} ${t.startedAt ? new Date(t.startedAt).toISOString() : ""}`;
+
+    if (start && end) {
+      return [
+        `<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description><LineString><coordinates>${start[0]},${start[1]},0 ${end[0]},${end[1]},0</coordinates></LineString></Placemark>`,
+        `<Placemark><name>${esc(name)} (Start)</name><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
+        `<Placemark><name>${esc(name)} (End)</name><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
+      ];
+    }
+    if (start) {
+      return [
+        `<Placemark><name>${esc(name)} (Start)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
+      ];
+    }
+    if (end) {
+      return [
+        `<Placemark><name>${esc(name)} (End)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
+      ];
+    }
+    return [`<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description></Placemark>`];
+  });
+
+  const kml = `${header}\n${items.join("\n")}\n${footer}`;
+  const blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vehicle_${v?.reg || id}_trips.kml`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
   // ---------- Purchases helpers ----------
   function vendorLabel(vendor) {
@@ -1050,35 +1423,49 @@ export default function VehicleDetail() {
     const { data } = await api.put(`/purchases/${purchaseId}`, patch);
     return data;
   }
+  // Reuse trip uploader for receipts
+  async function uploadPurchasePhoto(file) {
+    if (!file) return null;
+    try {
+      const { url } = await uploadTripPhoto(file);
+      return url ? { url } : null;
+    } catch {
+      return null;
+    }
+  }
 
   async function handleAddPurchase(e) {
-    e.preventDefault();
-    setPErr(""); setPInfo("");
+    e?.preventDefault?.();
+    setPErr("");
+    setPInfo("");
     try {
       let vendorId = pForm.vendorId || "";
       let newVendor = null;
-
       if ((vendorId === "" || vendorId === "__new__") && pForm.newVendorName.trim()) {
         newVendor = await apiCreateVendor(pForm.newVendorName.trim());
         vendorId = newVendor?._id || newVendor?.id || "";
         await loadVendorsList();
       }
-
+      let receiptPhotoUrl;
+      if (pPhotoFile) {
+        const up = await uploadPurchasePhoto(pPhotoFile);
+        if (up?.url) receiptPhotoUrl = up.url;
+      }
       const payload = {
         vehicleId: id,
         vendorId: vendorId || undefined,
-        vendorName: !vendorId && pForm.newVendorName.trim() ? pForm.newVendorName.trim() : undefined,
+        vendorName:
+          !vendorId && pForm.newVendorName.trim() ? pForm.newVendorName.trim() : undefined,
         type: pForm.type,
         date: pForm.date ? new Date(pForm.date).toISOString() : undefined,
         cost: pForm.cost !== "" ? Number(pForm.cost) : undefined,
         projectId: pForm.projectId || undefined,
         taskId: pForm.taskId || undefined,
         notes: pForm.notes || "",
+        ...(receiptPhotoUrl ? { receiptPhotoUrl } : {}),
       };
-
       const created = await createPurchase(payload);
       setPurchases((prev) => [created, ...prev]);
-
       setPForm({
         vendorId: "",
         newVendorName: "",
@@ -1089,7 +1476,9 @@ export default function VehicleDetail() {
         taskId: v?.taskId || "",
         notes: "",
       });
+      setPPhotoFile(null);
       setPInfo("Purchase added.");
+      setPurchaseModalOpen(false);
     } catch (e2) {
       setPErr(e2?.response?.data?.error || String(e2));
     }
@@ -1097,7 +1486,8 @@ export default function VehicleDetail() {
 
   async function handleDeletePurchase(rowId) {
     if (!confirm("Delete this purchase?")) return;
-    setPErr(""); setPInfo("");
+    setPErr("");
+    setPInfo("");
     try {
       await deletePurchase(rowId);
       setPurchases((prev) => prev.filter((x) => x._id !== rowId));
@@ -1120,7 +1510,6 @@ export default function VehicleDetail() {
       notes: p.notes || "",
     });
   }
-
   function cancelEdit() {
     setEditId("");
     setEditForm({
@@ -1133,12 +1522,13 @@ export default function VehicleDetail() {
       taskId: "",
       notes: "",
     });
+    setEditPhotoFile(null);
   }
 
   async function saveEditPurchase() {
     if (!editId) return;
-    setPErr(""); setPInfo("");
-
+    setPErr("");
+    setPInfo("");
     try {
       let vendorId = editForm.vendorId || "";
       if ((vendorId === "" || vendorId === "__new__") && editForm.newVendorName.trim()) {
@@ -1146,22 +1536,26 @@ export default function VehicleDetail() {
         vendorId = vnew?._id || vnew?.id || "";
         await loadVendorsList();
       }
-
+      let receiptPhotoUrl;
+      if (editPhotoFile) {
+        const up = await uploadPurchasePhoto(editPhotoFile);
+        if (up?.url) receiptPhotoUrl = up.url;
+      }
       const patch = {
         vendorId: vendorId || undefined,
-        vendorName: !vendorId && editForm.newVendorName.trim() ? editForm.newVendorName.trim() : undefined,
+        vendorName:
+          !vendorId && editForm.newVendorName.trim() ? editForm.newVendorName.trim() : undefined,
         type: editForm.type,
         date: editForm.date ? new Date(editForm.date).toISOString() : undefined,
         cost: editForm.cost !== "" ? Number(editForm.cost) : undefined,
         projectId: editForm.projectId || undefined,
         taskId: editForm.taskId || undefined,
         notes: editForm.notes || "",
+        ...(receiptPhotoUrl ? { receiptPhotoUrl } : {}),
       };
-
       const updated = await apiUpdatePurchase(editId, patch);
       setPurchases((prev) => prev.map((row) => (row._id === editId ? updated : row)));
       setPInfo("Purchase updated.");
-      setTimeout(() => setPInfo(""), 1500);
       cancelEdit();
     } catch (e2) {
       setPErr(e2?.response?.data?.error || String(e2));
@@ -1174,16 +1568,13 @@ export default function VehicleDetail() {
   function handleVehicleProjectChange(e) {
     const pid = e.target.value || "";
     const invalidTask = v?.taskId && !taskMatchesProject(v.taskId, pid);
-    setV(prev => ({
+    setV((prev) => ({
       ...prev,
       projectId: pid,
       taskId: invalidTask ? "" : prev.taskId,
-      task: invalidTask ? undefined : prev.task
+      task: invalidTask ? undefined : prev.task,
     }));
-    save({
-      projectId: pid ? pid : null,
-      ...(invalidTask ? { taskId: null } : {})
-    });
+    save({ projectId: pid ? pid : null, ...(invalidTask ? { taskId: null } : {}) });
   }
 
   // --- Section nav ---
@@ -1198,151 +1589,150 @@ export default function VehicleDetail() {
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+  // ----- UI derived header bits -----
+  const meta = useMemo(() => {
+    const name = v
+      ? v.name || v.displayName || [v.make, v.model].filter(Boolean).join(" ") || "Vehicle"
+      : "Vehicle";
+    return {
+      name,
+      vin: v?.vin ?? "—",
+      reg: v?.reg ?? v?.registration ?? "—",
+      year: v?.year ?? "—",
+      type: v?.type ?? "—",
+      status: v?.status || "active",
+    };
+  }, [v]);
 
-  if (!v) return <div className="p-4">Loading… {err && <span style={{ color: "crimson" }}>({err})</span>}</div>;
+  if (!v) {
+    return (
+      <div className="mx-auto max-w-7xl p-4">
+        Loading… {err && <span style={{ color: "crimson" }}>({err})</span>}
+      </div>
+    );
+  }
 
   return (
-    <div className="p-4 space-y-4">
-      {/* Page heading */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Vehicle</h1>
-        <div className="flex gap-2">
-          <button className="px-3 py-2 border rounded" onClick={del}>Delete</button>
-          <button className="px-3 py-2 border rounded" onClick={() => navigate(-1)}>Back</button>
+    <div className="mx-auto max-w-7xl p-4 space-y-4">
+      {/* Page header */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold">{meta.name}</h1>
+            <StatusBadge value={meta.status} />
+          </div>
+          <div className="mt-1 text-sm text-gray-600">
+            VIN: <b>{meta.vin}</b> • Reg: <b>{meta.reg}</b> • Year: <b>{meta.year}</b> • Type: <b>{meta.type}</b>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button className="btn btn-ghost" onClick={del}>Delete</button>
+          <button className="btn" onClick={() => window.print()}>Print PDF</button>
+          <button className="btn" onClick={() => navigate(-1)}>Back</button>
+        </div>
+      </div>
+
+      {/* Key metrics */}
+      <div className="rounded-xl border border-border bg-panel p-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <Metric label="Odometer" value={currentOdo != null ? `${currentOdo.toLocaleString()} km` : "—"} />
+          <Metric label="Last Service" value={lastServiceDate ? new Date(lastServiceDate).toLocaleDateString() : "—"} />
+          <Metric label="Project" value={projectLabel(v.projectId)} />
+          <Metric label="Driver" value={userLabel(v.driver || v.driverId)} />
         </div>
       </div>
 
       {/* Section buttons */}
-      <div className="flex flex-wrap items-center gap-2 border-b pb-3" aria-label="Sections">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3" aria-label="Sections">
         {sectionButtons.map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            onClick={() => scrollToSection(s.id)}
-            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/20 active:translate-y-px"
-          >
+          <button key={s.id} type="button" onClick={() => scrollToSection(s.id)} className="btn btn-sm">
             {s.label}
           </button>
         ))}
       </div>
 
-      {err && <div className="text-red-600">{err}</div>}
-      {info && <div className="text-green-700">{info}</div>}
+      {err && <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm">{err}</div>}
+      {info && <div className="rounded-xl border border-green-200 bg-green-100 p-3 text-sm">{info}</div>}
 
       {/* -------- Meta -------- */}
-      <div id="meta" className="grid md:grid-cols-2 gap-4 scroll-mt-20">
-        {/* Meta */}
-        <div className="border rounded p-3 space-y-3">
+      <div id="meta" className="grid gap-4 md:grid-cols-2 scroll-mt-20">
+        {/* Meta card */}
+        <div className="rounded-xl border border-border bg-panel p-3 space-y-3">
           <div className="text-lg font-semibold mb-1">Meta</div>
 
           <label className="block text-sm">Registration
-            <input className="border p-2 w-full"
-                   value={v.reg ?? ""}
-                   onChange={e => setV({ ...v, reg: e.target.value })}
-                   onBlur={() => v.reg && save({ reg: v.reg })}
-            />
+            <input className="w-full" value={v.reg ?? ""} onChange={(e) => setV({ ...v, reg: e.target.value })} onBlur={() => save({ reg: v.reg || "" })} />
           </label>
 
           <div className="grid grid-cols-2 gap-2">
             <label className="block text-sm">Make
-              <input className="border p-2 w-full"
-                     value={v.make ?? ""}
-                     onChange={e => setV({ ...v, make: e.target.value })}
-                     onBlur={() => save({ make: v.make || "" })}
-              />
+              <input className="w-full" value={v.make ?? ""} onChange={(e) => setV({ ...v, make: e.target.value })} onBlur={() => save({ make: v.make || "" })} />
             </label>
             <label className="block text-sm">Model
-              <input className="border p-2 w-full"
-                     value={v.model ?? ""}
-                     onChange={e => setV({ ...v, model: e.target.value })}
-                     onBlur={() => save({ model: v.model || "" })}
-              />
+              <input className="w-full" value={v.model ?? ""} onChange={(e) => setV({ ...v, model: e.target.value })} onBlur={() => save({ model: v.model || "" })} />
             </label>
           </div>
 
-          <label className="block text-sm">Year
-            <input className="border p-2 w-full" type="number" inputMode="numeric" min="1900" max="2100"
-                   value={v.year ?? ""}
-                   onChange={e => setV({ ...v, year: e.target.value })}
-                   onBlur={() => save({ year: v.year ? Number(v.year) : undefined })}
-            />
+          <div className="grid grid-cols-2 gap-2">
+            <label className="block text-sm">Year
+              <input className="w-full" type="number" inputMode="numeric" min="1900" max="2100" value={v.year ?? ""} onChange={(e) => setV({ ...v, year: e.target.value })} onBlur={() => save({ year: v.year ? Number(v.year) : undefined })} />
+            </label>
+            <label className="block text-sm">VIN
+              <input className="w-full" value={v.vin ?? ""} onChange={(e) => setV({ ...v, vin: e.target.value })} onBlur={() => save({ vin: v.vin || "" })} placeholder="e.g. 1HGBH41JXMN109186" />
+            </label>
+          </div>
+
+          <label className="block text-sm">Type
+            <input className="w-full" value={v.type ?? ""} onChange={(e) => setV({ ...v, type: e.target.value })} onBlur={() => save({ type: v.type || "", vehicleType: v.type || "" })} placeholder="e.g. Ute, Van, Truck" />
           </label>
 
           <label className="block text-sm">Project
-            <select
-              className="border p-2 w-full"
-              value={v.projectId || ""}
-              onChange={handleVehicleProjectChange}
-            >
+            <select className="w-full" value={v.projectId || ""} onChange={handleVehicleProjectChange}>
               <option value="">— none —</option>
-              {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
             </select>
           </label>
 
           {/* Driver */}
           <label className="block text-sm">Driver
             <div className="flex items-center gap-2">
-              <select
-                className="border p-2 w-full"
-                value={selectedDriverId}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setV(prev => ({ ...prev, driverId: val || "", driver: undefined }));
-                  save({ driverId: val || null });
-                }}
-              >
+              <select className="w-full" value={selectedDriverId} onChange={(e) => {
+                const val = e.target.value;
+                setV((prev) => ({ ...prev, driverId: val || "", driver: undefined }));
+                save({ driverId: val || null });
+              }}>
                 <option value="">— none —</option>
-                {users.map(u => (
-                  <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>
-                ))}
+                {users.map((u) => (<option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>))}
               </select>
               {selectedDriverId && (
-                <button
-                  type="button"
-                  className="px-2 py-1 border rounded"
-                  onClick={() => { setV(prev => ({ ...prev, driverId: "", driver: null })); save({ driverId: null }); }}
-                >
+                <button type="button" className="btn btn-sm" onClick={() => { setV((prev) => ({ ...prev, driverId: "", driver: null })); save({ driverId: null }); }}>
                   Clear
                 </button>
               )}
             </div>
-            {selectedDriverId && (
-              <div className="mt-1 text-xs text-gray-600">
-                Currently: {userLabel(v.driver || v.driverId)}
-              </div>
-            )}
+            {selectedDriverId && <div className="mt-1 text-xs text-gray-600">Currently: {userLabel(v.driver || v.driverId)}</div>}
           </label>
 
-          {/* Task allocation (filtered by selected project) */}
+          {/* Task allocation */}
           <label className="block text-sm">Task
             <div className="flex items-center gap-2">
-              <select
-                className="border p-2 w-full"
-                value={v?.task?._id || v?.taskId || ""}
-                onChange={(e) => {
-                  const val = e.target.value || "";
-                  setV(prev => ({ ...prev, taskId: val, task: undefined }));
-                  save({ taskId: val || null });
-                }}
-              >
+              <select className="w-full" value={v?.task?._id || v?.taskId || ""} onChange={(e) => {
+                const val = e.target.value || "";
+                setV((prev) => ({ ...prev, taskId: val, task: undefined }));
+                save({ taskId: val || null });
+              }}>
                 <option value="">— none —</option>
-                {tasksForVehicleProject.map(t => (
-                  <option key={t._id} value={t._id}>{t.title || t._id}</option>
-                ))}
+                {tasksForVehicleProject.map((t) => (<option key={t._id} value={t._id}>{t.title || t._id}</option>))}
               </select>
               {(v?.task?._id || v?.taskId) && (
-                <button
-                  type="button"
-                  className="px-2 py-1 border rounded"
-                  onClick={() => { setV(prev => ({ ...prev, taskId: "", task: null })); save({ taskId: null }); }}
-                >
+                <button type="button" className="btn btn-sm" onClick={() => { setV((prev) => ({ ...prev, taskId: "", task: null })); save({ taskId: null }); }}>
                   Clear
                 </button>
               )}
             </div>
             {(v?.task?._id || v?.taskId) && (
               <div className="mt-1 text-xs">
-                <Link className="underline" to={`/tasks/${v?.task?._id || v?.taskId}`}>Open task</Link>
+                <Link className="link" to={`/tasks/${v?.task?._id || v?.taskId}`}>Open task</Link>
               </div>
             )}
           </label>
@@ -1350,352 +1740,247 @@ export default function VehicleDetail() {
           <label className="block text-sm">Status
             <div className="flex items-center gap-2">
               <StatusBadge value={v.status || "active"} />
-              <select className="border p-2"
-                      value={v.status || "active"}
-                      onChange={e => setStatus(e.target.value)}
-              >
+              <select value={v.status || "active"} onChange={(e) => setStatus(e.target.value)}>
                 <option value="active">active</option>
                 <option value="workshop">workshop</option>
                 <option value="retired">retired</option>
+                <option value="stolen">stolen</option>
               </select>
             </div>
           </label>
 
           <div className="text-sm text-gray-600">
-            Created: {v.createdAt ? new Date(v.createdAt).toLocaleString() : "—"}
-            <br />
+            Created: {v.createdAt ? new Date(v.createdAt).toLocaleString() : "—"}<br />
             Updated: {v.updatedAt ? new Date(v.updatedAt).toLocaleString() : "—"}
           </div>
         </div>
 
         {/* -------- Reminders (with Recurring) -------- */}
-        <div id="reminders" className="border rounded p-3 space-y-3 scroll-mt-20">
-          <div className="text-lg font-semibold">Service Reminders</div>
-
-          <div className="text-sm text-gray-700">
-            {nextDue?.dateDue && (
-              <span className="mr-3">Next date: <b>{new Date(nextDue.dateDue.dueDate).toLocaleDateString()}</b></span>
-            )}
-            {nextDue?.odoDue && (
-              <span className="mr-3">Next km: <b>{nextDue.odoDue.dueOdometer} km</b></span>
-            )}
-            {currentOdo != null && (
-              <span>Current ODO: <b>{currentOdo} km</b></span>
-            )}
+        <div id="reminders" className="rounded-xl border border-border bg-panel p-3 space-y-3 scroll-mt-20">
+          <div className="flex items-center justify-between">
+            <div className="text-lg font-semibold">Service Reminders</div>
+            <button type="button" className={`chip ${showCompletedReminders ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-700"}`} onClick={() => setShowCompletedReminders((s) => !s)}>
+              {showCompletedReminders ? "Hide completed" : "Show completed"}
+            </button>
           </div>
 
-          {rErr && <div className="text-red-600">{rErr}</div>}
-          {rInfo && <div className="text-green-700">{rInfo}</div>}
+          <div className="text-sm text-gray-700">
+            {nextDue?.dateDue && (<span className="mr-3">Next date: <b>{new Date(nextDue.dateDue.dueDate).toLocaleDateString()}</b></span>)}
+            {nextDue?.odoDue && (<span className="mr-3">Next km: <b>{nextDue.odoDue.dueOdometer} km</b></span>)}
+            {currentOdo != null && (<span>Current ODO: <b>{currentOdo} km</b></span>)}
+          </div>
+
+          {rErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{rErr}</div>}
+          {rInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{rInfo}</div>}
 
           {/* Create */}
           <form onSubmit={addReminder} className="grid md:grid-cols-12 gap-2">
-            <label className="text-sm md:col-span-2">
-              Category
-              <select
-                className="border p-2 w-full"
-                value={rForm.category}
-                onChange={(e) => setRForm({ ...rForm, category: e.target.value })}
-              >
-                {LOG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            <label className="text-sm md:col-span-2">Category
+              <select className="w-full" value={rForm.category} onChange={(e) => setRForm({ ...rForm, category: e.target.value })}>
+                {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
               </select>
             </label>
-            <label className="text-sm md:col-span-2">
-              Type
-              <select className="border p-2 w-full" value={rForm.kind} onChange={e => setRForm({ ...rForm, kind: e.target.value })}>
+            <label className="text-sm md:col-span-2">Type
+              <select className="w-full" value={rForm.kind} onChange={(e) => setRForm({ ...rForm, kind: e.target.value })}>
                 <option value="date">By date</option>
                 <option value="odometer">By odometer</option>
               </select>
             </label>
-            {rForm.kind === 'date' ? (
+            {rForm.kind === "date" ? (
               <label className="text-sm md:col-span-3">Due date
-                <input className="border p-2 w-full" type="date" value={rForm.dueDate} onChange={e => setRForm({ ...rForm, dueDate: e.target.value })} required />
+                <input className="w-full" type="date" value={rForm.dueDate} onChange={(e) => setRForm({ ...rForm, dueDate: e.target.value })} required />
               </label>
             ) : (
               <label className="text-sm md:col-span-3">Due km
-                <input className="border p-2 w-full" type="number" inputMode="numeric" min="0" value={rForm.dueOdometer} onChange={e => setRForm({ ...rForm, dueOdometer: e.target.value })} required />
+                <input className="w-full" type="number" inputMode="numeric" min="0" value={rForm.dueOdometer} onChange={(e) => setRForm({ ...rForm, dueOdometer: e.target.value })} required />
               </label>
             )}
             <label className="text-sm md:col-span-5">Notes
-              <input className="border p-2 w-full" value={rForm.notes} onChange={e => setRForm({ ...rForm, notes: e.target.value })} />
+              <input className="w-full" value={rForm.notes} onChange={(e) => setRForm({ ...rForm, notes: e.target.value })} />
             </label>
 
             {/* Recurring options for service */}
             {rForm.category === "service" && (
               <>
-                <div className="md:col-span-12 border-t my-2" />
+                <div className="md:col-span-12 border-t border-border my-2" />
                 <label className="text-sm md:col-span-2 inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={rForm.recurring}
-                    onChange={(e) => setRForm((f) => ({ ...f, recurring: e.target.checked }))}
-                  />
+                  <input type="checkbox" checked={rForm.recurring} onChange={(e) => setRForm((f) => ({ ...f, recurring: e.target.checked }))} />
                   <span>Recurring</span>
                 </label>
-                <label className="text-sm md:col-span-2">
-                  Every (days)
-                  <input
-                    className="border p-2 w-full"
-                    type="number"
-                    min="0"
-                    value={rForm.recurDays}
-                    onChange={(e) => setRForm((f) => ({ ...f, recurDays: e.target.value }))}
-                    placeholder="e.g. 365"
-                    disabled={!rForm.recurring}
-                  />
+                <label className="text-sm md:col-span-2">Every (days)
+                  <input className="w-full" type="number" min="0" value={rForm.recurDays} onChange={(e) => setRForm((f) => ({ ...f, recurDays: e.target.value }))} placeholder="e.g. 365" disabled={!rForm.recurring} />
                 </label>
-                <label className="text-sm md:col-span-2">
-                  Every (km)
-                  <input
-                    className="border p-2 w-full"
-                    type="number"
-                    min="0"
-                    value={rForm.recurKm}
-                    onChange={(e) => setRForm((f) => ({ ...f, recurKm: e.target.value }))}
-                    placeholder="e.g. 10000"
-                    disabled={!rForm.recurring}
-                  />
+                <label className="text-sm md:col-span-2">Every (km)
+                  <input className="w-full" type="number" min="0" value={rForm.recurKm} onChange={(e) => setRForm((f) => ({ ...f, recurKm: e.target.value }))} placeholder="e.g. 10000" disabled={!rForm.recurring} />
                 </label>
                 <div className="text-xs text-gray-600 md:col-span-6">
-                  Set one or both. If both are set, the system adds a paired date+km reminder for the next cycle and will auto-close the sibling when one is completed.
+                  Set one or both. If both are set, the system pairs date+km reminders and will auto-close the sibling when one completes.
                 </div>
               </>
             )}
 
             <div className="md:col-span-12">
-              <button className="px-3 py-2 bg-black text-white rounded" type="submit">Add reminder</button>
+              <button className="btn btn-primary" type="submit">Add reminder</button>
             </div>
           </form>
 
-          {/* List (inline edit like Purchases) */}
-          <table className="w-full border text-sm">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="border p-2 text-left">Category</th>
-                <th className="border p-2 text-left">Type</th>
-                <th className="border p-2 text-left">Due</th>
-                <th className="border p-2 text-left">Notes</th>
-                <th className="border p-2 text-left">Active</th>
-                <th className="border p-2 text-left">Status</th>
-                <th className="border p-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(reminders || []).map(r => {
-                const cat = parseReminderCategory(r.notes || "") || "—";
-                const s = reminderStatus(r, currentOdo);
-                const completedOn = parseReminderCompletedOn(r.notes || "");
-                const rowTintClass =
-                  s.code === "overdue" ? "bg-red-50" :
-                  s.code === "due-soon" ? "bg-amber-50" : "";
-                const rowTintStyle =
-                  s.code === "overdue" ? { backgroundColor: "#fee2e2" } :
-                  s.code === "due-soon" ? { backgroundColor: "#fffbeb" } : {};
-                const badgeStyle =
-                  s.code === "overdue" ? { backgroundColor: "#fee2e2", color: "#991b1b" } :
-                  s.code === "due-soon" ? { backgroundColor: "#fef3c7", color: "#92400e" } :
-                  s.code === "paused" ? { backgroundColor: "#e5e7eb", color: "#374151" } :
-                  s.code === "completed" ? { backgroundColor: "#dbeafe", color: "#1e40af" } :
-                  { backgroundColor: "#d1fae5", color: "#065f46" };
-
-                const isEditing = rEditId === r._id;
-
-                return (
-                  <tr key={r._id} className={rowTintClass} style={rowTintStyle}>
-                    <td className="border p-2">
-                      {!isEditing ? (
-                        cat
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={rEditForm.category}
-                          onChange={(e)=>setREditForm(f=>({...f,category:e.target.value}))}
-                        >
-                          {LOG_TYPES.map((t)=><option key={t} value={t}>{t}</option>)}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border p-2">{r.kind}</td>
-                    <td className="border p-2">
-                      {!isEditing ? (
-                        r.kind === 'date'
-                          ? (r.dueDate ? new Date(r.dueDate).toLocaleDateString() : '—')
-                          : (r.dueOdometer != null ? `${r.dueOdometer} km` : '—')
-                      ) : (
-                        r.kind === "date" ? (
-                          <input
-                            className="border p-1"
-                            type="date"
-                            value={rEditForm.dueDate}
-                            onChange={(e)=>setREditForm(f=>({...f,dueDate:e.target.value}))}
-                          />
-                        ) : (
-                          <input
-                            className="border p-1 w-28"
-                            type="number"
-                            inputMode="numeric"
-                            min="0"
-                            value={rEditForm.dueOdometer}
-                            onChange={(e)=>setREditForm(f=>({...f,dueOdometer:e.target.value}))}
-                          />
-                        )
-                      )}
-                    </td>
-                    <td className="border p-2">
-                      {!isEditing ? (
-                        stripReminderTokens(r.notes || "—") || "—"
-                      ) : (
-                        <div className="flex flex-col gap-2">
-                          <input
-                            className="border p-1 w-full"
-                            value={rEditForm.notes}
-                            onChange={(e)=>setREditForm(f=>({...f,notes:e.target.value}))}
-                          />
-                          {rEditForm.category === "service" && (
-                            <div className="flex items-end gap-2 text-xs">
-                              <label className="inline-flex items-center gap-1">
-                                <input
-                                  type="checkbox"
-                                  checked={rEditForm.recurring}
-                                  onChange={(e)=>setREditForm(f=>({...f,recurring:e.target.checked}))}
-                                />
-                                <span>Recurring</span>
-                              </label>
-                              <label>
-                                Days:&nbsp;
-                                <input
-                                  className="border p-1 w-20"
-                                  type="number"
-                                  min="0"
-                                  value={rEditForm.recurDays}
-                                  onChange={(e)=>setREditForm(f=>({...f,recurDays:e.target.value}))}
-                                  disabled={!rEditForm.recurring}
-                                />
-                              </label>
-                              <label>
-                                Km:&nbsp;
-                                <input
-                                  className="border p-1 w-24"
-                                  type="number"
-                                  min="0"
-                                  value={rEditForm.recurKm}
-                                  onChange={(e)=>setREditForm(f=>({...f,recurKm:e.target.value}))}
-                                  disabled={!rEditForm.recurring}
-                                />
-                              </label>
+          {/* List */}
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="w-full text-sm">
+              <thead className="bg-thead">
+                <HeaderRow headers={["Category", "Type", "Due", "Notes", "Active", "Status", "Actions"]} />
+              </thead>
+              <tbody>
+                {(reminders || [])
+                  .filter((r) => {
+                    const s = reminderStatus(r, currentOdo);
+                    return showCompletedReminders ? true : s.code !== "completed";
+                  })
+                  .map((r) => {
+                    const cat = parseReminderCategory(r.notes || "") || "—";
+                    const s = reminderStatus(r, currentOdo);
+                    const completedOn = parseReminderCompletedOn(r.notes || "");
+                    const rowTintStyle =
+                      s.code === "overdue" ? { backgroundColor: "#fee2e2" }
+                      : s.code === "due-soon" ? { backgroundColor: "#fffbeb" }
+                      : {};
+                    const isEditing = rEditId === r._id;
+                    return (
+                      <tr key={r._id} style={rowTintStyle}>
+                        <td className="border-b border-border p-2">
+                          {!isEditing ? cat : (
+                            <select className="p-1 border border-border rounded" value={rEditForm.category} onChange={(e) => setREditForm((f) => ({ ...f, category: e.target.value }))}>
+                              {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                            </select>
+                          )}
+                        </td>
+                        <td className="border-b border-border p-2">{r.kind}</td>
+                        <td className="border-b border-border p-2">
+                          {!isEditing ? (
+                            r.kind === "date" ? (r.dueDate ? new Date(r.dueDate).toLocaleDateString() : "—")
+                            : (r.dueOdometer != null ? `${r.dueOdometer} km` : "—")
+                          ) : r.kind === "date" ? (
+                            <input className="p-1 border border-border rounded" type="date" value={rEditForm.dueDate} onChange={(e) => setREditForm((f) => ({ ...f, dueDate: e.target.value }))} />
+                          ) : (
+                            <input className="p-1 border border-border rounded w-28" type="number" inputMode="numeric" min="0" value={rEditForm.dueOdometer} onChange={(e) => setREditForm((f) => ({ ...f, dueOdometer: e.target.value }))} />
+                          )}
+                        </td>
+                        <td className="border-b border-border p-2">
+                          {!isEditing ? (
+                            stripReminderTokens(r.notes || "—") || "—"
+                          ) : (
+                            <div className="flex flex-col gap-2">
+                              <input className="p-1 border border-border rounded w-full" value={rEditForm.notes} onChange={(e) => setREditForm((f) => ({ ...f, notes: e.target.value }))} />
+                              {rEditForm.category === "service" && (
+                                <div className="flex items-end gap-2 text-xs">
+                                  <label className="inline-flex items-center gap-1">
+                                    <input type="checkbox" checked={rEditForm.recurring} onChange={(e) => setREditForm((f) => ({ ...f, recurring: e.target.checked }))} />
+                                    <span>Recurring</span>
+                                  </label>
+                                  <label>Days:&nbsp;
+                                    <input className="p-1 border border-border rounded w-20" type="number" min="0" value={rEditForm.recurDays} onChange={(e) => setREditForm((f) => ({ ...f, recurDays: e.target.value }))} disabled={!rEditForm.recurring} />
+                                  </label>
+                                  <label>Km:&nbsp;
+                                    <input className="p-1 border border-border rounded w-24" type="number" min="0" value={rEditForm.recurKm} onChange={(e) => setREditForm((f) => ({ ...f, recurKm: e.target.value }))} disabled={!rEditForm.recurring} />
+                                  </label>
+                                </div>
+                              )}
                             </div>
                           )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="border p-2">
-                      {s.code === "completed" ? (
-                        <span className="text-xs">Completed{completedOn ? ` on ${completedOn}` : ""}</span>
-                      ) : (
-                        <label className="inline-flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={!!r.active}
-                            onChange={e => toggleReminderActive(r._id, e.target.checked)}
-                          />
-                          <span className="text-xs">{r.active ? 'active' : 'paused'}</span>
-                        </label>
-                      )}
-                    </td>
-                    <td className="border p-2">
-                      <span className={`text-xs px-2 py-1 rounded ${s.badgeClass}`} style={badgeStyle}>{s.label}</span>
-                    </td>
-                    <td className="border p-2 text-right">
-                      {!isEditing ? (
-                        <>
-                          <button type="button" className="px-2 py-1 border rounded mr-1" onClick={()=>beginEditReminder(r)}>Edit</button>
-                          <button type="button" className="px-2 py-1 border rounded" onClick={() => deleteReminder(r._id)}>Delete</button>
-                        </>
-                      ) : (
-                        <>
-                          <button type="button" className="px-2 py-1 border rounded mr-1" onClick={saveEditReminder}>Save</button>
-                          <button type="button" className="px-2 py-1 border rounded" onClick={cancelEditReminder}>Cancel</button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-              {(!reminders || reminders.length === 0) && (
-                <tr><td className="p-4 text-center" colSpan={7}>No reminders</td></tr>
-              )}
-            </tbody>
-          </table>
+                        </td>
+                        <td className="border-b border-border p-2">
+                          {s.code === "completed" ? (
+                            <span className="text-xs">Completed{completedOn ? ` on ${completedOn}` : ""}</span>
+                          ) : (
+                            <label className="inline-flex items-center gap-2">
+                              <input type="checkbox" checked={!!r.active} onChange={(e) => toggleReminderActive(r._id, e.target.checked)} />
+                              <span className="text-xs">{r.active ? "active" : "paused"}</span>
+                            </label>
+                          )}
+                        </td>
+                        <td className="border-b border-border p-2">
+                          <span className={`text-xs px-2 py-1 rounded ${s.badgeClass}`}>{s.label}</span>
+                        </td>
+                        <td className="border-b border-border p-2 text-right">
+                          {!isEditing ? (
+                            <>
+                              <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditReminder(r)}>Edit</button>
+                              <button type="button" className="btn btn-sm" onClick={() => deleteReminder(r._id)}>Delete</button>
+                            </>
+                          ) : (
+                            <>
+                              <button type="button" className="btn btn-sm mr-1" onClick={saveEditReminder}>Save</button>
+                              <button type="button" className="btn btn-sm" onClick={cancelEditReminder}>Cancel</button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                {(!reminders || reminders.length === 0) && (
+                  <tr><td className="p-4 text-center" colSpan={7}>No reminders</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
       {/* ---------------- Vehicle Trips ---------------- */}
-      <div id="trips" className="border rounded p-3 space-y-3 scroll-mt-20">
-        <div className="text-lg font-semibold">Vehicle Trips</div>
+      <div id="trips" className="rounded-xl border border-border bg-panel p-3 space-y-3 scroll-mt-20">
+        <div className="flex items-center justify-between">
+          <div className="text-lg font-semibold">Vehicle Trips</div>
+          <div className="flex items-center gap-2">
+            {!openTrip ? (
+              <button type="button" className="btn" onClick={() => setStartTripOpen(true)}>Start trip</button>
+            ) : (
+              <button type="button" className="btn" onClick={() => setEndTripOpen(true)}>End trip</button>
+            )}
+            <button className="btn" onClick={exportTripsKml} disabled={!filteredTrips.length} title={!filteredTrips.length ? "No trips to export" : "Export trips to KML"} type="button">
+              Export KML
+            </button>
+            <button className="btn" onClick={exportTripCsv} disabled={!filteredTrips.length} title={!filteredTrips.length ? "No trips to export" : "Export trips to CSV"} type="button">
+              Export CSV
+            </button>
+          </div>
+        </div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             {tripsLoading && <div className="text-sm text-gray-500">Loading…</div>}
-            {tripErr && <div className="text-red-600 text-sm">{tripErr}</div>}
-            {tripInfo && <div className="text-green-700 text-sm">{tripInfo}</div>}
+            {tripErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{tripErr}</div>}
+            {tripInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{tripInfo}</div>}
           </div>
-          <button
-            className="px-3 py-2 border rounded"
-            onClick={exportTripCsv}
-            disabled={!filteredTrips.length}
-            title={!filteredTrips.length ? "No trips to export" : "Export trips to CSV"}
-            type="button"
-          >
-            Export Trip CSV
-          </button>
         </div>
 
         {/* Trip Filters */}
-        <fieldset className="border rounded p-3">
+        <fieldset className="rounded-xl border border-border p-3">
           <legend className="px-2 text-xs uppercase tracking-wide text-gray-600">Trip Filters</legend>
           <div className="flex flex-wrap gap-2 items-end">
-            <label className="text-sm">
-              Driver
-              <select
-                className="border p-2 w-48"
-                value={tripDriverFilter}
-                onChange={(e) => setTripDriverFilter(e.target.value)}
-              >
+            <label className="text-sm">Driver
+              <select className="w-48" value={tripDriverFilter} onChange={(e) => setTripDriverFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripDriverOptions.map(opt => (
-                  <option key={opt.id} value={opt.id}>{opt.label}</option>
-                ))}
+                {tripDriverOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
               </select>
             </label>
-            <label className="text-sm">
-              Project
-              <select
-                className="border p-2 w-48"
-                value={tripProjectFilter}
-                onChange={(e) => setTripProjectFilter(e.target.value)}
-              >
+            <label className="text-sm">Project
+              <select className="w-48" value={tripProjectFilter} onChange={(e) => setTripProjectFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripProjectOptions.map(opt => (
-                  <option key={opt.id} value={opt.id}>{opt.label}</option>
-                ))}
+                {tripProjectOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
               </select>
             </label>
-            <label className="text-sm">
-              Task
-              <select
-                className="border p-2 w-48"
-                value={tripTaskFilter}
-                onChange={(e) => setTripTaskFilter(e.target.value)}
-              >
+            <label className="text-sm">Task
+              <select className="w-48" value={tripTaskFilter} onChange={(e) => setTripTaskFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripTaskOptions.map(opt => (
-                  <option key={opt.id} value={opt.id}>{opt.label}</option>
-                ))}
+                {tripTaskOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
               </select>
             </label>
-            <button
-              type="button"
-              className="px-3 py-2 border rounded"
-              onClick={() => { setTripDriverFilter(""); setTripProjectFilter(""); setTripTaskFilter(""); }}
-            >
+            <label className="text-sm">From
+              <input className="w-44" type="date" value={tripDateFrom} onChange={(e) => setTripDateFrom(e.target.value)} />
+            </label>
+            <label className="text-sm">To
+              <input className="w-44" type="date" value={tripDateTo} onChange={(e) => setTripDateTo(e.target.value)} />
+            </label>
+            <button type="button" className="btn" onClick={() => { setTripDriverFilter(""); setTripProjectFilter(""); setTripTaskFilter(""); setTripDateFrom(""); setTripDateTo(""); }}>
               Clear filters
             </button>
             <div className="text-sm text-gray-600 ml-auto">
@@ -1704,300 +1989,116 @@ export default function VehicleDetail() {
           </div>
         </fieldset>
 
-        {/* Start/End Trip */}
-        {!openTrip ? (
-          <form onSubmit={handleStartTrip} className="grid md:grid-cols-2 gap-3">
-            <label className="text-sm">
-              Odometer start
-              <input
-                className="border p-2 w-full"
-                type="number"
-                min="0"
-                required
-                value={odoStart}
-                onChange={e => setOdoStart(e.target.value)}
-                placeholder="e.g. 10234.5"
-              />
-            </label>
-
-            <label className="text-sm">
-              Photo (start)
-              <input
-                className="border p-2 w-full"
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={e => setStartFile(e.target.files?.[0] || null)}
-              />
-            </label>
-
-            <label className="text-sm">
-              Project (optional)
-              <select
-                className="border p-2 w-full"
-                value={tripProjectId}
-                onChange={e => {
-                  const pid = e.target.value || "";
-                  setTripProjectId(pid);
-                  if (tripTaskId && !taskMatchesProject(tripTaskId, pid)) setTripTaskId("");
-                }}
-              >
-                <option value="">— none —</option>
-                {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-              </select>
-            </label>
-
-            <label className="text-sm">
-              Task (optional)
-              <select
-                className="border p-2 w-full"
-                value={tripTaskId}
-                onChange={(e) => setTripTaskId(e.target.value)}
-              >
-                <option value="">— none —</option>
-                {tasksForTripProject.map(t => <option key={t._id} value={t._id}>{t.title}</option>)}
-              </select>
-            </label>
-
-            <div className="md:col-span-2">
-              <button className="px-3 py-2 border rounded" type="submit">
-                Start trip
-              </button>
-            </div>
-          </form>
-        ) : (
-          <form onSubmit={handleEndTrip} className="grid md:grid-cols-2 gap-3 bg-yellow-50 border border-yellow-200 p-3 rounded">
-            <div className="md:col-span-2 text-sm">
-              <b>Open trip:</b> started {openTrip.startedAt ? new Date(openTrip.startedAt).toLocaleString() : "—"} &middot; ODO start: {openTrip.odoStart ?? "—"}
-            </div>
-
-            <label className="text-sm">
-              Odometer end
-              <input
-                className="border p-2 w-full"
-                type="number"
-                min={openTrip.odoStart ?? 0}
-                required
-                value={odoEnd}
-                onChange={e => setOdoEnd(e.target.value)}
-                placeholder="e.g. 10245.8"
-              />
-            </label>
-
-            <label className="text-sm">
-              Photo (end)
-              <input
-                className="border p-2 w-full"
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={e => setEndFile(e.target.files?.[0] || null)}
-              />
-            </label>
-
-            <label className="text-sm md:col-span-2">
-              Notes (optional)
-              <input
-                className="border p-2 w-full"
-                value={tripNotes}
-                onChange={(e) => setTripNotes(e.target.value)}
-                placeholder="Trip notes…"
-              />
-            </label>
-
-            <div className="md:col-span-2">
-              <button className="px-3 py-2 border rounded" type="submit">End trip</button>
-            </div>
-          </form>
-        )}
-
         {/* Trip list with inline edit */}
-        <div className="border rounded overflow-x-auto mt-3">
+        <div className="rounded-xl border border-border overflow-x-auto">
           <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="p-2 text-left">Started</th>
-                <th className="p-2 text-left">Ended</th>
-                <th className="p-2 text-left">ODO</th>
-                <th className="p-2 text-left">Driver</th>
-                <th className="p-2 text-left">Project</th>
-                <th className="p-2 text-left">Task</th>
-                <th className="p-2 text-left">Distance</th>
-                <th className="p-2 text-left">Photos</th>
-                <th className="p-2 text-left">Notes</th>
-                <th className="p-2 text-right">Actions</th>
-              </tr>
+            <thead className="bg-thead">
+              <HeaderRow headers={["Started", "Ended", "ODO", "Driver", "Project", "Task", "Usage", "Distance", "Photos", "Notes", "Actions"]} />
             </thead>
             <tbody>
-              {filteredTrips.length ? filteredTrips.map(trip => {
-                const isEditing = tripEditId === trip._id;
-                const isOpenRow = openTrip && String(openTrip._id) === String(trip._id);
-                return (
-                  <tr key={trip._id}>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        trip.startedAt ? new Date(trip.startedAt).toLocaleString() : "—"
-                      ) : (
-                        <input
-                          className="border p-1"
-                          type="datetime-local"
-                          value={tripEditForm.startedAt}
-                          onChange={(e)=>setTripEditForm(f=>({...f,startedAt:e.target.value}))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "—"
-                      ) : (
-                        <input
-                          className="border p-1"
-                          type="datetime-local"
-                          value={tripEditForm.endedAt}
-                          onChange={(e)=>setTripEditForm(f=>({...f,endedAt:e.target.value}))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        <>
-                          {trip.odoStart ?? "—"} → {trip.odoEnd ?? "—"}
-                        </>
-                      ) : (
-                        <div className="flex items-center gap-1">
-                          <input
-                            className="border p-1 w-24"
-                            type="number"
-                            inputMode="numeric"
-                            value={tripEditForm.odoStart}
-                            onChange={(e)=>setTripEditForm(f=>({...f,odoStart:e.target.value}))}
-                            placeholder="start"
-                          />
-                          <span>→</span>
-                          <input
-                            className="border p-1 w-24"
-                            type="number"
-                            inputMode="numeric"
-                            value={tripEditForm.odoEnd}
-                            onChange={(e)=>setTripEditForm(f=>({...f,odoEnd:e.target.value}))}
-                            placeholder="end"
-                          />
-                        </div>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        userLabel(trip.driverUserId || trip.driverId)
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={tripEditForm.driverUserId}
-                          onChange={(e)=>setTripEditForm(f=>({...f,driverUserId:e.target.value}))}
-                        >
-                          <option value="">— none —</option>
-                          {users.map(u => <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>)}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        trip.projectId ? <Link className="underline" to={`/projects/${trip.projectId}`}>{projectLabel(trip.projectId)}</Link> : "—"
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={tripEditForm.projectId}
-                          onChange={(e)=>{
+              {filteredTrips.length ? (
+                filteredTrips.map((trip) => {
+                  const isEditing = tripEditId === trip._id;
+                  const isOpenRow = openTrip && String(openTrip._id) === String(trip._id);
+                  const usage = getUsageFromTrip(trip);
+                  return (
+                    <tr key={trip._id}>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (trip.startedAt ? new Date(trip.startedAt).toLocaleString() : "—") : (
+                          <input className="p-1 border border-border rounded" type="datetime-local" value={tripEditForm.startedAt} onChange={(e) => setTripEditForm((f) => ({ ...f, startedAt: e.target.value }))} />
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "—") : (
+                          <input className="p-1 border border-border rounded" type="datetime-local" value={tripEditForm.endedAt} onChange={(e) => setTripEditForm((f) => ({ ...f, endedAt: e.target.value }))} />
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (<>{trip.odoStart ?? "—"} → {trip.odoEnd ?? "—"}</>) : (
+                          <div className="flex items-center gap-1">
+                            <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={tripEditForm.odoStart} onChange={(e) => setTripEditForm((f) => ({ ...f, odoStart: e.target.value }))} placeholder="start" />
+                            <span>→</span>
+                            <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={tripEditForm.odoEnd} onChange={(e) => setTripEditForm((f) => ({ ...f, odoEnd: e.target.value }))} placeholder="end" />
+                          </div>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? userLabel(trip.driverUserId || trip.driverId) : (
+                          <select className="p-1 border border-border rounded" value={tripEditForm.driverUserId} onChange={(e) => setTripEditForm((f) => ({ ...f, driverUserId: e.target.value }))}>
+                            <option value="">— none —</option>
+                            {users.map((u) => (<option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>))}
+                          </select>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (
+                          trip.projectId ? <Link className="link" to={`/projects/${trip.projectId}`}>{projectLabel(trip.projectId)}</Link> : "—"
+                        ) : (
+                          <select className="p-1 border border-border rounded" value={tripEditForm.projectId} onChange={(e) => {
                             const pid = e.target.value || "";
-                            setTripEditForm(f=>({
-                              ...f,
-                              projectId: pid,
-                              taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId
-                            }));
-                          }}
-                        >
-                          <option value="">— none —</option>
-                          {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        trip.taskId ? <Link className="underline" to={`/tasks/${trip.taskId}`}>{taskLabel(trip.taskId)}</Link> : "—"
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={tripEditForm.taskId}
-                          onChange={(e)=>setTripEditForm(f=>({...f,taskId:e.target.value}))}
-                        >
-                          <option value="">— none —</option>
-                          {tasksForTripEditProject.map(t => <option key={t._id} value={t._id}>{t.title}</option>)}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">{trip.distance != null ? `${trip.distance} km` : "—"}</td>
-                    <td className="border-t p-2">
-                      <div className="flex gap-2">
-                        {trip.startPhoto?.url && (
-                          <a href={toAbsoluteUrl(trip.startPhoto.url)} target="_blank" rel="noreferrer" title="Start photo">
-                            <img
-                              src={toAbsoluteUrl(trip.startPhoto.url)}
-                              alt="Start"
-                              style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
-                            />
-                          </a>
+                            setTripEditForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
+                          }}>
+                            <option value="">— none —</option>
+                            {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+                          </select>
                         )}
-                        {trip.endPhoto?.url && (
-                          <a href={toAbsoluteUrl(trip.endPhoto.url)} target="_blank" rel="noreferrer" title="End photo">
-                            <img
-                              src={toAbsoluteUrl(trip.endPhoto.url)}
-                              alt="End"
-                              style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
-                            />
-                          </a>
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (
+                          trip.taskId ? <Link className="link" to={`/tasks/${trip.taskId}`}>{taskLabel(trip.taskId)}</Link> : "—"
+                        ) : (
+                          <select className="p-1 border border-border rounded" value={tripEditForm.taskId} onChange={(e) => setTripEditForm((f) => ({ ...f, taskId: e.target.value }))}>
+                            <option value="">— none —</option>
+                            {tasksForTripEditProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+                          </select>
                         )}
-                      </div>
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        trip.notes || "—"
-                      ) : (
-                        <input
-                          className="border p-1 w-full"
-                          value={tripEditForm.notes}
-                          onChange={(e)=>setTripEditForm(f=>({...f,notes:e.target.value}))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2 text-right">
-                      {!isEditing ? (
-                        <>
-                          {!isOpenRow ? (
-                            <button type="button" className="px-2 py-1 border rounded" onClick={()=>beginEditTrip(trip)}>Edit</button>
-                          ) : (
-                            <span className="text-xs text-gray-500">End trip to edit</span>
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? usage : (
+                          <select className="p-1 border border-border rounded" value={tripEditForm.usage} onChange={(e) => setTripEditForm((f) => ({ ...f, usage: e.target.value }))}>
+                            <option value="business">business</option>
+                            <option value="private">private</option>
+                          </select>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">{trip.distance != null ? `${trip.distance} km` : "—"}</td>
+                      <td className="border-b border-border p-2">
+                        <div className="flex gap-2">
+                          {trip.startPhoto?.url && (
+                            <a href={toAbsoluteUrl(trip.startPhoto.url)} target="_blank" rel="noreferrer" title="Start photo">
+                              <img src={toAbsoluteUrl(trip.startPhoto.url)} alt="Start" style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }} />
+                            </a>
                           )}
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            className="px-2 py-1 border rounded mr-1"
-                            onClick={saveEditTrip}
-                            disabled={tripSaving}
-                            title={tripSaving ? "Saving…" : "Save changes"}
-                          >
-                            {tripSaving ? "Saving…" : "Save"}
-                          </button>
-                          <button type="button" className="px-2 py-1 border rounded" onClick={cancelEditTrip} disabled={tripSaving}>
-                            Cancel
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                );
-              }) : (
-                <tr><td className="p-3 text-center" colSpan={10}>No trips match filters</td></tr>
+                          {trip.endPhoto?.url && (
+                            <a href={toAbsoluteUrl(trip.endPhoto.url)} target="_blank" rel="noreferrer" title="End photo">
+                              <img src={toAbsoluteUrl(trip.endPhoto.url)} alt="End" style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }} />
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (trip.notes || "—") : (
+                          <input className="p-1 border border-border rounded w-full" value={tripEditForm.notes} onChange={(e) => setTripEditForm((f) => ({ ...f, notes: e.target.value }))} />
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2 text-right">
+                        {!isEditing ? (
+                          !isOpenRow ? <button type="button" className="btn btn-sm" onClick={() => beginEditTrip(trip)}>Edit</button>
+                          : <span className="text-xs text-gray-500">End trip to edit</span>
+                        ) : (
+                          <>
+                            <button type="button" className="btn btn-sm mr-1" onClick={saveEditTrip} disabled={tripSaving} title={tripSaving ? "Saving…" : "Save changes"}>
+                              {tripSaving ? "Saving…" : "Save"}
+                            </button>
+                            <button type="button" className="btn btn-sm" onClick={cancelEditTrip} disabled={tripSaving}>Cancel</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr><td className="p-3 text-center" colSpan={11}>No trips match filters</td></tr>
               )}
             </tbody>
           </table>
@@ -2005,296 +2106,149 @@ export default function VehicleDetail() {
       </div>
 
       {/* ---------------- Purchases ---------------- */}
-      <div id="purchases" className="border rounded p-3 space-y-3 scroll-mt-20">
-        <div className="text-lg font-semibold">Purchases</div>
+      <div id="purchases" className="rounded-xl border border-border bg-panel p-3 space-y-3 scroll-mt-20">
         <div className="flex items-center justify-between">
+          <div className="text-lg font-semibold">Purchases</div>
           <div className="flex items-center gap-2">
-            {pErr && <div className="text-red-600 text-sm">{pErr}</div>}
-            {pInfo && <div className="text-green-700 text-sm">{pInfo}</div>}
+            <button type="button" className="btn" onClick={() => setPurchaseModalOpen(true)}>Add purchase</button>
           </div>
         </div>
-
-        {/* Create purchase */}
-        <form onSubmit={handleAddPurchase} className="grid md:grid-cols-6 gap-2">
-          <label className="text-sm">
-            Vendor
-            <select
-              className="border p-2 w-full"
-              value={pForm.vendorId}
-              onChange={(e) => setPForm((f) => ({ ...f, vendorId: e.target.value }))}
-            >
-              <option value="">— none —</option>
-              {vendors.map((vnd) => (
-                <option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>
-                  {vnd.name}
-                </option>
-              ))}
-              <option value="__new__">+ Add new vendor…</option>
-            </select>
-          </label>
-
-          {(pForm.vendorId === "" || pForm.vendorId === "__new__") && (
-            <label className="text-sm">
-              New vendor name
-              <input
-                className="border p-2 w-full"
-                value={pForm.newVendorName}
-                onChange={(e) => setPForm((f) => ({ ...f, newVendorName: e.target.value }))}
-                placeholder="e.g. AutoCare Pty"
-              />
-            </label>
-          )}
-
-          <label className="text-sm">
-            Type
-            <select
-              className="border p-2 w-full"
-              value={pForm.type}
-              onChange={(e) => setPForm((f) => ({ ...f, type: e.target.value }))}
-            >
-              {PURCHASE_TYPES.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="text-sm">
-            Date
-            <input
-              className="border p-2 w-full"
-              type="date"
-              value={pForm.date}
-              onChange={(e) => setPForm((f) => ({ ...f, date: e.target.value }))}
-            />
-          </label>
-
-          <label className="text-sm">
-            Cost
-            <input
-              className="border p-2 w-full"
-              type="number"
-              inputMode="decimal"
-              min="0"
-              value={pForm.cost}
-              onChange={(e) => setPForm((f) => ({ ...f, cost: e.target.value }))}
-            />
-          </label>
-
-          <label className="text-sm">
-            Project
-            <select
-              className="border p-2 w-full"
-              value={pForm.projectId}
-              onChange={(e) => {
-                const pid = e.target.value || "";
-                setPForm((f) => ({
-                  ...f,
-                  projectId: pid,
-                  taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId
-                }));
-              }}
-            >
-              <option value="">— none —</option>
-              {projects.map((p) => (
-                <option key={p._id} value={p._id}>{p.name}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="text-sm">
-            Task
-            <select
-              className="border p-2 w-full"
-              value={pForm.taskId}
-              onChange={(e) => setPForm((f) => ({ ...f, taskId: e.target.value }))}
-            >
-              <option value="">— none —</option>
-              {tasksForPurchaseProject.map((t) => (
-                <option key={t._id} value={t._id}>{t.title}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="text-sm md:col-span-6">
-            Notes
-            <input
-              className="border p-2 w-full"
-              value={pForm.notes}
-              onChange={(e) => setPForm((f) => ({ ...f, notes: e.target.value }))}
-              placeholder="What was purchased / reference / invoice # …"
-            />
-          </label>
-
-          <div className="md:col-span-6">
-            <button className="px-3 py-2 bg-black text-white rounded" type="submit">Add purchase</button>
-          </div>
-        </form>
+        <div className="flex items-center gap-2">
+          {pErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{pErr}</div>}
+          {pInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{pInfo}</div>}
+        </div>
 
         {/* Purchases list */}
-        <div className="border rounded overflow-x-auto">
+        <div className="rounded-xl border border-border overflow-x-auto">
           <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="p-2 text-left">Date</th>
-                <th className="p-2 text-left">Type</th>
-                <th className="p-2 text-left">Vendor</th>
-                <th className="p-2 text-left">Cost</th>
-                <th className="p-2 text-left">Project</th>
-                <th className="p-2 text-left">Task</th>
-                <th className="p-2 text-left">Notes</th>
-                <th className="p-2 text-right">Actions</th>
-              </tr>
+            <thead className="bg-thead">
+              <HeaderRow headers={["Date", "Type", "Vendor", "Cost", "Project", "Task", "Notes", "Receipt", "Actions"]} />
             </thead>
             <tbody>
-              {purchases.length ? purchases.map((p) => {
-                const isEditing = editId === p._id;
-                return (
-                  <tr key={p._id}>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        p.date ? new Date(p.date).toLocaleDateString() : "—"
-                      ) : (
-                        <input
-                          className="border p-1 w-36"
-                          type="date"
-                          value={editForm.date}
-                          onChange={(e) => setEditForm((f) => ({ ...f, date: e.target.value }))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        p.type || "—"
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={editForm.type}
-                          onChange={(e) => setEditForm((f) => ({ ...f, type: e.target.value }))}
-                        >
-                          {PURCHASE_TYPES.map((t) => (
-                            <option key={t} value={t}>{t}</option>
-                          ))}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        vendorLabel(p.vendor)
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <select
-                            className="border p-1"
-                            value={editForm.vendorId}
-                            onChange={(e) => setEditForm((f) => ({ ...f, vendorId: e.target.value }))}
-                          >
-                            <option value="">— none —</option>
-                            {vendors.map((vnd) => (
-                              <option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>
-                                {vnd.name}
-                              </option>
-                            ))}
-                            <option value="__new__">+ Add new vendor…</option>
+              {purchases.length ? (
+                purchases.map((p) => {
+                  const isEditing = editId === p._id;
+                  const receiptUrl = p.receiptPhoto?.url || p.receiptPhotoUrl || p.photoUrl;
+                  return (
+                    <tr key={p._id}>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (p.date ? new Date(p.date).toLocaleDateString() : "—") : (
+                          <input className="p-1 border border-border rounded w-36" type="date" value={editForm.date} onChange={(e) => setEditForm((f) => ({ ...f, date: e.target.value }))} />
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (p.type || "—") : (
+                          <select className="p-1 border border-border rounded" value={editForm.type} onChange={(e) => setEditForm((f) => ({ ...f, type: e.target.value }))}>
+                            {PURCHASE_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
                           </select>
-                          {(editForm.vendorId === "" || editForm.vendorId === "__new__") && (
-                            <input
-                              className="border p-1"
-                              placeholder="New vendor"
-                              value={editForm.newVendorName}
-                              onChange={(e) => setEditForm((f) => ({ ...f, newVendorName: e.target.value }))}
-                            />
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        p.cost ?? "—"
-                      ) : (
-                        <input
-                          className="border p-1 w-24"
-                          type="number"
-                          inputMode="decimal"
-                          min="0"
-                          value={editForm.cost}
-                          onChange={(e) => setEditForm((f) => ({ ...f, cost: e.target.value }))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        projectLabel(p.projectId)
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={editForm.projectId}
-                          onChange={(e) => {
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (vendorLabel(p.vendor)) : (
+                          <div className="flex items-center gap-2">
+                            <select className="p-1 border border-border rounded" value={editForm.vendorId} onChange={(e) => setEditForm((f) => ({ ...f, vendorId: e.target.value }))}>
+                              <option value="">— none —</option>
+                              {vendors.map((vnd) => (<option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>{vnd.name}</option>))}
+                              <option value="__new__">+ Add new vendor…</option>
+                            </select>
+                            {(editForm.vendorId === "" || editForm.vendorId === "__new__") && (
+                              <input className="p-1 border border-border rounded" placeholder="New vendor" value={editForm.newVendorName} onChange={(e) => setEditForm((f) => ({ ...f, newVendorName: e.target.value }))} />
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (p.cost ?? "—") : (
+                          <input className="p-1 border border-border rounded w-24" type="number" inputMode="decimal" min="0" value={editForm.cost} onChange={(e) => setEditForm((f) => ({ ...f, cost: e.target.value }))} />
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (projectLabel(p.projectId)) : (
+                          <select className="p-1 border border-border rounded" value={editForm.projectId} onChange={(e) => {
                             const pid = e.target.value || "";
-                            setEditForm(f => ({
-                              ...f,
-                              projectId: pid,
-                              taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId
-                            }));
-                          }}
-                        >
-                          <option value="">— none —</option>
-                          {projects.map((pr) => (
-                            <option key={pr._id} value={pr._id}>{pr.name}</option>
-                          ))}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        taskLabel(p.taskId)
-                      ) : (
-                        <select
-                          className="border p-1"
-                          value={editForm.taskId}
-                          onChange={(e) => setEditForm((f) => ({ ...f, taskId: e.target.value }))}
-                        >
-                          <option value="">— none —</option>
-                          {tasksForPurchaseEditProject.map((t) => (
-                            <option key={t._id} value={t._id}>{t.title}</option>
-                          ))}
-                        </select>
-                      )}
-                    </td>
-                    <td className="border-t p-2">
-                      {!isEditing ? (
-                        p.notes || "—"
-                      ) : (
-                        <input
-                          className="border p-1 w-full"
-                          value={editForm.notes}
-                          onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))}
-                        />
-                      )}
-                    </td>
-                    <td className="border-t p-2 text-right">
-                      {!isEditing ? (
-                        <>
-                          <button type="button" className="px-2 py-1 border rounded mr-1" onClick={() => beginEditPurchase(p)}>
-                            Edit
-                          </button>
-                          <button type="button" className="px-2 py-1 border rounded" onClick={() => handleDeletePurchase(p._id)}>
-                            Delete
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button type="button" className="px-2 py-1 border rounded mr-1" onClick={saveEditPurchase}>
-                            Save
-                          </button>
-                          <button type="button" className="px-2 py-1 border rounded" onClick={cancelEdit}>
-                            Cancel
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                );
-              }) : (
-                <tr><td className="p-3 text-center" colSpan={8}>No purchases yet</td></tr>
+                            setEditForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
+                          }}>
+                            <option value="">— none —</option>
+                            {projects.map((pr) => (<option key={pr._id} value={pr._id}>{pr.name}</option>))}
+                          </select>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (taskLabel(p.taskId)) : (
+                          <select className="p-1 border border-border rounded" value={editForm.taskId} onChange={(e) => setEditForm((f) => ({ ...f, taskId: e.target.value }))}>
+                            <option value="">— none —</option>
+                            {tasksForPurchaseEditProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+                          </select>
+                        )}
+                      </td>
+                      <td className="border-b border-border p-2">
+                        {!isEditing ? (p.notes || "—") : (
+                          <input className="p-1 border border-border rounded w-full" value={editForm.notes} onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))} />
+                        )}
+                      </td>
+                      {/* REPLACE the Purchases "Receipt" <td> cell with this */}
+<td className="border-b border-border p-2">
+  {(() => {
+    const candidate =
+      p.receiptPhoto?.url ||
+      p.receiptPhotoUrl ||
+      p.photo?.url ||
+      p.photoUrl ||
+      (Array.isArray(p.attachments) && p.attachments[0]?.url) ||
+      (typeof p.receipt === "string" ? p.receipt : p.receipt?.url) ||
+      "";
+
+    const url = candidate ? toAbsoluteUrl(candidate) : "";
+
+    if (isEditing) {
+      return (
+        <div className="text-left">
+          {url && (
+            <div className="mb-2">
+              <a href={url} target="_blank" rel="noreferrer" className="link text-xs">Open current</a>
+            </div>
+          )}
+          <label className="text-xs">
+            Replace receipt photo
+            <input className="w-full" type="file" accept="image/*"
+              onChange={(e) => setEditPhotoFile(e.target.files?.[0] || null)} />
+          </label>
+        </div>
+      );
+    }
+
+    return url ? (
+      <a href={url} target="_blank" rel="noreferrer" title="Receipt">
+        <img
+          src={url}
+          alt="Receipt"
+          style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
+        />
+      </a>
+    ) : (
+      <span className="text-xs text-gray-400">—</span>
+    );
+  })()}
+</td>
+
+                      <td className="border-b border-border p-2 text-right">
+                        {!isEditing ? (
+                          <>
+                            <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditPurchase(p)}>Edit</button>
+                            <button type="button" className="btn btn-sm" onClick={() => handleDeletePurchase(p._id)}>Delete</button>
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" className="btn btn-sm mr-1" onClick={saveEditPurchase}>Save</button>
+                            <button type="button" className="btn btn-sm" onClick={cancelEdit}>Cancel</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr><td className="p-3 text-center" colSpan={9}>No purchases yet</td></tr>
               )}
             </tbody>
           </table>
@@ -2302,195 +2256,318 @@ export default function VehicleDetail() {
       </div>
 
       {/* ---------------- Logbook (non-travel) ---------------- */}
-      <div id="logbook" className="border rounded p-3 space-y-3 scroll-mt-20">
-        <div className="text-lg font-semibold">Logbook</div>
-
-        <div className="text-sm text-gray-700">
-          Entries: <b>{entries.length}</b>
+      <div id="logbook" className="rounded-xl border border-border bg-panel p-3 space-y-3 scroll-mt-20">
+        <div className="flex items-center justify-between">
+          <div className="text-lg font-semibold">Logbook</div>
+          <div className="flex items-center gap-2">
+            <button type="button" className="btn" onClick={() => setLbModalOpen(true)}>Add entry</button>
+            <button className="btn" onClick={exportLogbookCsv}>Export CSV</button>
+          </div>
         </div>
 
-        {/* Create entry */}
-        <form onSubmit={createEntry} className="grid md:grid-cols-6 gap-2">
-          <label className="text-sm">
-            Type
-            <select className="border p-2 w-full" value={lbForm.type} onChange={e => setLbForm({ ...lbForm, type: e.target.value })}>
+        <div className="text-sm text-gray-700">Entries: <b>{entries.length}</b></div>
+
+        {lbErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{lbErr}</div>}
+        {lbInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{lbInfo}</div>}
+
+        {/* List with inline edit */}
+        <div className="rounded-xl border border-border overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-thead">
+              <HeaderRow headers={["When", "Type", "Odometer", "Cost", "Vendor", "Tags", "Notes", "Actions"]} />
+            </thead>
+            <tbody>
+              {entries.map((e) => {
+                const d = entryDisplay(e);
+                const isEditing = lbEditId === e._id;
+                return (
+                  <tr key={e._id}>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.ts ? new Date(d.ts).toLocaleString() : "—") : (
+                        <input className="p-1 border border-border rounded" type="datetime-local" value={lbEditForm.ts} onChange={(ev) => setLbEditForm((f) => ({ ...f, ts: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.type) : (
+                        <select className="p-1 border border-border rounded" value={lbEditForm.type} onChange={(ev) => setLbEditForm((f) => ({ ...f, type: ev.target.value }))}>
+                          {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                        </select>
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.odometer ?? "—") : (
+                        <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={lbEditForm.odometer} onChange={(ev) => setLbEditForm((f) => ({ ...f, odometer: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.cost !== "" ? d.cost : "—") : (
+                        <input className="p-1 border border-border rounded w-24" type="number" inputMode="decimal" min="0" value={lbEditForm.cost} onChange={(ev) => setLbEditForm((f) => ({ ...f, cost: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.vendor || "—") : (
+                        <input className="p-1 border border-border rounded" value={lbEditForm.vendor} onChange={(ev) => setLbEditForm((f) => ({ ...f, vendor: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? ((d.tags || []).join(", ") || "—") : (
+                        <input className="p-1 border border-border rounded" value={lbEditForm.tags} onChange={(ev) => setLbEditForm((f) => ({ ...f, tags: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2">
+                      {!isEditing ? (d.notes || "—") : (
+                        <input className="p-1 border border-border rounded w-full" value={lbEditForm.notes} onChange={(ev) => setLbEditForm((f) => ({ ...f, notes: ev.target.value }))} />
+                      )}
+                    </td>
+                    <td className="border-b border-border p-2 text-right">
+                      {!isEditing ? (
+                        <>
+                          <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditEntry(e)}>Edit</button>
+                          <button type="button" className="btn btn-sm" onClick={() => deleteEntry(e._id)}>Delete</button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" className="btn btn-sm mr-1" onClick={saveLbEdit}>Save</button>
+                          <button type="button" className="btn btn-sm" onClick={cancelLbEdit}>Cancel</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!entries.length && <tr><td className="p-4 text-center" colSpan={8}>No log entries</td></tr>}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Inspections inline list (view links) */}
+        <div className="rounded-xl border border-border p-3">
+          <div className="text-md font-semibold mb-2">Inspections</div>
+          {/* Quietly handle missing endpoints */}
+          {!inspections.length ? (
+            <div className="text-sm text-gray-600">No inspections recorded for this vehicle.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-thead">
+                  <HeaderRow headers={["Date", "Title", "Performed by", "Result", "Actions"]} />
+                </thead>
+                <tbody>
+                  {inspections.map((insp) => (
+                    <tr key={insp._id}>
+                      <td className="border-b border-border p-2">{insp.ts ? new Date(insp.ts).toLocaleString() : "—"}</td>
+                      <td className="border-b border-border p-2">{insp.title || insp.templateName || "Inspection"}</td>
+                      <td className="border-b border-border p-2">{userLabel(insp.userId || insp.user)}</td>
+                      <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
+                      <td className="border-b border-border p-2 text-right">
+                        {insp._id && <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>View</Link>}
+                        <button type="button" className="link text-sm underline" onClick={() => openInspectionLightbox(insp)} title="Quick view">
+                          view
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ---- Modals ---- */}
+      <Modal
+        open={startTripOpen}
+        title="Start trip"
+        onClose={() => setStartTripOpen(false)}
+        footer={<><button className="btn" onClick={handleStartTrip}>Start trip</button></>}
+      >
+        <div className="grid md:grid-cols-2 gap-3">
+          <label className="text-sm">Odometer start
+            <input className="w-full" type="number" min="0" required value={odoStart} onChange={(e) => setOdoStart(e.target.value)} placeholder="e.g. 10234.5" />
+          </label>
+          <label className="text-sm">Photo (start)
+            <input className="w-full" type="file" accept="image/*" capture="environment" onChange={(e) => setStartFile(e.target.files?.[0] || null)} />
+          </label>
+          <label className="text-sm">Usage
+            <select className="w-full" value={tripUsage} onChange={(e) => setTripUsage(e.target.value)}>
+              <option value="business">business</option>
+              <option value="private">private</option>
+            </select>
+          </label>
+          <div />
+          <label className="text-sm">Project (optional)
+            <select className="w-full" value={tripProjectId} onChange={(e) => {
+              const pid = e.target.value || "";
+              setTripProjectId(pid);
+              if (tripTaskId && !taskMatchesProject(tripTaskId, pid)) setTripTaskId("");
+            }}>
+              <option value="">— none —</option>
+              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+            </select>
+          </label>
+          <label className="text-sm">Task (optional)
+            <select className="w-full" value={tripTaskId} onChange={(e) => setTripTaskId(e.target.value)}>
+              <option value="">— none —</option>
+              {tasksForTripProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+            </select>
+          </label>
+        </div>
+      </Modal>
+
+      <Modal
+        open={endTripOpen}
+        title="End trip"
+        onClose={() => setEndTripOpen(false)}
+        footer={<><button className="btn" onClick={handleEndTrip}>End trip</button></>}
+      >
+        {!openTrip ? <div className="text-sm text-gray-600">No open trip.</div> : (
+          <div className="grid md:grid-cols-2 gap-3">
+            <div className="md:col-span-2 text-sm">
+              <b>Open trip:</b> started {openTrip.startedAt ? new Date(openTrip.startedAt).toLocaleString() : "—"} · ODO start: {openTrip.odoStart ?? "—"}
+            </div>
+            <label className="text-sm">Odometer end
+              <input className="w-full" type="number" min={openTrip.odoStart ?? 0} required value={odoEnd} onChange={(e) => setOdoEnd(e.target.value)} placeholder="e.g. 10245.8" />
+            </label>
+            <label className="text-sm">Photo (end)
+              <input className="w-full" type="file" accept="image/*" capture="environment" onChange={(e) => setEndFile(e.target.files?.[0] || null)} />
+            </label>
+            <label className="text-sm md:col-span-2">Notes (optional)
+              <input className="w-full" value={tripNotes} onChange={(e) => setTripNotes(e.target.value)} placeholder="Trip notes…" />
+            </label>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={purchaseModalOpen}
+        title="Add purchase"
+        onClose={() => setPurchaseModalOpen(false)}
+        footer={<><button className="btn btn-primary" onClick={handleAddPurchase}>Add purchase</button></>}
+      >
+        <form onSubmit={handleAddPurchase} className="grid md:grid-cols-2 gap-2" onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}>
+          <label className="text-sm">Vendor
+            <select className="w-full" value={pForm.vendorId} onChange={(e) => setPForm((f) => ({ ...f, vendorId: e.target.value }))}>
+              <option value="">— none —</option>
+              {vendors.map((vnd) => (<option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>{vnd.name}</option>))}
+              <option value="__new__">+ Add new vendor…</option>
+            </select>
+          </label>
+          {(pForm.vendorId === "" || pForm.vendorId === "__new__") && (
+            <label className="text-sm">New vendor name
+              <input className="w-full" value={pForm.newVendorName} onChange={(e) => setPForm((f) => ({ ...f, newVendorName: e.target.value }))} placeholder="e.g. AutoCare Pty" />
+            </label>
+          )}
+          <label className="text-sm">Type
+            <select className="w-full" value={pForm.type} onChange={(e) => setPForm((f) => ({ ...f, type: e.target.value }))}>
+              {PURCHASE_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+            </select>
+          </label>
+          <label className="text-sm">Date
+            <input className="w-full" type="date" value={pForm.date} onChange={(e) => setPForm((f) => ({ ...f, date: e.target.value }))} />
+          </label>
+          <label className="text-sm">Cost
+            <input className="w-full" type="number" inputMode="decimal" min="0" value={pForm.cost} onChange={(e) => setPForm((f) => ({ ...f, cost: e.target.value }))} />
+          </label>
+
+          {/* NEW: receipt photo */}
+          <label className="text-sm">Receipt photo (optional)
+            <input className="w-full" type="file" accept="image/*" onChange={(e) => setPPhotoFile(e.target.files?.[0] || null)} />
+          </label>
+
+          <label className="text-sm">Project
+            <select className="w-full" value={pForm.projectId} onChange={(e) => {
+              const pid = e.target.value || "";
+              setPForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
+            }}>
+              <option value="">— none —</option>
+              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+            </select>
+          </label>
+          <label className="text-sm">Task
+            <select className="w-full" value={pForm.taskId} onChange={(e) => setPForm((f) => ({ ...f, taskId: e.target.value }))}>
+              <option value="">— none —</option>
+              {tasksForPurchaseProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+            </select>
+          </label>
+          <label className="text-sm md:col-span-2">Notes
+            <input className="w-full" value={pForm.notes} onChange={(e) => setPForm((f) => ({ ...f, notes: e.target.value }))} placeholder="What was purchased / reference / invoice # …" />
+          </label>
+        </form>
+      </Modal>
+
+      <Modal
+        open={inspModalOpen}
+        title={inspModalTitle}
+        onClose={() => setInspModalOpen(false)}
+        footer={<><button className="btn" onClick={() => setInspModalOpen(false)}>Close</button></>}
+      >
+        <div className="max-h-[70vh] overflow-auto border border-border rounded p-2">
+          {/* eslint-disable-next-line react/no-danger */}
+          <div dangerouslySetInnerHTML={{ __html: inspModalHtml }} />
+        </div>
+      </Modal>
+
+      <Modal
+        open={lbModalOpen}
+        title="Add logbook entry"
+        onClose={() => setLbModalOpen(false)}
+        footer={<><button className="btn btn-primary" onClick={createEntry}>Add entry</button></>}
+      >
+        <form onSubmit={createEntry} className="grid md:grid-cols-3 gap-2" onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}>
+          <label className="text-sm">Type
+            <select className="w-full" value={lbForm.type} onChange={(e) => setLbForm({ ...lbForm, type: e.target.value })}>
               {LOG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </label>
-          <label className="text-sm">
-            Timestamp
-            <input className="border p-2 w-full" type="datetime-local" value={lbForm.ts} onChange={e => setLbForm({ ...lbForm, ts: e.target.value })} />
+          <label className="text-sm">Timestamp
+            <input className="w-full" type="datetime-local" value={lbForm.ts} onChange={(e) => setLbForm({ ...lbForm, ts: e.target.value })} />
           </label>
-          <label className="text-sm">
-            Odometer (km)
-            <input className="border p-2 w-full" type="number" inputMode="numeric" min="0"
-                   value={lbForm.odometer} onChange={e => setLbForm({ ...lbForm, odometer: e.target.value })} />
+          <label className="text-sm">Odometer (km)
+            <input className="w-full" type="number" inputMode="numeric" min="0" value={lbForm.odometer} onChange={(e) => setLbForm({ ...lbForm, odometer: e.target.value })} />
           </label>
-          <label className="text-sm">
-            Cost
-            <input className="border p-2 w-full" type="number" inputMode="decimal" min="0"
-                   value={lbForm.cost} onChange={e => setLbForm({ ...lbForm, cost: e.target.value })} />
+          <label className="text-sm">Cost
+            <input className="w-full" type="number" inputMode="decimal" min="0" value={lbForm.cost} onChange={(e) => setLbForm({ ...lbForm, cost: e.target.value })} />
           </label>
-          <label className="text-sm">
-            Vendor
-            <input className="border p-2 w-full" value={lbForm.vendor} onChange={e => setLbForm({ ...lbForm, vendor: e.target.value })} />
+          <label className="text-sm">Vendor
+            <input className="w-full" value={lbForm.vendor} onChange={(e) => setLbForm({ ...lbForm, vendor: e.target.value })} />
           </label>
-          <label className="text-sm">
-            Tags (comma)
-            <input className="border p-2 w-full" value={lbForm.tags} onChange={e => setLbForm({ ...lbForm, tags: e.target.value })} placeholder="service, warranty" />
+          <label className="text-sm">Tags (comma)
+            <input className="w-full" value={lbForm.tags} onChange={(e) => setLbForm({ ...lbForm, tags: e.target.value })} placeholder="service, warranty" />
           </label>
-          <label className="text-sm md:col-span-6">
-            Notes
-            <textarea className="border p-2 w-full" rows={3} value={lbForm.notes} onChange={e => setLbForm({ ...lbForm, notes: e.target.value })} />
+          <label className="text-sm md:col-span-3">Notes
+            <textarea className="w-full" rows={3} value={lbForm.notes} onChange={(e) => setLbForm({ ...lbForm, notes: e.target.value })} />
           </label>
-          <label className="text-sm md:col-span-3">
-            Completes reminder (optional)
-            <select className="border p-2 w-full"
-                    value={lbForm.completeReminderId}
-                    onChange={e => setLbForm({ ...lbForm, completeReminderId: e.target.value })}>
+          <label className="text-sm md:col-span-3">Completes reminder (optional)
+            <select className="w-full" value={lbForm.completeReminderId} onChange={(e) => setLbForm({ ...lbForm, completeReminderId: e.target.value })}>
               <option value="">— none —</option>
-              {(reminders || []).filter(r => r.active).map(r => (
+              {(reminders || []).filter((r) => r.active).map((r) => (
                 <option key={r._id} value={r._id}>
-                  {(parseReminderCategory(r.notes || "") || "—") + " · " + (r.kind === 'date'
-                    ? `Date: ${r.dueDate ? new Date(r.dueDate).toLocaleDateString() : '—'}`
-                    : `Odo: ${r.dueOdometer ?? '—'} km`)}
+                  {(parseReminderCategory(r.notes || "") || "—") + " · " + (r.kind === "date"
+                    ? `Date: ${r.dueDate ? new Date(r.dueDate).toLocaleDateString() : "—"}`
+                    : `Odo: ${r.dueOdometer ?? "—"} km`)}
                 </option>
               ))}
             </select>
           </label>
-          <div className="md:col-span-6">
-            <button className="px-3 py-2 bg-black text-white rounded" type="submit">Add entry</button>
+          <div className="md:col-span-3">
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "service", tags: "service", ts: new Date().toISOString().slice(0, 16) })); }}>+ Service</button>
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "tyres", tags: "tyre", ts: new Date().toISOString().slice(0, 16) })); }}>+ Tyres</button>
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "other", tags: "fuel", ts: new Date().toISOString().slice(0, 16) })); }}>+ Fuel</button>
+            </div>
           </div>
         </form>
+      </Modal>
+    </div>
+  );
+}
 
-        {lbErr && <div className="text-red-600">{lbErr}</div>}
-        {lbInfo && <div className="text-green-700">{lbInfo}</div>}
-
-        {/* List with inline edit like Purchases */}
-        <table className="w-full border text-sm">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="border p-2 text-left">When</th>
-              <th className="border p-2 text-left">Type</th>
-              <th className="border p-2 text-left">Odometer</th>
-              <th className="border p-2 text-left">Cost</th>
-              <th className="border p-2 text-left">Vendor</th>
-              <th className="border p-2 text-left">Tags</th>
-              <th className="border p-2 text-left">Notes</th>
-              <th className="border p-2 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map(e => {
-              const d = entryDisplay(e);
-              const isEditing = lbEditId === e._id;
-              return (
-                <tr key={e._id}>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.ts ? new Date(d.ts).toLocaleString() : "—"
-                    ) : (
-                      <input
-                        className="border p-1"
-                        type="datetime-local"
-                        value={lbEditForm.ts}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,ts:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.type
-                    ) : (
-                      <select
-                        className="border p-1"
-                        value={lbEditForm.type}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,type:ev.target.value}))}
-                      >
-                        {LOG_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                      </select>
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.odometer ?? "—"
-                    ) : (
-                      <input
-                        className="border p-1 w-24"
-                        type="number"
-                        inputMode="numeric"
-                        value={lbEditForm.odometer}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,odometer:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.cost !== "" ? d.cost : "—"
-                    ) : (
-                      <input
-                        className="border p-1 w-24"
-                        type="number"
-                        inputMode="decimal"
-                        min="0"
-                        value={lbEditForm.cost}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,cost:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.vendor || "—"
-                    ) : (
-                      <input
-                        className="border p-1"
-                        value={lbEditForm.vendor}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,vendor:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      (d.tags || []).join(", ") || "—"
-                    ) : (
-                      <input
-                        className="border p-1"
-                        value={lbEditForm.tags}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,tags:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2">
-                    {!isEditing ? (
-                      d.notes || "—"
-                    ) : (
-                      <input
-                        className="border p-1 w-full"
-                        value={lbEditForm.notes}
-                        onChange={(ev)=>setLbEditForm(f=>({...f,notes:ev.target.value}))}
-                      />
-                    )}
-                  </td>
-                  <td className="border p-2 text-right">
-                    {!isEditing ? (
-                      <>
-                        <button type="button" className="px-2 py-1 border rounded mr-1" onClick={()=>beginEditEntry(e)}>Edit</button>
-                        <button type="button" className="px-2 py-1 border rounded" onClick={() => deleteEntry(e._id)}>Delete</button>
-                      </>
-                    ) : (
-                      <>
-                        <button type="button" className="px-2 py-1 border rounded mr-1" onClick={saveLbEdit}>Save</button>
-                        <button type="button" className="px-2 py-1 border rounded" onClick={cancelLbEdit}>Cancel</button>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-            {!entries.length && <tr><td className="p-4 text-center" colSpan={8}>No log entries</td></tr>}
-          </tbody>
-        </table>
-      </div>
+/* ---------- tiny presentational helpers ---------- */
+function Metric({ label, value }) {
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <div className="text-sm text-gray-600">{label}</div>
+      <div className="mt-1 text-lg font-semibold">{value}</div>
     </div>
   );
 }

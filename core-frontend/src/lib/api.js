@@ -3,6 +3,7 @@ import axios from "axios";
 
 /**
  * Axios client with:
+ * - Longer timeout + light retry on transient failures (GET/DELETE only)
  * - Auth + tenant header & optional ?orgId/body param
  * - Inspections aliasing:
  *     /templates, /inspection-templates  → /inspection-forms
@@ -12,7 +13,6 @@ import axios from "axios";
  * - Local mock fallback for:
  *     /inspections/forms        (templates)
  *     /inspections/submissions  (completed inspections)
- *   when server returns 404/500 or is unreachable.
  */
 
 const BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000/api";
@@ -20,9 +20,18 @@ const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM  = import.meta.env.VITE_TENANT_PARAM  || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
 
-export const api = axios.create({ baseURL: BASE, timeout: 20000 });
+// ⬆️ default timeout 30s (was 20s)
+export const api = axios.create({ baseURL: BASE, timeout: 30000 });
 
-/* ---------------- safe helpers ---------------- */
+/* ---------------- small utils ---------------- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const isIdempotent = (m) => ["get", "delete", "head", "options"].includes(String(m || "get").toLowerCase());
+const isMultipart = (cfg) => {
+  const h = cfg?.headers || {};
+  const ct = Object.entries(h).find(([k]) => k.toLowerCase() === "content-type")?.[1] || "";
+  return /multipart\/form-data/i.test(ct);
+};
+
 function getToken() {
   try { return localStorage.getItem("token") || sessionStorage.getItem("token") || ""; }
   catch { return ""; }
@@ -33,9 +42,11 @@ function safeParseJwt(t) {
 }
 function getTenantId() {
   try {
+    // ✅ Added support for currentOrgId (your auth flow stores this)
     const stored =
-      localStorage.getItem("orgId") || sessionStorage.getItem("orgId") ||
-      localStorage.getItem("tenantId") || sessionStorage.getItem("tenantId");
+      localStorage.getItem("currentOrgId") || sessionStorage.getItem("currentOrgId") ||
+      localStorage.getItem("orgId")        || sessionStorage.getItem("orgId")        ||
+      localStorage.getItem("tenantId")     || sessionStorage.getItem("tenantId");
     if (stored) return stored;
     const payload = safeParseJwt(getToken());
     return payload?.orgId || payload?.tenantId || payload?.org || payload?.tenant || null;
@@ -50,7 +61,6 @@ const INSPECTION_ALIAS_RULES = [
   { rx: /^\/inspection-forms(\/.*)?$/i,       to: (m) => `/inspections/forms${m[1] || ""}` },
 ];
 
-// Robust splitter for absolute or relative URLs
 function splitUrl(u, base) {
   try {
     if (!u) return { path: "/", qs: "" };
@@ -61,11 +71,10 @@ function splitUrl(u, base) {
     const qIdx = s.indexOf("?");
     let path = qIdx >= 0 ? s.slice(0, qIdx) : s;
     const qs = qIdx >= 0 ? s.slice(qIdx) : "";
-    path = path.replace(/^[a-z]+:\/\/[^/]+/i, ""); // strip protocol/host if present
+    path = path.replace(/^[a-z]+:\/\/[^/]+/i, "");
     return { path: path || "/", qs };
   }
 }
-
 function applyAlias(path) {
   for (const r of INSPECTION_ALIAS_RULES) {
     const m = path.match(r.rx);
@@ -73,12 +82,9 @@ function applyAlias(path) {
   }
   return path;
 }
-
 function aliasUrl(u) {
   try {
     const { path, qs } = splitUrl(u, BASE);
-    // If the path starts with /api, strip it before applying aliases,
-    // then return a relative path so Axios rejoins with baseURL.
     const plain = path.replace(/^\/api(\/|$)/i, "/");
     const aliased = applyAlias(plain);
     return aliased === plain ? u : (aliased + qs);
@@ -89,16 +95,12 @@ function aliasUrl(u) {
 
 /* ---------------- local mocks: templates + submissions ---------------- */
 const LS_FORMS = "mock:inspections:forms";
-const LS_SUBMS = "mock:inspections:submissions";
+const LS_SUBMS = "mock:inspections:subms";
 
-// match anywhere in the path (handles /api/ prefix or other prefixes)
 const isFormsPath = (p) => /\/(inspections\/forms|inspection-forms)(\/?|\/.+)$/i.test(p || "");
 const isSubsPath  = (p) => /\/inspections\/submissions(\/?|\/.+)$/i.test(p || "");
 
-function lsLoad(key, fallback = []) {
-  try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
-  catch { return fallback; }
-}
+function lsLoad(key, fallback = []) { try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; } }
 function lsSave(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
 function newId() { return (crypto?.randomUUID?.() || `id_${Math.random().toString(36).slice(2)}_${Date.now()}`); }
 
@@ -109,7 +111,6 @@ function resErr(config, status = 404, data = { error: "Not found" }) {
   err.config = config;
   throw err;
 }
-
 function actorFromToken() {
   const p = safeParseJwt(getToken()) || {};
   return { userId: p._id || p.sub || null, email: p.email || null };
@@ -120,7 +121,6 @@ async function inspectionsMockAdapter(config) {
   const { path } = splitUrl(u, BASE);
   const method = (config.method || "get").toLowerCase();
 
-  // parse JSON body if axios passed a string
   let body = {};
   try {
     const raw = config.data;
@@ -134,12 +134,10 @@ async function inspectionsMockAdapter(config) {
 
   /* --------- TEMPLATES (forms) --------- */
   if (isFormsPath(path)) {
-    // allow optional prefix like /api/
     const m = path.match(/^\/(?:.+\/)?(?:inspections\/forms|inspection-forms)(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
     let items = lsLoad(LS_FORMS, []);
 
-    // GET list
     if (method === "get" && !id) {
       const limit = Number(config.params?.limit) || 1000;
       const { projectId, taskId, role } = config.params || {};
@@ -157,22 +155,18 @@ async function inspectionsMockAdapter(config) {
       out.sort((a,b)=> new Date(b.updatedAt||0) - new Date(a.updatedAt||0));
       return resOK(config, out.slice(0, limit), 200);
     }
-
-    // GET one
     if (method === "get" && id) {
       const f = items.find(x => String(x._id||x.id) === String(id));
       if (!f) return resErr(config, 404, { error: "Form not found" });
       return resOK(config, f, 200);
     }
-
-    // POST create
     if (method === "post" && !id) {
       const now = nowISO();
       const title = (body.title || body.name || "").trim() || "Untitled form";
       const created = {
         _id: newId(),
         title,
-        name: title, // keep both for compatibility
+        name: title,
         version: body.version ?? 1,
         fields: Array.isArray(body.fields) ? body.fields : [],
         status: body.status || "draft",
@@ -180,14 +174,11 @@ async function inspectionsMockAdapter(config) {
         createdAt: now, updatedAt: now,
         ...body,
       };
-      // ensure both title & name in sync
       created.title = created.title || created.name || "Untitled form";
       created.name  = created.name  || created.title;
       items.push(created); lsSave(LS_FORMS, items);
       return resOK(config, created, 201);
     }
-
-    // PUT/PATCH update
     if ((method === "put" || method === "patch") && id) {
       const idx = items.findIndex(x => String(x._id||x.id) === String(id));
       if (idx < 0) return resErr(config, 404, { error: "Form not found" });
@@ -202,8 +193,6 @@ async function inspectionsMockAdapter(config) {
       items[idx] = merged; lsSave(LS_FORMS, items);
       return resOK(config, merged, 200);
     }
-
-    // DELETE
     if (method === "delete" && id) {
       const before = items.length;
       items = items.filter(x => String(x._id||x.id) !== String(id));
@@ -211,17 +200,15 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_FORMS, items);
       return resOK(config, { ok: true }, 200);
     }
-
     return resErr(config, 400, { error: "Unsupported forms op" });
   }
 
-  /* --------- SUBMISSIONS (completed inspections) --------- */
+  /* --------- SUBMISSIONS --------- */
   if (isSubsPath(path)) {
     const m = path.match(/^\/(?:.+\/)?inspections\/submissions(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
     let items = lsLoad(LS_SUBMS, []);
 
-    // GET list (filterable)
     if (method === "get" && !id) {
       const { templateId, projectId, taskId, limit } = config.params || {};
       let out = items.slice();
@@ -231,30 +218,18 @@ async function inspectionsMockAdapter(config) {
       out.sort((a,b)=> new Date(b.submittedAt||0) - new Date(a.submittedAt||0));
       return resOK(config, out.slice(0, Number(limit)||500), 200);
     }
-
-    // GET one
     if (method === "get" && id) {
       const s = items.find(x => String(x._id||x.id) === String(id));
       if (!s) return resErr(config, 404, { error: "Submission not found" });
       return resOK(config, s, 200);
     }
-
-    // POST create (new completed inspection)
     if (method === "post" && !id) {
       const now = nowISO();
       const actor = actorFromToken();
-      const created = {
-        _id: newId(),
-        status: "submitted",
-        ...body,
-        submittedAt: now,
-        actor,
-      };
+      const created = { _id: newId(), status: "submitted", ...body, submittedAt: now, actor };
       items.push(created); lsSave(LS_SUBMS, items);
       return resOK(config, created, 201);
     }
-
-    // PUT/PATCH update
     if ((method === "put" || method === "patch") && id) {
       const idx = items.findIndex(x => String(x._id||x.id) === String(id));
       if (idx < 0) return resErr(config, 404, { error: "Submission not found" });
@@ -270,8 +245,6 @@ async function inspectionsMockAdapter(config) {
       items[idx] = merged; lsSave(LS_SUBMS, items);
       return resOK(config, merged, 200);
     }
-
-    // DELETE (optional)
     if (method === "delete" && id) {
       const before = items.length;
       items = items.filter(x => String(x._id||x.id) !== String(id));
@@ -279,7 +252,6 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_SUBMS, items);
       return resOK(config, { ok: true }, 200);
     }
-
     return resErr(config, 400, { error: "Unsupported submissions op" });
   }
 
@@ -296,25 +268,27 @@ function shouldMockAfterError(respOrStatus, url) {
 /* ---------------- interceptors ---------------- */
 api.interceptors.request.use((config) => {
   try {
-    // Clean cache-control to avoid CORS preflights
+    // strip cache-control to avoid CORS preflights
     if (config.headers) {
       for (const k of Object.keys(config.headers)) {
         if (k.toLowerCase() === "cache-control") delete config.headers[k];
       }
     }
+    // default Accept
+    config.headers = config.headers || {};
+    if (!config.headers.Accept) config.headers.Accept = "application/json";
 
     // Auth
     const t = getToken();
-    if (t) {
-      config.headers = config.headers || {};
-      if (!config.headers.Authorization) config.headers.Authorization = `Bearer ${t}`;
-    }
+    if (t && !config.headers.Authorization) config.headers.Authorization = `Bearer ${t}`;
 
     // Tenant
     const tenantId = getTenantId();
     if (tenantId) {
-      config.headers = config.headers || {};
+      // existing configurable header
       if (!config.headers[TENANT_HEADER]) config.headers[TENANT_HEADER] = tenantId;
+      // ✅ also set lowercase variant expected server-side after Node lowercases headers
+      if (!config.headers["x-org-id"]) config.headers["x-org-id"] = tenantId;
 
       if (SEND_TENANT_PARAM) {
         const method = (config.method || "get").toLowerCase();
@@ -333,32 +307,61 @@ api.interceptors.request.use((config) => {
       }
     }
 
-    // Aliases (allow absolute or /api prefixed)
+    // Aliases
     if (config.url) config.url = aliasUrl(config.url);
   } catch {}
   return config;
 });
 
+/* ---- RETRY then MOCK fallback ---- */
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
+    const cfg = error?.config || {};
+    const method = (cfg.method || "get").toLowerCase();
+
+    // 1) Light retry for timeouts / transient network errors (idempotent only)
+    const transient =
+      error.code === "ECONNABORTED" ||
+      error.message?.toLowerCase?.().includes("timeout") ||
+      (!error.response && (error.code === "ERR_NETWORK" || error.message?.toLowerCase?.().includes("network")));
+
+    const maxRetries = Number.isFinite(cfg._maxRetries) ? Number(cfg._maxRetries) : 2;
+    const count = Number(cfg._retryCount || 0);
+
+    const safeToRetry =
+      !cfg._noRetry &&
+      transient &&
+      isIdempotent(method) &&
+      !isMultipart(cfg) &&
+      count < maxRetries;
+
+    if (safeToRetry) {
+      cfg._retryCount = count + 1;
+      // exponential backoff with jitter: 300ms, 600–900ms
+      const base = 300 * Math.pow(2, count);
+      const jitter = Math.random() * 300;
+      await sleep(base + jitter);
+      return api.request(cfg);
+    }
+
+    // 2) If no retry (or retries exhausted), apply inspections mock fallback for 404/500 or no-response
     try {
       const { response, config } = error || {};
       if (!config) throw error;
 
-      // On 404/500 for target paths: retry via local mock
       if (!config._mockRetried && shouldMockAfterError(response?.status, config.url)) {
         const retryCfg = { ...config, _mockRetried: true, adapter: inspectionsMockAdapter };
         return api.request(retryCfg);
       }
-
-      // No response (network), but URL matches our targets → try mock
       const pathOnly = splitUrl(config.url, BASE).path;
       if (!response && (isFormsPath(pathOnly) || isSubsPath(pathOnly)) && !config._mockRetried) {
         const retryCfg = { ...config, _mockRetried: true, adapter: inspectionsMockAdapter };
         return api.request(retryCfg);
       }
-    } catch {}
+    } catch { /* ignore and fall through */ }
+
+    // 3) Surface the original error
     return Promise.reject(error);
   }
 );
@@ -370,18 +373,22 @@ export async function getOrg() { const { data } = await api.get("/org"); return 
 export async function updateOrg(payload) { const { data } = await api.put("/org", payload); return data; }
 export async function uploadOrgLogo(file) {
   const fd = new FormData(); fd.append("logo", file);
-  const { data } = await api.post("/org/logo", fd, { headers: { "Content-Type": "multipart/form-data" } });
+  const { data } = await api.post(`/org/logo`, fd, { headers: { "Content-Type": "multipart/form-data" }, _noRetry: true });
   return data;
 }
 
 // TASKS
-export async function taskAction(id, body) { const { data } = await api.post(`/tasks/${id}/action`, body); return data; }
+export async function taskAction(id, body) { const { data } = await api.post(`/tasks/${id}/action`, body, { _noRetry: true }); return data; }
 export async function uploadTaskPhotos(id, files, meta = {}) {
   const fd = new FormData();
   [...files].forEach((f) => fd.append("photos", f));
   if (meta.lat != null) fd.append("lat", String(meta.lat));
   if (meta.lng != null) fd.append("lng", String(meta.lng));
-  const { data } = await api.post(`/tasks/${id}/photos`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+  const { data } = await api.post(`/tasks/${id}/photos`, fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+    _noRetry: true,
+    timeout: 60000, // uploads can take longer
+  });
   return data;
 }
 
@@ -401,7 +408,7 @@ function taskMatchesProject(t, pid) {
   return got && String(got) === want;
 }
 export async function listProjectTasks(projectId, params = {}) {
-  const p = { ...params, limit: params.limit ?? 1000 };
+  const p = { ...params, limit: params.limit ?? 1000, _maxRetries: 2 };
   const accept = (data) => {
     if (Array.isArray(data) && data.length > 0) return data;
     if (Array.isArray(data?.items) && data.items.length > 0) return data.items;
@@ -417,25 +424,29 @@ export async function listProjectTasks(projectId, params = {}) {
 }
 export async function listProjects(params = {}) {
   const { q, status, tag, limit } = params;
-  const { data } = await api.get("/projects", { params: { q, status, tag, limit } });
+  const { data } = await api.get("/projects", { params: { q, status, tag, limit }, _maxRetries: 2 });
   return Array.isArray(data) ? data : [];
 }
-export async function getProject(id) { const { data } = await api.get(`/projects/${id}`); return data; }
-export async function createProject(payload) { const { data } = await api.post("/projects", payload); return data; }
-export async function updateProject(id, payload) { const { data } = await api.put(`/projects/${id}`, payload); return data; }
-export async function deleteProject(id) { await api.delete(`/projects/${id}`); return true; }
+export async function getProject(id) { const { data } = await api.get(`/projects/${id}`, { _maxRetries: 2 }); return data; }
+export async function createProject(payload) { const { data } = await api.post("/projects", payload, { _noRetry: true }); return data; }
+export async function updateProject(id, payload) { const { data } = await api.put(`/projects/${id}`, payload, { _noRetry: true }); return data; }
+export async function deleteProject(id) { await api.delete(`/projects/${id}`, { _maxRetries: 2 }); return true; }
 export async function getProjectGeofences(id) {
-  const { data } = await api.get(`/projects/${id}/geofences`);
+  const { data } = await api.get(`/projects/${id}/geofences`, { _maxRetries: 2 });
   if (Array.isArray(data?.geoFences)) return data.geoFences;
   if (Array.isArray(data?.fences))    return data.fences;
   return Array.isArray(data) ? data : [];
 }
-export async function setProjectGeofences(id, geoFences) { const { data } = await api.put(`/projects/${id}/geofences`, { geoFences }); return data; }
-export async function appendProjectGeofences(id, geoFences) { const { data } = await api.patch(`/projects/${id}/geofences`, { geoFences }); return data; }
-export async function clearProjectGeofences(id) { const { data } = await api.delete(`/projects/${id}/geofences`); return data; }
+export async function setProjectGeofences(id, geoFences) { const { data } = await api.put(`/projects/${id}/geofences`, { geoFences }, { _noRetry: true }); return data; }
+export async function appendProjectGeofences(id, geoFences) { const { data } = await api.patch(`/projects/${id}/geofences`, { geoFences }, { _noRetry: true }); return data; }
+export async function clearProjectGeofences(id) { const { data } = await api.delete(`/projects/${id}/geofences`, { _noRetry: true }); return data; }
 export async function uploadProjectGeofences(id, file) {
   const fd = new FormData(); fd.append("file", file);
-  const { data } = await api.post(`/projects/${id}/geofences/upload`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+  const { data } = await api.post(`/projects/${id}/geofences/upload`, fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+    _noRetry: true,
+    timeout: 60000,
+  });
   return data;
 }
 
@@ -447,17 +458,14 @@ export async function listTaskMilestones(taskId, projectId) {
       name: m.name || m.title || m.label || `Milestone ${i + 1}`,
     }));
 
-  // 1) Project-scoped endpoints (optional)
   if (projectId) {
     try {
-      const { data } = await api.get(`/projects/${projectId}/tasks/${taskId}/milestones`);
+      const { data } = await api.get(`/projects/${projectId}/tasks/${taskId}/milestones`, { _maxRetries: 2 });
       if (Array.isArray(data?.items)) return normalize(data.items);
       if (Array.isArray(data?.milestones)) return normalize(data.milestones);
       if (Array.isArray(data)) return normalize(data);
     } catch {}
   }
-
-  // 2) Common task-scoped endpoints
   const candidates = [
     `/tasks/${taskId}/milestones`,
     `/tasks/${taskId}/checkpoints`,
@@ -465,7 +473,7 @@ export async function listTaskMilestones(taskId, projectId) {
   ];
   for (const url of candidates) {
     try {
-      const { data } = await api.get(url);
+      const { data } = await api.get(url, { _maxRetries: 2 });
       if (Array.isArray(data?.items)) return normalize(data.items);
       if (Array.isArray(data?.milestones)) return normalize(data.milestones);
       if (Array.isArray(data?.checkpoints)) return normalize(data.checkpoints);
@@ -473,24 +481,16 @@ export async function listTaskMilestones(taskId, projectId) {
       if (Array.isArray(data)) return normalize(data);
     } catch {}
   }
-
-  // 3) Fallback: task detail with embedded arrays under various keys
   try {
-    const { data: t } = await api.get(`/tasks/${taskId}`);
-    const raw =
-      t?.milestones ||
-      t?.checkpoints ||
-      t?.stages ||
-      t?.phases ||
-      t?.steps ||
-      [];
+    const { data: t } = await api.get(`/tasks/${taskId}`, { _maxRetries: 2 });
+    const raw = t?.milestones || t?.checkpoints || t?.stages || t?.phases || t?.steps || [];
     return normalize(raw);
   } catch {
     return [];
   }
 }
 
-// (optional) quick role checker you can reuse in UI
+// quick role checker
 export function currentUserHasRole(role) {
   try {
     const tok = localStorage.getItem("token") || "";

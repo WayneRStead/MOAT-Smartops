@@ -4,11 +4,7 @@ const { Schema } = mongoose;
 
 /* -------------------- Attachments -------------------- */
 const AttachmentGeoSchema = new Schema(
-  {
-    lat: Number,
-    lng: Number,
-    accuracy: Number, // meters if available
-  },
+  { lat: Number, lng: Number, accuracy: Number },
   { _id: false }
 );
 
@@ -18,12 +14,12 @@ const AttachmentSchema = new Schema(
     url: String,
     mime: String,
     size: Number,
-    note: { type: String, default: "" },                     // store note with the file
-    geo: { type: AttachmentGeoSchema, default: undefined },  // optional photo geolocation
-    uploadedBy: String,                                      // display name/email of uploader
+    note: { type: String, default: "" },
+    geo: { type: AttachmentGeoSchema, default: undefined },
+    uploadedBy: String,
     uploadedAt: { type: Date, default: Date.now },
   },
-  { _id: true } // keep ids on attachments
+  { _id: true }
 );
 
 /* ----------------- Progress / Duration Log ----------------- */
@@ -31,17 +27,26 @@ const DurationLogSchema = new Schema(
   {
     action: {
       type: String,
-      enum: ["start", "pause", "resume", "complete", "photo"],
+      enum: ["start", "pause", "resume", "complete", "photo", "fence"], // include "fence"
       required: true,
     },
     at: { type: Date, default: Date.now },
+
     userId: { type: Schema.Types.ObjectId, ref: "User" },
 
-    // Optional metadata (populated by routes)
+    // Optional metadata
     note: { type: String, default: "" },
     actorName: String,
     actorEmail: String,
     actorSub: String,
+
+    // Milestone link (NEW)
+    milestoneId: { type: Schema.Types.ObjectId, ref: "TaskMilestone", index: true },
+
+    // Optional location (NEW)
+    lat: Number,
+    lng: Number,
+    accuracy: Number,
 
     // Edit audit
     editedAt: { type: Date },
@@ -66,11 +71,7 @@ const MilestoneSchema = new Schema(
 
 /* ----------------------- Geo-fencing ----------------------- */
 const GeoFenceSchema = new Schema(
-  {
-    lat: Number,
-    lng: Number,
-    radius: Number, // meters
-  },
+  { lat: Number, lng: Number, radius: Number },
   { _id: false }
 );
 
@@ -80,49 +81,57 @@ const GeoPointSchema = new Schema(
 );
 
 const GeoJSONSchema = new Schema(
-  {
-    type: { type: String }, // "Point" | "Polygon" | "MultiPolygon"
-    coordinates: { type: Array }, // follows GeoJSON spec
-  },
+  { type: { type: String }, coordinates: { type: Array } },
   { _id: false }
 );
 
 const KmlRefSchema = new Schema(
-  {
-    url: String,   // storage URL to the KML file
-    name: String,  // display name
-  },
+  { url: String, name: String },
   { _id: false }
 );
+
+/* ------------------------- Helpers ------------------------- */
+function normalizeStatus(v) {
+  if (v == null) return v;
+  const s = String(v).trim().toLowerCase();
+  // friendly aliases
+  if (["done", "finish", "finished", "complete", "completed"].includes(s)) return "completed";
+  if (["in progress", "in-progress", "inprogress", "started", "start", "resume", "resumed"].includes(s)) return "in-progress";
+  if (["pause", "paused"].includes(s)) return "paused";
+  if (["open", "pending", "todo", "to-do"].includes(s)) return "pending";
+  // fall through to original value so enum validation can decide
+  return v;
+}
 
 /* ------------------------- Task ------------------------- */
 const TaskSchema = new Schema(
   {
-    // ORG SCOPE — allow string OR ObjectId; not required to avoid legacy data crashes
+    // ORG SCOPE — allow string OR ObjectId
     orgId: { type: Schema.Types.Mixed, index: true },
 
     title: { type: String, required: true, index: "text" },
     description: { type: String, default: "" },
 
     projectId: { type: Schema.Types.ObjectId, ref: "Project", index: true },
-    groupId:   { type: Schema.Types.ObjectId, ref: "Group", index: true }, // owning/primary group (kept)
+    groupId:   { type: Schema.Types.ObjectId, ref: "Group", index: true },
 
-    // Business assignment list (kept as-is)
+    // Business assignment list
     assignedTo: [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
 
-    // NEW: singular mirror of first assignee for UI compatibility
+    // Singular mirror for UI
     assignee: { type: Schema.Types.ObjectId, ref: "User", index: true, default: null },
 
-    // --- Timeline dates ---
-    startDate: { type: Date, index: true },               // NEW: optional task start
-    dueDate:   { type: Date, index: true },               // legacy mirror
-    dueAt:     { type: Date, index: true },               // primary due used by UI
+    // Timeline dates
+    startDate: { type: Date, index: true },
+    dueDate:   { type: Date, index: true }, // legacy mirror
+    dueAt:     { type: Date, index: true }, // canonical
 
     status: {
       type: String,
       enum: ["pending", "in-progress", "paused", "completed"],
       default: "pending",
       index: true,
+      set: normalizeStatus, // <-- normalize incoming values
     },
 
     priority: {
@@ -134,50 +143,30 @@ const TaskSchema = new Schema(
 
     tags: [{ type: String, index: true }],
 
-    // dependencies & enforcement
     dependentTaskIds: [{ type: Schema.Types.ObjectId, ref: "Task" }],
 
-    // QR / geofence enforcement (existing flags retained)
+    // Enforcement flags
     enforceQRScan: { type: Boolean, default: false },
     enforceLocationCheck: { type: Boolean, default: false },
 
-    // LEGACY / SIMPLE CIRCLE FENCE
     locationGeoFence: { type: GeoFenceSchema, default: undefined },
 
-    // richer geofence mode declaration
-    geoMode: {
-      type: String,
-      enum: ["off", "circle", "polygon", "kml"],
-      default: "off",
-    },
+    geoMode: { type: String, enum: ["off", "circle", "polygon", "kml"], default: "off" },
 
-    // polygon ring
     geoPolygon: { type: [GeoPointSchema], default: undefined },
-
-    // GeoJSON geometry (optional)
     geoJSON: { type: GeoJSONSchema, default: undefined },
-
-    // KML reference (optional)
     kmlRef: { type: KmlRefSchema, default: undefined },
 
-    // behavior flags
     triggerOnEnterFence: { type: Boolean, default: false },
 
-    estimatedDuration: { type: Number },              // minutes
-    actualDurationLog: [DurationLogSchema],           // start/pause/resume/complete/photo sequence
+    estimatedDuration: { type: Number },      // minutes
+    actualDurationLog: [DurationLogSchema],   // start/pause/resume/complete/photo/fence sequence
 
-    // NEW: milestones
     milestones: { type: [MilestoneSchema], default: [] },
 
-    attachments: [AttachmentSchema],                  // now includes note + geo
+    attachments: [AttachmentSchema],
 
     /* ------------ Visibility Model ------------ */
-    // - 'org'                      : everyone in org
-    // - 'assignees'                : assigned users only
-    // - 'groups'                   : assigned groups only
-    // - 'assignees+groups'         : user OR group
-    // - 'restricted'               : (legacy) admins OR assigned users/groups
-    // - 'admins'                   : admins only
     visibilityMode: {
       type: String,
       enum: ["org", "assignees", "groups", "assignees+groups", "restricted", "admins"],
@@ -185,11 +174,10 @@ const TaskSchema = new Schema(
       index: true,
     },
 
-    // For visibility checks (separate from business `assignedTo`)
     assignedUserIds:  [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
     assignedGroupIds: [{ type: Schema.Types.ObjectId, ref: "Group", index: true }],
 
-    // Soft delete (optional)
+    // Soft delete
     isDeleted: { type: Boolean, default: false, index: true },
   },
   {
@@ -222,15 +210,13 @@ TaskSchema.virtual('startAt')
   .get(function () { return this.startDate; })
   .set(function (v) { this.startDate = v; });
 
-// Keep dueAt <-> dueDate mirrored (prefer dueAt from API) + tag normalization + assignee mirroring
+// Normalize tags & mirrors before validation
 function normalizeTag(t) { return typeof t === "string" ? t.trim().toLowerCase() : ""; }
 
 TaskSchema.pre("validate", function normalize(next) {
-  // Trim title/description
   if (typeof this.title === "string") this.title = this.title.trim();
   if (typeof this.description === "string") this.description = this.description.trim();
 
-  // Tags: normalize & dedupe
   if (Array.isArray(this.tags)) {
     const dedup = Array.from(new Set(this.tags.map(normalizeTag).filter(Boolean)));
     this.tags = dedup;
@@ -246,7 +232,7 @@ TaskSchema.pre("validate", function normalize(next) {
     if (String(this.assignedTo[0]) !== a) this.assignedTo[0] = this.assignee;
   }
 
-  // Keep dueAt <-> dueDate mirrored (prefer dueAt from API)
+  // Keep dueAt <-> dueDate mirrored (prefer dueAt)
   if (this.dueAt && !this.dueDate) this.dueDate = this.dueAt;
   if (!this.dueAt && this.dueDate) this.dueAt = this.dueDate;
   if (this.dueAt && this.dueDate && +this.dueAt !== +this.dueDate) {
@@ -265,19 +251,12 @@ TaskSchema.path('startDate').validate(function (value) {
 }, 'startDate cannot be after due date');
 
 /* --------------------------- Indexes --------------------------- */
-// Handy compound indexes for common list queries and timelines
 TaskSchema.index({ projectId: 1, groupId: 1, status: 1, dueDate: 1, updatedAt: -1 });
-TaskSchema.index({ projectId: 1, startDate: 1, dueAt: 1 }); // NEW: timeline-friendly
-
-// Org + visibility fast-paths
+TaskSchema.index({ projectId: 1, startDate: 1, dueAt: 1 });
 TaskSchema.index({ orgId: 1, visibilityMode: 1 });
 TaskSchema.index({ orgId: 1, assignedUserIds: 1 });
 TaskSchema.index({ orgId: 1, assignedGroupIds: 1 });
-
-// Optional 2dsphere index (sparse) if you store geoJSON
 TaskSchema.index({ geoJSON: "2dsphere" }, { sparse: true });
-
-// Helpful queries for milestones (optional)
 TaskSchema.index({ "milestones.status": 1 });
 TaskSchema.index({ "milestones.dueAt": 1 });
 

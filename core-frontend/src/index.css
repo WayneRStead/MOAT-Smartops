@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 /* ===========================
    Global + Theme Tokens
    =========================== */
@@ -187,33 +189,133 @@ input[type="checkbox"], input[type="radio"] {
 .table tr:last-child td {
   border-bottom: none;
 }
-/* PDF Prints */
 
-/* ===== Print styles: hide app chrome, keep report clean ===== */
+/* ===========================
+   Modal / Overlay layering fixes
+   =========================== */
+
+/* Ensure common modal/overlay wrappers sit ABOVE sidebars/navs */
+.ReactModal__Overlay,
+.ReactModal__Content,
+.MuiModal-root,
+.MuiBackdrop-root,
+.MuiDialog-root,
+.ant-modal-root,
+.ant-modal-wrap,
+.ant-modal-mask,
+dialog[open],
+[role="dialog"],
+.modal,
+.modal-overlay,
+.dialog-overlay,
+[data-portal="modal"],
+#modal-root,
+#modals {
+  z-index: 1000 !important; /* higher than typical sidebars (10–40) */
+}
+
+/* Keep Leaflet maps beneath overlays */
+.leaflet-container { z-index: 0 !important; }
+
+/* ===========================
+   Print / PDF
+   =========================== */
+
+/* Hide app chrome, including the new left sidebar (aside) */
 @media print {
-  /* Hide the whole app shell and any .no-print elements */
-  nav, .navbar, header, footer, .no-print { display: none !important; }
+  /* Hide sidebars/topbars/footers and explicit no-print */
+  nav,
+  header,
+  footer,
+  .navbar,
+  .AppNavbar,
+  .no-print,
+  /* common sidebar tags/classes */
+  aside,
+  .AppSidebar,
+  .Sidebar,
+  .sidenav,
+  [data-role="sidebar"] {
+    display: none !important;
+  }
 
-  /* Remove background colors that can print badly */
-  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* === Print layout fix for views that sit in a 2-col app grid (e.g., Inspection Submission) === */
+@media print {
+  /* Collapse any app/grid layout to a single column */
+  .app,
+  .layout,
+  .app-layout,
+  .app-shell,
+  .shell,
+  .grid,
+  .layout-grid,
+  .content-wrap {
+    display: block !important;
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Make the main content span full width; remove leftover offsets */
+  main,
+  .main,
+  .content,
+  .app-content,
+  .page,
+  .page-content,
+  .report,
+  .inspection,
+  .inspection-page,
+  .inspection-submission,
+  .print-target,
+  #root > * {
+    margin: 0 !important;
+    padding-left: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    position: static !important;
+    transform: none !important;
+    left: auto !important;
+  }
+}
+
+  /* Improve color fidelity */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 
   html, body { margin: 0 !important; padding: 0 !important; }
-  body { background: #fff !important; }
+  body { background: #fff !important; color: #000 !important; }
 
-  /* Expand the content to full width on paper */
+  /* Expand printable container if used */
   .print-container { margin: 0 !important; padding: 0.5in !important; }
 
-  /* Give each item some breathing room on page breaks */
-  .print-break-avoid { break-inside: avoid; page-break-inside: avoid; }
-  .print-break-before { break-before: page; page-break-before: always; }
+  /* Avoid splitting important blocks */
+  .print-break-avoid { page-break-inside: avoid; break-inside: avoid; }
+  .print-break-before { page-break-before: always; break-before: page; }
+
+  /* Print-only header/footer toggles */
+  .print-header { display: block !important; }
+  .screen-header { display: none !important; }
+
+  /* Optional watermark helper */
+  .print-watermark {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    opacity: 0.06;
+    font-size: 120px;
+    font-weight: 800;
+    transform: rotate(-30deg);
+  }
 }
 
 /* Optional: better page margins */
 @page { margin: 12mm; }
 
-
 /* ===========================
-   Utilities
+   Utilities (project-specific, not Tailwind)
    =========================== */
 
 .grid-2 {
@@ -232,57 +334,28 @@ input[type="checkbox"], input[type="radio"] {
 .mt-2 { margin-top: .5rem; }
 .mt-3 { margin-top: 1rem; }
 
-/* Keep Leaflet inside its lane */
-.leaflet-container { z-index: 0 !important; }
-
-/* === Print / PDF tweaks === */
-@media print {
-  /* Hide app chrome */
-  .no-print, nav, header, .navbar, .AppNavbar { display: none !important; }
-
-  /* Improve color fidelity */
-  body {
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-
-  /* Container for printable pages */
-  .print-container { padding: 0 !important; }
-
-  /* Avoid splitting important blocks */
-  .print-break-avoid { page-break-inside: avoid; }
-
-  /* Show print-only header; hide screen header */
-  .print-header { display: block !important; }
-  .screen-header { display: none !important; }
-
-  /* Simple watermark */
-  .print-watermark {
-    position: fixed;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    pointer-events: none;
-    opacity: 0.06;
-    font-size: 120px;
-    font-weight: 800;
-    transform: rotate(-30deg);
-  }
+/* Button helpers (used across admin pages too) */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:.4rem;
+  border-radius:var(--radius);border:1px solid var(--border);
+  padding:.6em 1.2em;background:var(--panel);color:var(--text);
+  font-weight:600;cursor:pointer;transition: box-shadow .15s ease, transform .02s ease, border-color .15s ease, background .15s ease;
 }
+.btn:hover{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent)}
+.btn:active{transform:translateY(1px)}
+.btn-ghost{background:transparent}
+.btn-error{background:#dc2626;border-color:#dc2626;color:#fff}
+.btn-sm{padding:.4em .8em;font-size:.9rem}
+.btn-xs{padding:.25em .6em;font-size:.8rem}
+
+/* A tiny badge helper if you decide to use it */
+.badge{display:inline-block;padding:.15rem .5rem;border-radius:9999px;font-size:.75rem;font-weight:600}
+
+/* Link utility sometimes used in inspection pages */
+.link{color:var(--link);text-decoration:underline}
+
+/* Screen-only toggles */
 @media screen {
   .print-header { display: none; }
   .screen-header { display: block; }
 }
-
-/* Status chips (used by the viewer) */
-.chip {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 9999px;
-  font-size: 12px;
-  line-height: 1.6;
-  font-weight: 600;
-}
-.chip-pass  { color: #065f46; background: #d1fae5; border: 1px solid #10b98133; }
-.chip-fail  { color: #991b1b; background: #fee2e2; border: 1px solid #ef444433; }
-.chip-na    { color: #92400e; background: #fef3c7; border: 1px solid #f59e0b33; }

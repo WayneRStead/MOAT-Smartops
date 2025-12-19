@@ -5,8 +5,8 @@ const path = require('path');
 const multer = require('multer');
 const mongoose = require('mongoose');
 
-const Vehicle = require('../models/Vehicle');       // assumes it exists
-const VehicleTrip = require('../models/VehicleTrip'); // canonical trip model
+const Vehicle = require('../models/Vehicle');
+const VehicleTrip = require('../models/VehicleTrip');
 
 const router = express.Router();
 
@@ -30,6 +30,19 @@ function computeDistance(odoStart, odoEnd) {
   if (!Number.isFinite(a) || !Number.isFinite(b)) return undefined;
   return Math.max(0, b - a);
 }
+function readGeo(body = {}) {
+  const lat = toNum(body.lat);
+  const lng = toNum(body.lng);
+  const acc = toNum(body.acc);
+  if (lat == null || lng == null) return undefined;
+  return { lat, lng, acc: acc == null ? undefined : acc };
+}
+function toPoint(geo) {
+  const lat = Number(geo?.lat);
+  const lng = Number(geo?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return { type: 'Point', coordinates: [lng, lat] };
+}
 
 /* ------------------------------ uploads ------------------------------ */
 // Store under /uploads/vehicle-trips, served by /files/vehicle-trips/*
@@ -48,7 +61,6 @@ const upload = multer({
   storage,
   limits: { fileSize: 15 * 1024 * 1024 }, // 15MB
   fileFilter: (_req, file, cb) => {
-    // allow any image/*; relax if your phones produce odd mimetypes
     if (!/^image\//i.test(file.mimetype)) return cb(new Error('Only image uploads are allowed.'));
     cb(null, true);
   },
@@ -130,6 +142,23 @@ router.post('/vehicles/:vehicleId/trips/start', async (req, res, next) => {
     if (existing) return res.status(400).json({ error: 'There is already an open trip for this vehicle.' });
 
     const body = req.body || {};
+    const startGeo =
+  (body.startLat != null && body.startLng != null)
+    ? { lat: Number(body.startLat), lng: Number(body.startLng), acc: toNum(body.startAccuracy) }
+    : readGeo(body);
+
+const startLocation =
+  (body?.startLocation?.type === 'Point' &&
+   Array.isArray(body.startLocation.coordinates) &&
+   body.startLocation.coordinates.length >= 2)
+    ? { type: 'Point', coordinates: [
+        Number(body.startLocation.coordinates[0]),
+        Number(body.startLocation.coordinates[1]),
+      ] }
+    : (body.startLat != null && body.startLng != null)
+      ? { type: 'Point', coordinates: [Number(body.startLng), Number(body.startLat)] }
+      : undefined;
+
     const trip = new VehicleTrip(stripUndef({
       vehicleId: vId,
       startedAt: new Date(),
@@ -141,10 +170,36 @@ router.post('/vehicles/:vehicleId/trips/start', async (req, res, next) => {
       notes: body.notes || undefined,
       tags: Array.isArray(body.tags) ? body.tags : (body.tags ? [body.tags] : undefined),
       startPhoto: body.startPhotoUrl ? { url: body.startPhotoUrl } : undefined,
+
+      // GEO
+      startGeo,
+      startLocation,
+
+      // Purpose
+      purpose: (body.purpose === 'Private' || body.purpose === 'Business') ? body.purpose : 'Business',
     }));
 
+    // Fallback odoStart to vehicle.odometer if present
     if (trip.odoStart == null && Number.isFinite(vehicle?.odometer)) {
       trip.odoStart = Number(vehicle.odometer);
+    }
+
+    // --- ODOMETER GUARD: start must be >= last closed end & >= vehicle.odometer ---
+    const lastClosed = await VehicleTrip
+      .findOne({ vehicleId: vId, endedAt: { $ne: null } })
+      .sort({ endedAt: -1 });
+
+    const lastEndOdo = Number.isFinite(lastClosed?.odoEnd) ? Number(lastClosed.odoEnd) : undefined;
+    const vehicleOdo = Number.isFinite(vehicle?.odometer) ? Number(vehicle.odometer) : undefined;
+    const floorOdo = Math.max(
+      Number.isFinite(lastEndOdo) ? lastEndOdo : -Infinity,
+      Number.isFinite(vehicleOdo) ? vehicleOdo : -Infinity
+    );
+
+    if (Number.isFinite(floorOdo) && Number.isFinite(trip.odoStart) && trip.odoStart < floorOdo) {
+      return res.status(422).json({
+        error: `Odometer start (${trip.odoStart}) cannot be less than last recorded end (${floorOdo}).`
+      });
     }
 
     await trip.save();
@@ -167,9 +222,47 @@ router.post('/vehicles/:vehicleId/trips/:tripId/end', async (req, res, next) => 
     if (body.notes) trip.notes = String(body.notes);
     if (body.endPhotoUrl) trip.endPhoto = { url: body.endPhotoUrl };
 
-    const odoEnd = toNum(body.odoEnd);
-    if (odoEnd != null) trip.odoEnd = odoEnd;
+    // Purpose (optional update)
+    if (body.purpose === 'Business' || body.purpose === 'Private') {
+      trip.purpose = body.purpose;
+    }
 
+    // Odometer end (must be >= start)
+    const incomingEnd = toNum(body.odoEnd);
+    if (incomingEnd != null) {
+      if (trip.odoStart != null && incomingEnd < Number(trip.odoStart)) {
+        return res.status(422).json({
+          error: `Odometer end (${incomingEnd}) cannot be less than trip start (${trip.odoStart}).`
+        });
+      }
+      trip.odoEnd = incomingEnd;
+    }
+
+    // GEO
+    const endGeo =
+  (body.endLat != null && body.endLng != null)
+    ? { lat: Number(body.endLat), lng: Number(body.endLng), acc: toNum(body.endAccuracy) }
+    : readGeo(body);
+
+const endLocation =
+  (body?.endLocation?.type === 'Point' &&
+   Array.isArray(body.endLocation.coordinates) &&
+   body.endLocation.coordinates.length >= 2)
+    ? {
+        type: 'Point',
+        coordinates: [
+          Number(body.endLocation.coordinates[0]),
+          Number(body.endLocation.coordinates[1]),
+        ],
+      }
+    : (body.endLat != null && body.endLng != null)
+      ? { type: 'Point', coordinates: [Number(body.endLng), Number(body.endLat)] }
+      : (endGeo ? { type: 'Point', coordinates: [endGeo.lng, endGeo.lat] } : undefined);
+
+trip.endGeo = endGeo || undefined;
+trip.endLocation = endLocation;
+
+    // close + distance
     trip.endedAt = new Date();
     trip.distance = computeDistance(trip.odoStart, trip.odoEnd);
 
@@ -179,14 +272,6 @@ router.post('/vehicles/:vehicleId/trips/:tripId/end', async (req, res, next) => 
 });
 
 /* ------------------------------ updates ------------------------------- */
-/**
- * PATCH /vehicle-trips/:id (canonical)
- * PUT   /vehicle-trips/:id (accepted)
- * Also exposes aliases:
- *   - /vehicleTrips/:id
- *   - /vehicles/:vehicleId/trips/:tripId  (PUT & PATCH)
- *   - /trips/:id  (PUT & PATCH)
- */
 async function applyTripPatch(trip, patch) {
   // normalize
   const clean = stripUndef({
@@ -200,12 +285,39 @@ async function applyTripPatch(trip, patch) {
     taskId: patch.taskId,
     notes: patch.notes,
     tags: Array.isArray(patch.tags) ? patch.tags : undefined,
+    purpose: (patch.purpose === 'Business' || patch.purpose === 'Private') ? patch.purpose : undefined,
   });
 
   Object.assign(trip, clean);
+
+  // Optional geo fixes via patch
+  if (patch.startGeo) {
+    const g = stripUndef({
+      lat: toNum(patch.startGeo.lat),
+      lng: toNum(patch.startGeo.lng),
+      acc: toNum(patch.startGeo.acc),
+    });
+    trip.startGeo = (g.lat != null && g.lng != null) ? g : undefined;
+    trip.startLocation = (g.lat != null && g.lng != null)
+      ? { type: 'Point', coordinates: [g.lng, g.lat] }
+      : undefined;
+  }
+
+  if (patch.endGeo) {
+    const g = stripUndef({
+      lat: toNum(patch.endGeo.lat),
+      lng: toNum(patch.endGeo.lng),
+      acc: toNum(patch.endGeo.acc),
+    });
+    trip.endGeo = (g.lat != null && g.lng != null) ? g : undefined;
+    trip.endLocation = (g.lat != null && g.lng != null)
+      ? { type: 'Point', coordinates: [g.lng, g.lat] }
+      : undefined;
+  }
+
   // distance (if both odos present)
   if (trip.odoStart != null && trip.odoEnd != null) {
-    trip.distance = computeDistance(trip.odoStart, trip.odoEnd);
+    trip.distance = Math.max(0, Number(trip.odoEnd) - Number(trip.odoStart));
   }
   await trip.save();
   return trip;
@@ -245,13 +357,7 @@ async function updateNested(req, res, next) {
 router.patch('/vehicles/:vehicleId/trips/:tripId', updateNested);
 router.put('/vehicles/:vehicleId/trips/:tripId', updateNested);
 
-// generic collection alias: /trips/:id
-router.patch('/trips/:id', updateById);
-router.put('/trips/:id', updateById);
-
 /* -------------------------------- audit ------------------------------- */
-// If you later add real audit logs, return them here.
-// For now, return the current doc plus a stub history array.
 router.get('/vehicle-trips/:id/audit', async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
@@ -263,7 +369,6 @@ router.get('/vehicle-trips/:id/audit', async (req, res, next) => {
 });
 
 /* ------------------------------ uploads ------------------------------- */
-// Pre-upload: POST /vehicle-trips/upload
 router.post('/vehicle-trips/upload', upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file' });
@@ -272,7 +377,6 @@ router.post('/vehicle-trips/upload', upload.single('file'), async (req, res, nex
   } catch (err) { next(err); }
 });
 
-// Attach to an existing trip (start photo)
 router.post('/vehicle-trips/:id/upload-start', upload.single('file'), async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
@@ -286,7 +390,6 @@ router.post('/vehicle-trips/:id/upload-start', upload.single('file'), async (req
   } catch (err) { next(err); }
 });
 
-// Attach to an existing trip (end photo)
 router.post('/vehicle-trips/:id/upload-end', upload.single('file'), async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
@@ -297,6 +400,144 @@ router.post('/vehicle-trips/:id/upload-end', upload.single('file'), async (req, 
     trip.endPhoto = fileMeta(req.file.filename, req.file);
     await trip.save();
     res.json(trip.toObject());
+  } catch (err) { next(err); }
+});
+
+/* ------------------------------- exports ------------------------------- */
+// Helpers to pull lat/lng safely
+function pickLatLng(trip, which /* 'start' | 'end' */) {
+  const loc = trip?.[which + 'Location'];
+  if (loc && Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
+    const lng = Number(loc.coordinates[0]);
+    const lat = Number(loc.coordinates[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  }
+  const geo = trip?.[which + 'Geo'];
+  if (geo && Number.isFinite(Number(geo.lat)) && Number.isFinite(Number(geo.lng))) {
+    return { lat: Number(geo.lat), lng: Number(geo.lng) };
+  }
+  return null;
+}
+
+function tripToCsvRow(t) {
+  const s = pickLatLng(t, 'start') || {};
+  const e = pickLatLng(t, 'end') || {};
+  return [
+    String(t._id || ''),
+    String(t.vehicleId || ''),
+    String(t.driverUserId || ''),
+    t.startedAt ? new Date(t.startedAt).toISOString() : '',
+    t.endedAt ? new Date(t.endedAt).toISOString() : '',
+    Number.isFinite(t.odoStart) ? t.odoStart : '',
+    Number.isFinite(t.odoEnd) ? t.odoEnd : '',
+    Number.isFinite(t.distance) ? t.distance : '',
+    (t.purpose || ''),
+    (t.projectId || ''),
+    (t.taskId || ''),
+    s.lat ?? '', s.lng ?? '',
+    e.lat ?? '', e.lng ?? '',
+    (t.notes || '').replace(/\r?\n/g, ' '),
+    Array.isArray(t.tags) ? t.tags.join('|') : ''
+  ];
+}
+
+router.get('/vehicles/:vehicleId/trips.csv', async (req, res, next) => {
+  try {
+    const vId = toObjectId(req.params.vehicleId);
+    if (!vId) return res.status(400).json({ error: 'Invalid vehicle id' });
+
+    const { limit = 1000, skip = 0 } = req.query;
+    const trips = await VehicleTrip.find({ vehicleId: vId })
+      .sort({ startedAt: 1, createdAt: 1 })
+      .skip(Number(skip) || 0)
+      .limit(Math.min(Number(limit) || 1000, 5000))
+      .lean();
+
+    const header = [
+      'tripId','vehicleId','driverUserId','startedAt','endedAt',
+      'odoStart','odoEnd','distance','purpose','projectId','taskId',
+      'startLat','startLng','endLat','endLng','notes','tags'
+    ];
+
+    const rows = trips.map(tripToCsvRow);
+    const csv = [header, ...rows].map(cols =>
+      cols.map(v => {
+        const s = String(v ?? '');
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(',')
+    ).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="vehicle-${String(vId)}-trips.csv"`);
+    res.send(csv);
+  } catch (err) { next(err); }
+});
+
+function kmlPlacemark(name, lat, lng, whenIso) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '';
+  return `
+    <Placemark>
+      <name>${name}</name>
+      ${whenIso ? `<TimeStamp><when>${whenIso}</when></TimeStamp>` : ''}
+      <Point><coordinates>${lng},${lat},0</coordinates></Point>
+    </Placemark>
+  `;
+}
+
+router.get('/vehicles/:vehicleId/trips.kml', async (req, res, next) => {
+  try {
+    const vId = toObjectId(req.params.vehicleId);
+    if (!vId) return res.status(400).json({ error: 'Invalid vehicle id' });
+
+    const { limit = 1000, skip = 0 } = req.query;
+    const trips = await VehicleTrip.find({ vehicleId: vId })
+      .sort({ startedAt: 1, createdAt: 1 })
+      .skip(Number(skip) || 0)
+      .limit(Math.min(Number(limit) || 1000, 5000))
+      .lean();
+
+    // Build Placemarks for starts & ends; optionally a LineString per trip if both ends exist
+    const placemarks = [];
+    const lines = [];
+
+    for (const t of trips) {
+      const s = pickLatLng(t, 'start');
+      const e = pickLatLng(t, 'end');
+
+      if (s) placemarks.push(kmlPlacemark(`Trip ${t._id} start`, s.lat, s.lng, t.startedAt ? new Date(t.startedAt).toISOString() : ''));
+      if (e) placemarks.push(kmlPlacemark(`Trip ${t._id} end`, e.lat, e.lng, t.endedAt ? new Date(t.endedAt).toISOString() : ''));
+
+      if (s && e) {
+        lines.push(`
+          <Placemark>
+            <name>Trip ${t._id}</name>
+            <Style>
+              <LineStyle><width>3</width></LineStyle>
+            </Style>
+            <LineString>
+              <tessellate>1</tessellate>
+              <coordinates>
+                ${s.lng},${s.lat},0
+                ${e.lng},${e.lat},0
+              </coordinates>
+            </LineString>
+          </Placemark>
+        `);
+      }
+    }
+
+    const doc = `<?xml version="1.0" encoding="UTF-8"?>
+      <kml xmlns="http://www.opengis.net/kml/2.2">
+        <Document>
+          <name>Vehicle ${String(vId)} Trips</name>
+          ${placemarks.join('\n')}
+          ${lines.join('\n')}
+        </Document>
+      </kml>`;
+
+    res.setHeader('Content-Type', 'application/vnd.google-earth.kml+xml; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="vehicle-${String(vId)}-trips.kml"`);
+    res.send(doc);
   } catch (err) { next(err); }
 });
 

@@ -1,52 +1,42 @@
-// src/pages/AdminInspectionForms.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api } from "../lib/api";
-
-function badge(color, text) {
-  const cls = {
-    green: "bg-green-50 text-green-700 border-green-200",
-    gray: "bg-gray-50 text-gray-700 border-gray-200",
-    yellow: "bg-yellow-50 text-yellow-700 border-yellow-200",
-    red: "bg-red-50 text-red-700 border-red-200",
-    blue: "bg-blue-50 text-blue-700 border-blue-200",
-  }[color] || "bg-gray-50 text-gray-700 border-gray-200";
-  return (
-    <span className={`inline-block px-2 py-0.5 text-xs rounded-full border ${cls}`}>
-      {text}
-    </span>
-  );
-}
-
-function fmtDate(s) {
-  if (!s) return "—";
-  try {
-    const d = new Date(s);
-    return d.toLocaleString();
-  } catch {
-    return String(s);
-  }
-}
+// core-frontend/src/pages/AdminInspectionForms.jsx
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import {
+  listForms,
+  softDeleteForm,
+  hardDeleteForm,
+  restoreForm,
+} from "../lib/inspectionApi.js";
+import { useTheme } from "../ThemeContext";
 
 export default function AdminInspectionForms() {
-  const navigate = useNavigate();
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
+  const nav = useNavigate();
+  const { org } = useTheme();
+  const accent = org?.accentColor || "#2a7fff";
 
-  // UI state
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [includeDeleted, setIncludeDeleted] = useState(false);
+
+  // client-side search
   const [q, setQ] = useState("");
-  const [status, setStatus] = useState("all"); // all | active | draft | archived
-  const [scope, setScope] = useState("all"); // all | global | scoped
+  const [qDeb, setQDeb] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setQDeb(q.trim().toLowerCase()), 200);
+    return () => clearTimeout(t);
+  }, [q]);
 
   async function load() {
-    setErr("");
     setLoading(true);
+    setErr("");
     try {
-      const { data } = await api.get("/inspections/forms", { params: { limit: 1000 } });
-      setItems(Array.isArray(data) ? data : []);
+      const data = await listForms({ includeDeleted });
+      setRows(Array.isArray(data) ? data : []);
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || "Failed to load forms");
+      setRows([]);
     } finally {
       setLoading(false);
     }
@@ -54,209 +44,211 @@ export default function AdminInspectionForms() {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includeDeleted]);
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return (items || [])
-      .filter((f) => {
-        // status filter
-        const st = String(f.status || (f.active === false ? "archived" : "active")).toLowerCase();
-        if (status !== "all" && st !== status) return false;
-
-        // scope filter
-        const sc = f.scope || {};
-        const isGlobal = !!sc.isGlobal || (!Array.isArray(sc.projectIds) && !Array.isArray(sc.taskIds));
-        if (scope === "global" && !isGlobal) return false;
-        if (scope === "scoped" && isGlobal) return false;
-
-        // search
-        if (!needle) return true;
-        const hay = [
-          f.title, f.name, f.description, f.category,
-          ...(f.tags || []), ...(f.labels || []),
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        return hay.includes(needle);
-      })
-      .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
-  }, [items, q, status, scope]);
-
-  function idOf(f) {
-    return f?._id || f?.id;
-  }
-
-  async function duplicateForm(f) {
+  async function onSoftDelete(id) {
+    if (!window.confirm("Soft delete this form?")) return;
     try {
-      const body = {
-        // keep only well-known fields
-        name: `${f.name || f.title || "Form"} (copy)`,
-        title: `${f.title || f.name || "Form"} (copy)`,
-        description: f.description || "",
-        version: (f.version ?? 1),
-        fields: Array.isArray(f.fields) ? f.fields : Array.isArray(f.schema) ? f.schema : [],
-        status: "draft",
-        scope: f.scope || { isGlobal: true, projectIds: [], taskIds: [], roles: [] },
-        category: f.category || "",
-        tags: f.tags || f.labels || [],
-      };
-      await api.post("/inspections/forms", body);
+      await softDeleteForm(id);
       await load();
     } catch (e) {
-      alert(e?.response?.data?.error || e?.message || "Duplicate failed");
+      alert(e?.response?.data?.error || e?.message || "Soft delete failed");
     }
   }
 
-  async function toggleArchive(f) {
-    const st = String(f.status || (f.active === false ? "archived" : "active")).toLowerCase();
-    const next = st === "archived" ? "active" : "archived";
+  async function onRestore(id) {
     try {
-      await api.patch(`/inspections/forms/${idOf(f)}`, { status: next, active: next === "active" });
+      await restoreForm(id);
       await load();
     } catch (e) {
-      alert(e?.response?.data?.error || e?.message || "Update failed");
+      alert(e?.response?.data?.error || e?.message || "Restore failed");
     }
   }
 
-  async function deleteForm(f) {
-    if (!confirm(`Delete form “${f.title || f.name}”? This cannot be undone.`)) return;
+  async function onHardDelete(id) {
+    if (!window.confirm("HARD delete this form permanently?")) return;
     try {
-      await api.delete(`/inspections/forms/${idOf(f)}`);
+      await hardDeleteForm(id);
       await load();
     } catch (e) {
-      alert(e?.response?.data?.error || e?.message || "Delete failed");
+      alert(e?.response?.data?.error || e?.message || "Hard delete failed");
     }
   }
+
+  const pill = (on) => `pill ${on ? "active" : ""}`;
+
+  function niceCase(s) {
+    const t = String(s || "").toLowerCase();
+    if (t === "signoff") return "Sign-off";
+    if (t === "standard") return "Standard";
+    return t.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  }
+
+  function subjectLabel(subj) {
+    const t = String(subj?.type || "none").toLowerCase();
+    if (t === "vehicle") {
+      const lock = subj?.lockLabel || subj?.lockToId || "";
+      return lock ? `Vehicle — ${lock}` : "Vehicle";
+    }
+    if (t === "asset") {
+      const lock = subj?.lockLabel || subj?.lockToId || "";
+      return lock ? `Asset — ${lock}` : "Asset";
+    }
+    return "General";
+  }
+
+  const filteredRows = useMemo(() => {
+    if (!qDeb) return rows;
+    return rows.filter((f) => {
+      const scope = f?.scope?.type === "scoped" ? "scoped" : "global";
+      const subj = subjectLabel(f.subject);
+      const text = `${f.title || ""} ${f.formType || ""} ${scope} ${subj}`.toLowerCase();
+      return text.includes(qDeb);
+    });
+  }, [rows, qDeb]);
 
   return (
-    <div className="p-4 space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">Inspection Forms</h1>
-        <div className="flex items-center gap-2">
+    <div className="max-w-7xl mx-auto p-4" style={{ "--accent": accent }}>
+      {/* local styles for standardized look */}
+      <style>{`
+        .btn{border:1px solid #e5e7eb;border-radius:10px;padding:8px 12px;background:#fff}
+        .btn:hover{box-shadow:0 1px 0 rgba(0,0,0,.04)}
+        .btn-sm{padding:6px 10px;border-radius:8px}
+        .btn-accent{background:var(--accent,#2a7fff);color:#fff;border-color:var(--accent,#2a7fff)}
+        .btn-danger{background:#b91c1c;color:#fff;border-color:#7f1d1d}
+        .pill{
+          border:1px solid var(--border,#e5e7eb);
+          padding:.35rem .7rem;border-radius:9999px;cursor:pointer;
+          font-weight:600;background:#fff;color:#111827;
+          transition: background .12s ease,border-color .12s ease,color .12s ease;
+          white-space:nowrap;
+        }
+        .pill.active{
+          background:var(--accent,#2a7fff);border-color:var(--accent,#2a7fff);color:#fff;
+        }
+        .table{width:100%;border-collapse:collapse}
+        .table th,.table td{padding:.5rem;border-top:1px solid #eef2f7;text-align:left}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px}
+        .muted{color:#64748b}
+      `}</style>
+
+      {/* Title row */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h1 className="text-2xl font-semibold">Inspection Forms</h1>
+      </div>
+
+      {/* Toolbar split: left (search + pills) | right (new form) */}
+      <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
+        {/* LEFT group */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            className="input input-bordered"
+            style={{ minWidth: 280 }}
+            placeholder="Search title, type, subject, scope…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={pill(!includeDeleted)}
+              onClick={() => setIncludeDeleted(false)}
+              title="Hide deleted forms"
+            >
+              Active
+            </button>
+            <button
+              type="button"
+              className={pill(includeDeleted)}
+              onClick={() => setIncludeDeleted(true)}
+              title="Show deleted forms"
+            >
+              Show deleted
+            </button>
+          </div>
+        </div>
+
+        {/* RIGHT group */}
+        <div className="flex items-center">
           <button
-            className="px-3 py-2 border rounded"
-            onClick={() => navigate("/admin/inspections/forms/new")}
+            className="btn btn-accent"
+            onClick={() => nav("/admin/inspections/forms/new")}
           >
             New form
           </button>
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search title, tags…"
-          className="border p-2 rounded w-64"
-        />
-        <select className="border p-2 rounded" value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="all">All statuses</option>
-          <option value="active">Active</option>
-          <option value="draft">Draft</option>
-          <option value="archived">Archived</option>
-        </select>
-        <select className="border p-2 rounded" value={scope} onChange={(e) => setScope(e.target.value)}>
-          <option value="all">All scopes</option>
-          <option value="global">Global</option>
-          <option value="scoped">Project/Task scoped</option>
-        </select>
-        <button className="px-3 py-2 border rounded" onClick={load}>Refresh</button>
-      </div>
+      {err && <div className="text-red-600 mt-2">{err}</div>}
 
-      {loading && <div className="text-gray-600">Loading…</div>}
-      {err && <div className="text-red-600">{err}</div>}
-
-      {!loading && !err && filtered.length === 0 && (
-        <div className="text-gray-600">No forms found.</div>
-      )}
-
-      {!loading && !err && filtered.length > 0 && (
-        <div className="overflow-auto">
-          <table className="min-w-[800px] w-full border border-gray-200 rounded">
-            <thead className="bg-gray-50">
-              <tr className="text-left text-sm">
-                <th className="p-2 border-b">Title</th>
-                <th className="p-2 border-b">Version</th>
-                <th className="p-2 border-b">Status</th>
-                <th className="p-2 border-b">Scope</th>
-                <th className="p-2 border-b">Updated</th>
-                <th className="p-2 border-b text-right">Actions</th>
+      <div className="mt-3 card overflow-x-auto">
+        {loading ? (
+          <div className="p-3">Loading…</div>
+        ) : filteredRows.length ? (
+          <table className="table">
+            <thead>
+              <tr style={{ background: "#f9fafb" }}>
+                <th>Title</th>
+                <th>Type</th>
+                <th>Subject</th>
+                <th>Scope</th>
+                <th>Updated</th>
+                <th className="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((f) => {
-                const st = String(f.status || (f.active === false ? "archived" : "active")).toLowerCase();
-                const sc = f.scope || {};
-                const isGlobal = !!sc.isGlobal || (!Array.isArray(sc.projectIds) && !Array.isArray(sc.taskIds));
+              {filteredRows.map((f) => {
+                const id = f._id || f.id;
+                const scoped = f?.scope?.type === "scoped";
+                const updated = f.updatedAt
+                  ? new Date(f.updatedAt).toLocaleString()
+                  : "—";
+                const isDel = !!f.isDeleted;
                 return (
-                  <tr key={idOf(f)} className="text-sm odd:bg-white even:bg-gray-50">
-                    <td className="p-2 border-b">
-                      <div className="font-medium">{f.title || f.name || "Untitled"}</div>
-                      {f.description && <div className="text-xs text-gray-600 line-clamp-1">{f.description}</div>}
+                  <tr key={id} className={isDel ? "opacity-70" : ""}>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <span>{f.title || "Untitled form"}</span>
+                        {isDel && (
+                          <span className="px-2 py-0.5 rounded-full text-xs border bg-amber-50 text-amber-800 border-amber-200">
+                            deleted
+                          </span>
+                        )}
+                      </div>
                     </td>
-                    <td className="p-2 border-b">{f.version ?? 1}</td>
-                    <td className="p-2 border-b">
-                      {st === "active"   && badge("green", "Active")}
-                      {st === "draft"    && badge("yellow", "Draft")}
-                      {st === "archived" && badge("gray", "Archived")}
-                      {!["active", "draft", "archived"].includes(st) && badge("blue", st)}
-                    </td>
-                    <td className="p-2 border-b">
-                      {isGlobal
-                        ? badge("blue", "Global")
-                        : (
-                          <div className="flex flex-col gap-1">
-                            {Array.isArray(sc.projectIds) && sc.projectIds.length > 0 && (
-                              <div className="text-xs text-gray-700">Projects: {sc.projectIds.length}</div>
-                            )}
-                            {Array.isArray(sc.taskIds) && sc.taskIds.length > 0 && (
-                              <div className="text-xs text-gray-700">Tasks: {sc.taskIds.length}</div>
-                            )}
-                          </div>
-                        )
-                      }
-                    </td>
-                    <td className="p-2 border-b">{fmtDate(f.updatedAt || f.createdAt)}</td>
-                    <td className="p-2 border-b">
-                      <div className="flex items-center gap-2 justify-end">
-                        <button
-                          className="px-2 py-1 border rounded"
-                          onClick={() => navigate(`/admin/inspections/forms/${idOf(f)}`)}
-                          title="Edit"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="px-2 py-1 border rounded"
-                          onClick={() => duplicateForm(f)}
-                          title="Duplicate"
-                        >
-                          Duplicate
-                        </button>
-                        <button
-                          className="px-2 py-1 border rounded"
-                          onClick={() => toggleArchive(f)}
-                          title={String(f.status).toLowerCase() === "archived" ? "Activate" : "Archive"}
-                        >
-                          {String(f.status || "").toLowerCase() === "archived" ? "Activate" : "Archive"}
-                        </button>
-                        <button
-                          className="px-2 py-1 border rounded text-red-700 border-red-300"
-                          onClick={() => deleteForm(f)}
-                          title="Delete"
-                        >
-                          Delete
-                        </button>
-                        <button
-                          className="px-2 py-1 border rounded"
-                          onClick={() => navigate(`/inspections/forms/${idOf(f)}/open`)}
-                          title="Open to test"
-                        >
-                          Open
-                        </button>
+                    <td className="capitalize">{niceCase(f.formType || "standard")}</td>
+                    <td>{subjectLabel(f.subject)}</td>
+                    <td className="capitalize">{scoped ? "Scoped" : "Global"}</td>
+                    <td>{updated}</td>
+                    <td>
+                      <div className="flex justify-end gap-2">
+                        {!isDel && (
+                          <>
+                            <Link className="btn btn-sm" to={`/admin/inspections/forms/${id}`}>
+                              Edit
+                            </Link>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => nav(`/inspections/forms/${id}/open`)}
+                            >
+                              Run
+                            </button>
+                            <button className="btn btn-sm" onClick={() => onSoftDelete(id)}>
+                              Delete
+                            </button>
+                          </>
+                        )}
+                        {isDel && (
+                          <>
+                            <button className="btn btn-sm" onClick={() => onRestore(id)}>
+                              Restore
+                            </button>
+                            <button className="btn btn-sm btn-danger" onClick={() => onHardDelete(id)}>
+                              Delete
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -264,8 +256,10 @@ export default function AdminInspectionForms() {
               })}
             </tbody>
           </table>
-        </div>
-      )}
+        ) : (
+          <div className="p-3 muted">No forms found.</div>
+        )}
+      </div>
     </div>
   );
 }
