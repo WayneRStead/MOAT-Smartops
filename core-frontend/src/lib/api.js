@@ -22,6 +22,11 @@ const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM  = import.meta.env.VITE_TENANT_PARAM  || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
 
+console.log("[VITE_API_BASE]", import.meta.env.VITE_API_BASE);
+console.log("[VITE_TENANT_HEADER]", import.meta.env.VITE_TENANT_HEADER);
+console.log("[VITE_TENANT_PARAM]", import.meta.env.VITE_TENANT_PARAM);
+console.log("[VITE_SEND_TENANT_PARAM]", import.meta.env.VITE_SEND_TENANT_PARAM);
+
 // ⬆️ default timeout 30s (was 20s)
 export const api = axios.create({ baseURL: BASE, timeout: 30000 });
 
