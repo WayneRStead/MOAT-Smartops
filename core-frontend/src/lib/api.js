@@ -1,27 +1,33 @@
 // src/lib/api.js
 import axios from "axios";
 
-/**
- * Axios client with:
- * - Longer timeout + light retry on transient failures (GET/DELETE only)
- * - Auth + tenant header & optional ?orgId/body param
- * - Inspections aliasing:
- *     /templates, /inspection-templates  → /inspection-forms
- *     /inspections/templates            → /inspections/forms
- *     /inspection-forms                 → /inspections/forms
- *   (works even if the URL starts with /api or is absolute)
- * - Local mock fallback for:
- *     /inspections/forms        (templates)
- *     /inspections/submissions  (completed inspections)
- */
+function normalizeApiBase(raw) {
+  const fallback = "https://moat-smartops.onrender.com"; // safe prod fallback
+  let base = (raw || fallback).trim();
 
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000/api";
+  // If someone accidentally set http:// on Vercel, upgrade to https://
+  if (base.startsWith("http://") && typeof window !== "undefined" && window.location.protocol === "https:") {
+    base = base.replace(/^http:\/\//i, "https://");
+  }
+
+  // Remove trailing slashes
+  base = base.replace(/\/+$/g, "");
+
+  // Ensure it ends with /api exactly once
+  if (!/\/api$/i.test(base)) base = `${base}/api`;
+
+  return base;
+}
+
+const BASE = normalizeApiBase(import.meta.env.VITE_API_BASE);
 const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM  = import.meta.env.VITE_TENANT_PARAM  || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
 
-// ⬆️ default timeout 30s (was 20s)
-export const api = axios.create({ baseURL: BASE, timeout: 30000 });
+export const api = axios.create({
+  baseURL: BASE,
+  timeout: 30000,
+});
 
 /* ---------------- small utils ---------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
