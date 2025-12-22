@@ -3,6 +3,55 @@ import React from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { api } from "../lib/api";
 
+/* ----------------------- public API (no interceptors) ----------------------- */
+function getBackendOrigin() {
+  // Prefer explicit env var if set (recommended)
+  const envBase =
+    import.meta?.env?.VITE_API_BASE_URL ||
+    import.meta?.env?.VITE_BACKEND_URL ||
+    import.meta?.env?.VITE_API_URL ||
+    "";
+
+  // If envBase is like https://xyz.onrender.com/api -> origin becomes https://xyz.onrender.com
+  if (envBase) {
+    try {
+      const u = new URL(envBase);
+      return `${u.protocol}//${u.host}`;
+    } catch {}
+  }
+
+  // Fallback: assume same host (not ideal, but avoids hard crash)
+  return window.location.origin;
+}
+
+const BACKEND_ORIGIN = getBackendOrigin();
+const PUBLIC_BASE = `${BACKEND_ORIGIN}/public`;
+
+async function publicJson(path, { method = "GET", body, token } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${PUBLIC_BASE}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    // NOTE: we do NOT need cookies for JWT auth; leave credentials off
+  });
+
+  const text = await res.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+
+  if (!res.ok) {
+    const msg = data?.error || data?.message || `Request failed (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
 /* ----------------------------- small helpers ----------------------------- */
 function clearOrgCaches() {
   try {
@@ -54,14 +103,16 @@ function parseOrgsFromLogin(data) {
 /** Fallback discovery: ask backend which orgs this token can access. */
 async function fetchMembershipsViaWhoAmI() {
   try {
-    const { data } = await api.get("/public/whoami", { _maxRetries: 1 });
-    // normalize memberships array -> [{ id, name }]
+    const token = localStorage.getItem("token") || "";
+    const data = await publicJson("/whoami", { token });
+
     const raw =
       data?.memberships ||
       data?.orgs ||
       data?.organizations ||
       data?.user?.orgs ||
       [];
+
     const items = Array.isArray(raw) ? raw : [];
     return items.map((o) => ({
       id: String(o.orgId || o.id),
@@ -155,7 +206,7 @@ export default function PublicAuth() {
     setErr("");
     setLoading(true);
     try {
-      const { data } = await api.post("/public/login", { email, password });
+      const data = await publicJson("/login", { method: "POST", body: { email, password } });
       const token = data?.token;
       if (!token) throw new Error("No token returned");
 
@@ -178,7 +229,7 @@ export default function PublicAuth() {
     setLoading(true);
     try {
       const payload = { orgName, name, email, password };
-      const { data } = await api.post("/public/signup", payload);
+      const data = await publicJson("/signup", { method: "POST", body: payload });
       const token = data?.token;
       const oid = data?.orgId || data?.tenantId || null;
 
