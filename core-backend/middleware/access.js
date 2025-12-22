@@ -115,13 +115,12 @@ async function computeAccessibleUserIds(req, res, next) {
 
     // If you want “members only see themselves” (leaders still see members),
     // uncomment this block:
-    /*
+    
     if (myGroupIds.length && !myLeaderGroupIds.length) {
       for (const k of Array.from(visibleUserIdSet)) {
         if (k !== String(myOid || "")) visibleUserIdSet.delete(k);
       }
     }
-    */
 
     // Normalize id types to ObjectIds when possible
     req.accessibleUserIds = Array.from(visibleUserIdSet).map((s) => asOid(s) || s);
