@@ -63,34 +63,6 @@ const { computeAccessibleUserIds } = safeRequire('./middleware/access') || { com
 
 const app = express();
 
-/* ================= HARD CORS + PREFLIGHT FIX ================= */
-// This MUST be before cors(), routes, auth, etc.
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
-
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type,Authorization,X-Requested-With,X-Org-Id,x-org-id,X-Org,x-org,Cache-Control,Pragma,Expires,If-Modified-Since,If-None-Match"
-  );
-
-  // 🔴 CRITICAL: end preflight cleanly
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
-
 /* ---------------------------- App Middleware --------------------------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -110,13 +82,18 @@ if (allowedOrigins.size === 0) {
 
 const corsOptions = {
   origin(origin, cb) {
-    // non-browser clients (mobile, curl, server-to-server) often send no Origin
-    if (!origin) return cb(null, true);
+  // allow server-to-server / curl / health checks
+  if (!origin) return cb(null, true);
 
-    if (allowedOrigins.has(origin)) return cb(null, true);
+  // allow explicit origins from env list
+  if (allowedOrigins.has(origin)) return cb(null, true);
 
-    return cb(new Error(`CORS blocked origin: ${origin}`));
-  },
+  // allow Vercel preview deploys (optional but useful)
+  if (/^https:\/\/.*\.vercel\.app$/i.test(origin)) return cb(null, true);
+
+  return cb(new Error(`CORS blocked origin: ${origin}`));
+},
+
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
