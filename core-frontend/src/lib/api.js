@@ -1,34 +1,11 @@
 // src/lib/api.js
 import axios from "axios";
 
-/**
- * Axios client with:
- * - Correct base URL handling for Render backend + Vercel frontend
- * - Longer timeout + light retry on transient failures (GET/DELETE only)
- * - Auth + tenant header & optional ?orgId/body param
- * - Inspections aliasing:
- *     /templates, /inspection-templates  → /inspection-forms
- *     /inspections/templates            → /inspections/forms
- *     /inspection-forms                 → /inspections/forms
- *   (works even if the URL starts with /api or is absolute)
- * - Local mock fallback for:
- *     /inspections/forms        (templates)
- *     /inspections/submissions  (completed inspections)
- */
-
 /* ---------------- base URL ---------------- */
-
-// IMPORTANT: DO NOT auto-append "/api" here.
-// Your backend serves BOTH:
-//   /public/* and /api/public/*
-//   /auth/*   and /api/auth/*
-//   etc.
-// Your frontend uses paths like "/public/login", so base must be the ORIGIN only.
 function normalizeApiBase(raw) {
-  const fallback = "https://moat-smartops.onrender.com"; // safe prod fallback
+  const fallback = "https://moat-smartops.onrender.com";
   let base = String(raw || fallback).trim();
 
-  // Upgrade http->https if the site is https
   if (
     typeof window !== "undefined" &&
     window.location?.protocol === "https:" &&
@@ -37,9 +14,7 @@ function normalizeApiBase(raw) {
     base = base.replace(/^http:\/\//i, "https://");
   }
 
-  // Remove trailing slashes
   base = base.replace(/\/+$/g, "");
-
   return base;
 }
 
@@ -48,7 +23,6 @@ const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM = import.meta.env.VITE_TENANT_PARAM || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
 
-// Helpful once-off debug (you can remove later)
 if (typeof window !== "undefined") {
   // eslint-disable-next-line no-console
   console.log("[api] baseURL =", BASE);
@@ -67,8 +41,7 @@ const isIdempotent = (m) =>
 const isMultipart = (cfg) => {
   const h = cfg?.headers || {};
   const ct =
-    Object.entries(h).find(([k]) => k.toLowerCase() === "content-type")?.[1] ||
-    "";
+    Object.entries(h).find(([k]) => k.toLowerCase() === "content-type")?.[1] || "";
   return /multipart\/form-data/i.test(ct);
 };
 
@@ -79,7 +52,6 @@ function getToken() {
     return "";
   }
 }
-
 function safeParseJwt(t) {
   try {
     const p = t.split(".");
@@ -89,7 +61,6 @@ function safeParseJwt(t) {
     return null;
   }
 }
-
 function getTenantId() {
   try {
     const stored =
@@ -107,6 +78,32 @@ function getTenantId() {
   } catch {
     return null;
   }
+}
+
+/* ---------------- URL rewriting (THIS fixes your 404) ---------------- */
+/**
+ * Your UI calls /public/login and /public/signup.
+ * Some deployments only expose these under /api/public/*.
+ * So we rewrite:
+ *   /public/*  -> /api/public/*
+ *   /health    -> /api/health
+ */
+function rewriteToApi(u) {
+  if (!u) return u;
+
+  // If absolute URL, leave it alone (rare in your code)
+  if (/^[a-z]+:\/\//i.test(u)) return u;
+
+  // normalize duplicates
+  const url = String(u);
+
+  // public auth
+  if (/^\/public(\/|$)/i.test(url)) return url.replace(/^\/public/i, "/api/public");
+
+  // health convenience
+  if (/^\/health$/i.test(url)) return "/api/health";
+
+  return url;
 }
 
 /* ---------------- aliasing for templates ---------------- */
@@ -143,12 +140,8 @@ function applyAlias(path) {
 function aliasUrl(u) {
   try {
     const { path, qs } = splitUrl(u, BASE);
-
-    // If someone passes "/api/..." normalize to "/..." before aliasing rules
     const plain = path.replace(/^\/api(\/|$)/i, "/");
     const aliased = applyAlias(plain);
-
-    // Keep original URL if no change
     return aliased === plain ? u : aliased + qs;
   } catch {
     return u;
@@ -214,7 +207,6 @@ async function inspectionsMockAdapter(config) {
 
   const nowISO = () => new Date().toISOString();
 
-  /* --------- TEMPLATES (forms) --------- */
   if (isFormsPath(path)) {
     const m = path.match(/^\/(?:.+\/)?(?:inspections\/forms|inspection-forms)(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
@@ -297,7 +289,6 @@ async function inspectionsMockAdapter(config) {
     return resErr(config, 400, { error: "Unsupported forms op" });
   }
 
-  /* --------- SUBMISSIONS --------- */
   if (isSubsPath(path)) {
     const m = path.match(/^\/(?:.+\/)?inspections\/submissions(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
@@ -369,14 +360,16 @@ function shouldMockAfterError(respOrStatus, url) {
 /* ---------------- interceptors ---------------- */
 api.interceptors.request.use((config) => {
   try {
-    // Strip cache-control to avoid some unnecessary preflights
+    // Rewrite /public/* to /api/public/* (fixes your 404)
+    if (config.url) config.url = rewriteToApi(config.url);
+
+    // strip cache-control to avoid extra preflights
     if (config.headers) {
       for (const k of Object.keys(config.headers)) {
         if (k.toLowerCase() === "cache-control") delete config.headers[k];
       }
     }
 
-    // Default Accept
     config.headers = config.headers || {};
     if (!config.headers.Accept) config.headers.Accept = "application/json";
 
@@ -414,7 +407,6 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-/* ---- RETRY then MOCK fallback ---- */
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
@@ -441,7 +433,6 @@ api.interceptors.response.use(
       return api.request(cfg);
     }
 
-    // inspections mock fallback
     try {
       const { response, config } = error || {};
       if (!config) throw error;
@@ -456,17 +447,13 @@ api.interceptors.response.use(
         const retryCfg = { ...config, _mockRetried: true, adapter: inspectionsMockAdapter };
         return api.request(retryCfg);
       }
-    } catch {
-      /* ignore */
-    }
+    } catch {}
 
     return Promise.reject(error);
   }
 );
 
 /* ---------------- convenience APIs ---------------- */
-
-// ORG
 export async function getOrg() {
   const { data } = await api.get("/org");
   return data;
@@ -483,175 +470,4 @@ export async function uploadOrgLogo(file) {
     _noRetry: true,
   });
   return data;
-}
-
-// TASKS
-export async function taskAction(id, body) {
-  const { data } = await api.post(`/tasks/${id}/action`, body, { _noRetry: true });
-  return data;
-}
-export async function uploadTaskPhotos(id, files, meta = {}) {
-  const fd = new FormData();
-  [...files].forEach((f) => fd.append("photos", f));
-  if (meta.lat != null) fd.append("lat", String(meta.lat));
-  if (meta.lng != null) fd.append("lng", String(meta.lng));
-  const { data } = await api.post(`/tasks/${id}/photos`, fd, {
-    headers: { "Content-Type": "multipart/form-data" },
-    _noRetry: true,
-    timeout: 60000,
-  });
-  return data;
-}
-
-// Projects
-function projectIdFromTask(t) {
-  const v =
-    t?.projectId ??
-    t?.project_id ??
-    t?.projectID ??
-    t?.projectRef ??
-    t?.project ??
-    (t?.project && (t.project._id || t.project.id)) ??
-    (t?.project && t.project.$oid) ??
-    (t?.projectId && t.projectId.$oid) ??
-    null;
-
-  if (!v) return "";
-  if (typeof v === "string" || typeof v === "number") return String(v);
-  if (typeof v === "object") return v.$oid ? String(v.$oid) : String(v);
-  return String(v);
-}
-function taskMatchesProject(t, pid) {
-  const want = String(pid);
-  const got = projectIdFromTask(t);
-  return got && String(got) === want;
-}
-export async function listProjectTasks(projectId, params = {}) {
-  const p = { ...params, limit: params.limit ?? 1000, _maxRetries: 2 };
-  const accept = (data) => {
-    if (Array.isArray(data) && data.length > 0) return data;
-    if (Array.isArray(data?.items) && data.items.length > 0) return data.items;
-    if (Array.isArray(data?.tasks) && data.tasks.length > 0) return data.tasks;
-    return null;
-  };
-
-  try {
-    const { data } = await api.get(`/projects/${projectId}/tasks`, { params: p });
-    const ok = accept(data);
-    if (ok) return ok;
-  } catch {}
-
-  for (const key of ["projectId", "project", "project_id"]) {
-    try {
-      const { data } = await api.get(`/tasks`, { params: { ...p, [key]: projectId } });
-      const ok = accept(data);
-      if (ok) return ok.filter((t) => taskMatchesProject(t, projectId));
-    } catch {}
-  }
-
-  try {
-    const { data } = await api.get(`/tasks`, { params: p });
-    if (Array.isArray(data)) return data.filter((t) => taskMatchesProject(t, projectId));
-  } catch {}
-
-  return [];
-}
-export async function listProjects(params = {}) {
-  const { q, status, tag, limit } = params;
-  const { data } = await api.get("/projects", { params: { q, status, tag, limit }, _maxRetries: 2 });
-  return Array.isArray(data) ? data : [];
-}
-export async function getProject(id) {
-  const { data } = await api.get(`/projects/${id}`, { _maxRetries: 2 });
-  return data;
-}
-export async function createProject(payload) {
-  const { data } = await api.post("/projects", payload, { _noRetry: true });
-  return data;
-}
-export async function updateProject(id, payload) {
-  const { data } = await api.put(`/projects/${id}`, payload, { _noRetry: true });
-  return data;
-}
-export async function deleteProject(id) {
-  await api.delete(`/projects/${id}`, { _maxRetries: 2 });
-  return true;
-}
-export async function getProjectGeofences(id) {
-  const { data } = await api.get(`/projects/${id}/geofences`, { _maxRetries: 2 });
-  if (Array.isArray(data?.geoFences)) return data.geoFences;
-  if (Array.isArray(data?.fences)) return data.fences;
-  return Array.isArray(data) ? data : [];
-}
-export async function setProjectGeofences(id, geoFences) {
-  const { data } = await api.put(`/projects/${id}/geofences`, { geoFences }, { _noRetry: true });
-  return data;
-}
-export async function appendProjectGeofences(id, geoFences) {
-  const { data } = await api.patch(`/projects/${id}/geofences`, { geoFences }, { _noRetry: true });
-  return data;
-}
-export async function clearProjectGeofences(id) {
-  const { data } = await api.delete(`/projects/${id}/geofences`, { _noRetry: true });
-  return data;
-}
-export async function uploadProjectGeofences(id, file) {
-  const fd = new FormData();
-  fd.append("file", file);
-  const { data } = await api.post(`/projects/${id}/geofences/upload`, fd, {
-    headers: { "Content-Type": "multipart/form-data" },
-    _noRetry: true,
-    timeout: 60000,
-  });
-  return data;
-}
-
-// --- Milestones helper (robust; optional projectId for nested routes) ---
-export async function listTaskMilestones(taskId, projectId) {
-  const normalize = (arr) =>
-    (Array.isArray(arr) ? arr : []).map((m, i) => ({
-      id: String(m.id || m._id || m.key || i),
-      name: m.name || m.title || m.label || `Milestone ${i + 1}`,
-    }));
-
-  if (projectId) {
-    try {
-      const { data } = await api.get(`/projects/${projectId}/tasks/${taskId}/milestones`, { _maxRetries: 2 });
-      if (Array.isArray(data?.items)) return normalize(data.items);
-      if (Array.isArray(data?.milestones)) return normalize(data.milestones);
-      if (Array.isArray(data)) return normalize(data);
-    } catch {}
-  }
-
-  for (const url of [`/tasks/${taskId}/milestones`, `/tasks/${taskId}/checkpoints`, `/tasks/${taskId}/stages`]) {
-    try {
-      const { data } = await api.get(url, { _maxRetries: 2 });
-      if (Array.isArray(data?.items)) return normalize(data.items);
-      if (Array.isArray(data?.milestones)) return normalize(data.milestones);
-      if (Array.isArray(data?.checkpoints)) return normalize(data.checkpoints);
-      if (Array.isArray(data?.stages)) return normalize(data.stages);
-      if (Array.isArray(data)) return normalize(data);
-    } catch {}
-  }
-
-  try {
-    const { data: t } = await api.get(`/tasks/${taskId}`, { _maxRetries: 2 });
-    const raw = t?.milestones || t?.checkpoints || t?.stages || t?.phases || t?.steps || [];
-    return normalize(raw);
-  } catch {
-    return [];
-  }
-}
-
-// quick role checker
-export function currentUserHasRole(role) {
-  try {
-    const tok = localStorage.getItem("token") || "";
-    const payload = JSON.parse(atob(tok.split(".")[1] || "")) || {};
-    const r = payload.role || payload.roles || "";
-    if (Array.isArray(r)) return r.map(String).includes(String(role));
-    return String(r) === String(role);
-  } catch {
-    return false;
-  }
 }
