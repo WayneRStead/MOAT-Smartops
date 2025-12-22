@@ -15,7 +15,9 @@ import axios from "axios";
  *     /inspections/submissions  (completed inspections)
  */
 
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000/api";
+const BASE =
+  import.meta.env.VITE_API_BASE ||
+  (typeof window !== "undefined" ? window.location.origin : "https://moat-smartops.onrender.com");
 const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM  = import.meta.env.VITE_TENANT_PARAM  || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
