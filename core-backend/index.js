@@ -63,6 +63,34 @@ const { computeAccessibleUserIds } = safeRequire('./middleware/access') || { com
 
 const app = express();
 
+/* ================= HARD CORS + PREFLIGHT FIX ================= */
+// This MUST be before cors(), routes, auth, etc.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization,X-Requested-With,X-Org-Id,x-org-id,X-Org,x-org,Cache-Control,Pragma,Expires,If-Modified-Since,If-None-Match"
+  );
+
+  // 🔴 CRITICAL: end preflight cleanly
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
 /* ---------------------------- App Middleware --------------------------- */
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
