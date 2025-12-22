@@ -1,20 +1,28 @@
 // src/lib/api.js
 import axios from "axios";
 
-/* ---------------- base URL ---------------- */
+/**
+ * Goals:
+ * - BASE is ORIGIN only (https://moat-smartops.onrender.com)
+ * - For public auth endpoints, auto-try /api/public/* first, then /public/* if 404
+ * - Avoid build/runtime issues with crypto.randomUUID by using a safe fallback
+ */
+
 function normalizeApiBase(raw) {
   const fallback = "https://moat-smartops.onrender.com";
   let base = String(raw || fallback).trim();
 
-  if (
-    typeof window !== "undefined" &&
-    window.location?.protocol === "https:" &&
-    base.toLowerCase().startsWith("http://")
-  ) {
+  // Remove trailing slashes
+  base = base.replace(/\/+$/g, "");
+
+  // If someone set /api by mistake, strip it (BASE must be origin only)
+  base = base.replace(/\/api$/i, "");
+
+  // If running under https and base is http, upgrade
+  if (typeof window !== "undefined" && window.location?.protocol === "https:") {
     base = base.replace(/^http:\/\//i, "https://");
   }
 
-  base = base.replace(/\/+$/g, "");
   return base;
 }
 
@@ -33,7 +41,7 @@ export const api = axios.create({
   timeout: 30000,
 });
 
-/* ---------------- small utils ---------------- */
+/* ---------------- helpers ---------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isIdempotent = (m) =>
   ["get", "delete", "head", "options"].includes(String(m || "get").toLowerCase());
@@ -52,6 +60,7 @@ function getToken() {
     return "";
   }
 }
+
 function safeParseJwt(t) {
   try {
     const p = t.split(".");
@@ -61,6 +70,7 @@ function safeParseJwt(t) {
     return null;
   }
 }
+
 function getTenantId() {
   try {
     const stored =
@@ -80,40 +90,18 @@ function getTenantId() {
   }
 }
 
-/* ---------------- URL rewriting (THIS fixes your 404) ---------------- */
-/**
- * Your UI calls /public/login and /public/signup.
- * Some deployments only expose these under /api/public/*.
- * So we rewrite:
- *   /public/*  -> /api/public/*
- *   /health    -> /api/health
- */
-function rewriteToApi(u) {
-  if (!u) return u;
-
-  // If absolute URL, leave it alone (rare in your code)
-  if (/^[a-z]+:\/\//i.test(u)) return u;
-
-  // normalize duplicates
-  const url = String(u);
-
-  // public auth
-  if (/^\/public(\/|$)/i.test(url)) return url.replace(/^\/public/i, "/api/public");
-
-  // health convenience
-  if (/^\/health$/i.test(url)) return "/api/health";
-
-  return url;
+/* ---------- safe id generator (prevents Vercel/Node env crypto issues) ---------- */
+function newId() {
+  // avoid assuming global crypto exists everywhere
+  try {
+    if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch {}
+  return `id_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 }
 
-/* ---------------- aliasing for templates ---------------- */
-const INSPECTION_ALIAS_RULES = [
-  { rx: /^\/templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
-  { rx: /^\/inspection-templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
-  { rx: /^\/inspections\/templates(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
-  { rx: /^\/inspection-forms(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
-];
-
+/* ---------------- path helpers ---------------- */
 function splitUrl(u, base) {
   try {
     if (!u) return { path: "/", qs: "" };
@@ -128,6 +116,32 @@ function splitUrl(u, base) {
     return { path: path || "/", qs };
   }
 }
+
+/**
+ * Public auth endpoints: allow calling "/public/login" in UI,
+ * but actually hit "/api/public/login" first (common deployment),
+ * and fallback to "/public/login" if backend only exposes that.
+ */
+function preferApiPublic(u) {
+  if (!u) return u;
+  if (/^[a-z]+:\/\//i.test(u)) return u; // absolute url untouched
+
+  const { path, qs } = splitUrl(u, BASE);
+
+  // If UI calls /public/..., rewrite to /api/public/...
+  if (/^\/public(\/|$)/i.test(path)) {
+    return path.replace(/^\/public/i, "/api/public") + qs;
+  }
+  return u;
+}
+
+/* ---------------- aliasing for inspections templates ---------------- */
+const INSPECTION_ALIAS_RULES = [
+  { rx: /^\/templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
+  { rx: /^\/inspection-templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
+  { rx: /^\/inspections\/templates(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
+  { rx: /^\/inspection-forms(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
+];
 
 function applyAlias(path) {
   for (const r of INSPECTION_ALIAS_RULES) {
@@ -167,9 +181,6 @@ function lsSave(key, val) {
     localStorage.setItem(key, JSON.stringify(val));
   } catch {}
 }
-function newId() {
-  return crypto?.randomUUID?.() || `id_${Math.random().toString(36).slice(2)}_${Date.now()}`;
-}
 
 function resOK(config, data, status = 200) {
   return { data, status, statusText: "OK", headers: {}, config, request: {} };
@@ -180,6 +191,7 @@ function resErr(config, status = 404, data = { error: "Not found" }) {
   err.config = config;
   throw err;
 }
+
 function actorFromToken() {
   const p = safeParseJwt(getToken()) || {};
   return { userId: p._id || p.sub || null, email: p.email || null };
@@ -207,109 +219,41 @@ async function inspectionsMockAdapter(config) {
 
   const nowISO = () => new Date().toISOString();
 
+  // Templates
   if (isFormsPath(path)) {
     const m = path.match(/^\/(?:.+\/)?(?:inspections\/forms|inspection-forms)(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
     let items = lsLoad(LS_FORMS, []);
 
-    if (method === "get" && !id) {
-      const limit = Number(config.params?.limit) || 1000;
-      const { projectId, taskId, role } = config.params || {};
-      let out = items.slice();
-      if (projectId || taskId || role) {
-        out = out.filter((f) => {
-          const s = f.scope || {};
-          if (s.isGlobal) return true;
-          const prj =
-            !projectId ||
-            (Array.isArray(s.projectIds) && s.projectIds.map(String).includes(String(projectId)));
-          const tsk =
-            !taskId ||
-            (Array.isArray(s.taskIds) && s.taskIds.map(String).includes(String(taskId)));
-          const rol = !role || (Array.isArray(s.roles) && s.roles.includes(role));
-          return prj && tsk && rol;
-        });
-      }
-      out.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
-      return resOK(config, out.slice(0, limit), 200);
-    }
-
+    if (method === "get" && !id) return resOK(config, items, 200);
     if (method === "get" && id) {
       const f = items.find((x) => String(x._id || x.id) === String(id));
       if (!f) return resErr(config, 404, { error: "Form not found" });
       return resOK(config, f, 200);
     }
-
     if (method === "post" && !id) {
       const now = nowISO();
       const title = (body.title || body.name || "").trim() || "Untitled form";
-      const created = {
-        _id: newId(),
-        title,
-        name: title,
-        version: body.version ?? 1,
-        fields: Array.isArray(body.fields) ? body.fields : [],
-        status: body.status || "draft",
-        scope: body.scope || { isGlobal: true, projectIds: [], taskIds: [], roles: [] },
-        createdAt: now,
-        updatedAt: now,
-        ...body,
-      };
-      created.title = created.title || created.name || "Untitled form";
-      created.name = created.name || created.title;
+      const created = { _id: newId(), title, name: title, createdAt: now, updatedAt: now, ...body };
       items.push(created);
       lsSave(LS_FORMS, items);
       return resOK(config, created, 201);
     }
-
-    if ((method === "put" || method === "patch") && id) {
-      const idx = items.findIndex((x) => String(x._id || x.id) === String(id));
-      if (idx < 0) return resErr(config, 404, { error: "Form not found" });
-      const merged = {
-        ...items[idx],
-        ...body,
-        title: (body.title || body.name || items[idx].title || items[idx].name || "Untitled form").trim(),
-        name: (body.name || body.title || items[idx].name || items[idx].title || "Untitled form").trim(),
-        updatedAt: nowISO(),
-      };
-      merged.scope = merged.scope || { isGlobal: true, projectIds: [], taskIds: [], roles: [] };
-      items[idx] = merged;
-      lsSave(LS_FORMS, items);
-      return resOK(config, merged, 200);
-    }
-
-    if (method === "delete" && id) {
-      const before = items.length;
-      items = items.filter((x) => String(x._id || x.id) !== String(id));
-      if (items.length === before) return resErr(config, 404, { error: "Form not found" });
-      lsSave(LS_FORMS, items);
-      return resOK(config, { ok: true }, 200);
-    }
-
     return resErr(config, 400, { error: "Unsupported forms op" });
   }
 
+  // Submissions
   if (isSubsPath(path)) {
     const m = path.match(/^\/(?:.+\/)?inspections\/submissions(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
     let items = lsLoad(LS_SUBMS, []);
 
-    if (method === "get" && !id) {
-      const { templateId, projectId, taskId, limit } = config.params || {};
-      let out = items.slice();
-      if (templateId) out = out.filter((s) => String(s.templateId) === String(templateId));
-      if (projectId) out = out.filter((s) => String(s.projectId || "") === String(projectId));
-      if (taskId) out = out.filter((s) => String(s.taskId || "") === String(taskId));
-      out.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0));
-      return resOK(config, out.slice(0, Number(limit) || 500), 200);
-    }
-
+    if (method === "get" && !id) return resOK(config, items, 200);
     if (method === "get" && id) {
       const s = items.find((x) => String(x._id || x.id) === String(id));
       if (!s) return resErr(config, 404, { error: "Submission not found" });
       return resOK(config, s, 200);
     }
-
     if (method === "post" && !id) {
       const now = nowISO();
       const actor = actorFromToken();
@@ -318,32 +262,6 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_SUBMS, items);
       return resOK(config, created, 201);
     }
-
-    if ((method === "put" || method === "patch") && id) {
-      const idx = items.findIndex((x) => String(x._id || x.id) === String(id));
-      if (idx < 0) return resErr(config, 404, { error: "Submission not found" });
-      const prev = items[idx];
-      const merged = {
-        ...prev,
-        ...body,
-        managerNote: body.managerNote != null ? body.managerNote : prev.managerNote,
-        status: body.status || prev.status,
-        signoff: { ...(prev.signoff || {}), ...(body.signoff || {}) },
-        updatedAt: nowISO(),
-      };
-      items[idx] = merged;
-      lsSave(LS_SUBMS, items);
-      return resOK(config, merged, 200);
-    }
-
-    if (method === "delete" && id) {
-      const before = items.length;
-      items = items.filter((x) => String(x._id || x.id) !== String(id));
-      if (items.length === before) return resErr(config, 404, { error: "Submission not found" });
-      lsSave(LS_SUBMS, items);
-      return resOK(config, { ok: true }, 200);
-    }
-
     return resErr(config, 400, { error: "Unsupported submissions op" });
   }
 
@@ -360,10 +278,10 @@ function shouldMockAfterError(respOrStatus, url) {
 /* ---------------- interceptors ---------------- */
 api.interceptors.request.use((config) => {
   try {
-    // Rewrite /public/* to /api/public/* (fixes your 404)
-    if (config.url) config.url = rewriteToApi(config.url);
+    // Prefer /api/public/* when UI calls /public/*
+    if (config.url) config.url = preferApiPublic(config.url);
 
-    // strip cache-control to avoid extra preflights
+    // Strip cache-control
     if (config.headers) {
       for (const k of Object.keys(config.headers)) {
         if (k.toLowerCase() === "cache-control") delete config.headers[k];
@@ -388,11 +306,12 @@ api.interceptors.request.use((config) => {
         if (method === "get" || method === "delete") {
           config.params = config.params || {};
           if (!(TENANT_PARAM in config.params)) config.params[TENANT_PARAM] = tenantId;
-        } else if (method === "post" || method === "put" || method === "patch") {
+        } else if (["post", "put", "patch"].includes(method)) {
           if (config.data instanceof FormData) {
             if (!config.data.has(TENANT_PARAM)) config.data.append(TENANT_PARAM, tenantId);
           } else if (config.data && typeof config.data === "object") {
-            if (!(TENANT_PARAM in config.data)) config.data = { [TENANT_PARAM]: tenantId, ...config.data };
+            if (!(TENANT_PARAM in config.data))
+              config.data = { [TENANT_PARAM]: tenantId, ...config.data };
           } else {
             config.data = { [TENANT_PARAM]: tenantId };
           }
@@ -407,6 +326,7 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/* ---- RETRY then MOCK fallback ---- */
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
@@ -433,6 +353,17 @@ api.interceptors.response.use(
       return api.request(cfg);
     }
 
+    // If public endpoint 404s under /api/public, fallback to /public automatically
+    try {
+      const status = error?.response?.status;
+      const originalUrl = cfg?.url || "";
+      if (status === 404 && /^\/api\/public(\/|$)/i.test(originalUrl) && !cfg._publicFallbackTried) {
+        const fallbackUrl = originalUrl.replace(/^\/api\/public/i, "/public");
+        return api.request({ ...cfg, url: fallbackUrl, _publicFallbackTried: true });
+      }
+    } catch {}
+
+    // inspections mock fallback
     try {
       const { response, config } = error || {};
       if (!config) throw error;
@@ -454,6 +385,7 @@ api.interceptors.response.use(
 );
 
 /* ---------------- convenience APIs ---------------- */
+// ORG
 export async function getOrg() {
   const { data } = await api.get("/org");
   return data;
