@@ -4,19 +4,20 @@ import { Link } from "react-router-dom";
 import { login } from "../services/auth";
 
 export default function SignIn() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("admin@smartops");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  async function onSubmit(e) {
+   async function onSubmit(e) {
     e.preventDefault();
     setErr(null);
     setLoading(true);
     try {
       await login({ email, password });
-      window.location.href = "/"; // or navigate('/'), depending on your router
+      navigate("/projects-dashboard", { replace: true }); // or "/"
     } catch (e) {
       const msg = e?.response?.data?.error || "Login failed";
       setErr(msg);
