@@ -1,33 +1,21 @@
 {
   "rewrites": [
-    { "source": "/public/(.*)", "destination": "https://moat-smartops.onrender.com/public/$1" },
-    { "source": "/api/public/(.*)", "destination": "https://moat-smartops.onrender.com/api/public/$1" },
+    {
+      "source": "/api/:path*",
+      "destination": "https://moat-smartops.onrender.com/api/:path*"
+    },
+    {
+      "source": "/public/:path*",
+      "destination": "https://moat-smartops.onrender.com/public/:path*"
+    },
+    {
+      "source": "/auth/:path*",
+      "destination": "https://moat-smartops.onrender.com/auth/:path*"
+    },
 
-    { "source": "/auth/(.*)", "destination": "https://moat-smartops.onrender.com/auth/$1" },
-    { "source": "/api/auth/(.*)", "destination": "https://moat-smartops.onrender.com/api/auth/$1" },
-
-    { "source": "/org/(.*)", "destination": "https://moat-smartops.onrender.com/org/$1" },
-    { "source": "/api/org/(.*)", "destination": "https://moat-smartops.onrender.com/api/org/$1" },
-
-    { "source": "/users/(.*)", "destination": "https://moat-smartops.onrender.com/users/$1" },
-    { "source": "/api/users/(.*)", "destination": "https://moat-smartops.onrender.com/api/users/$1" },
-
-    { "source": "/clockings/(.*)", "destination": "https://moat-smartops.onrender.com/clockings/$1" },
-    { "source": "/api/clockings/(.*)", "destination": "https://moat-smartops.onrender.com/api/clockings/$1" },
-
-    { "source": "/projects/(.*)", "destination": "https://moat-smartops.onrender.com/projects/$1" },
-    { "source": "/api/projects/(.*)", "destination": "https://moat-smartops.onrender.com/api/projects/$1" },
-
-    { "source": "/tasks/(.*)", "destination": "https://moat-smartops.onrender.com/tasks/$1" },
-    { "source": "/api/tasks/(.*)", "destination": "https://moat-smartops.onrender.com/api/tasks/$1" },
-
-    { "source": "/inspections/(.*)", "destination": "https://moat-smartops.onrender.com/inspections/$1" },
-    { "source": "/api/inspections/(.*)", "destination": "https://moat-smartops.onrender.com/api/inspections/$1" },
-
-    { "source": "/files/(.*)", "destination": "https://moat-smartops.onrender.com/files/$1" },
-    { "source": "/api/files/(.*)", "destination": "https://moat-smartops.onrender.com/api/files/$1" },
-
-    { "source": "/uploads/(.*)", "destination": "https://moat-smartops.onrender.com/uploads/$1" },
-    { "source": "/api/uploads/(.*)", "destination": "https://moat-smartops.onrender.com/api/uploads/$1" }
+      {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }
