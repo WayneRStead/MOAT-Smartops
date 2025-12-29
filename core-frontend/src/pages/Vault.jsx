@@ -473,6 +473,14 @@ export default function Vault() {
               placeholder="safety, onboarding"
             />
           </label>
+          <label className="text-sm md:col-span-2">
+            Upload / Replace file
+            <input
+              className="border p-2 w-full"
+              type="file"
+              onChange={(e) => setEditFile(e.target.files?.[0] || null)}
+            />
+          </label>
           <div className="md:col-span-2 flex items-center gap-2 pt-1">
             <button className="px-3 py-2 bg-black text-white rounded" type="submit">
               Create
