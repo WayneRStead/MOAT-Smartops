@@ -16,6 +16,14 @@
       {
       "source": "/(.*)",
       "destination": "/index.html"
+    },
+    {
+      "source": "/files/:path*",
+      "destination": "https://moat-smartops.onrender.com/files/:path*"
+    },
+    {
+      "source": "/uploads/:path*",
+      "destination": "https://moat-smartops.onrender.com/uploads/:path*"
     }
   ]
 }
