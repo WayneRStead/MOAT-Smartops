@@ -474,12 +474,15 @@ export default function Vault() {
             />
           </label>
           <label className="text-sm md:col-span-2">
-            Upload / Replace file
+            Upload
             <input
               className="border p-2 w-full"
               type="file"
-              onChange={(e) => setEditFile(e.target.files?.[0] || null)}
+               onChange={(e) => setEditFile(e.target.files?.[0] || null)}
             />
+          <div className="text-xs text-gray-600 mt-1">
+            Current: {editDoc.latest?.filename || "—"}
+          </div>
           </label>
           <div className="md:col-span-2 flex items-center gap-2 pt-1">
             <button className="px-3 py-2 bg-black text-white rounded" type="submit">
