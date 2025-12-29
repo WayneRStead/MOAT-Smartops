@@ -14,21 +14,23 @@ import axios from "axios";
  *     /inspections/forms        (templates)
  *     /inspections/submissions  (completed inspections)
  *
- * IMPORTANT FIX:
- * Some parts of the app are likely using the *global* axios instance (import axios from "axios")
- * and calling relative URLs like "/public/login". On Vercel that becomes:
- *   https://moat-smartops.vercel.app/public/login  (404)
+ * DEPLOY FIXES:
+ * 1) Some parts of the app likely use the *global* axios instance and call relative URLs
+ *    like "/public/login". On Vercel this becomes https://moat-smartops.vercel.app/public/login (404).
+ *    We force axios.defaults.baseURL to the backend origin so those calls go to Render.
  *
- * This file now also sets axios.defaults.baseURL so those calls go to your backend origin.
+ * 2) File URLs served from the backend should be opened from the backend origin.
+ *    Use the exported fileUrl(path) helper when rendering links/src attributes.
  */
 
 function normalizeBase(raw) {
   const fallback = "https://moat-smartops.onrender.com";
-  let base =
-    String(raw || "").trim() ||
-    (typeof window !== "undefined" ? window.location.origin : fallback);
+  let base = String(raw || "").trim();
 
-  // If someone ever sets http:// while site is https, upgrade.
+  // If env is missing, fall back to Render (NOT window.origin, because that breaks in Vercel)
+  if (!base) base = fallback;
+
+  // Upgrade http -> https if page is https
   if (
     typeof window !== "undefined" &&
     window.location?.protocol === "https:" &&
@@ -43,17 +45,31 @@ function normalizeBase(raw) {
   return base || fallback;
 }
 
+// IMPORTANT: BASE should be the BACKEND origin (with optional /api if you set it that way).
+// Your Vercel env shows VITE_API_BASE = https://moat-smartops.onrender.com (good).
 const BASE = normalizeBase(import.meta.env.VITE_API_BASE);
 const TENANT_HEADER = import.meta.env.VITE_TENANT_HEADER || "X-Org-Id";
 const TENANT_PARAM = import.meta.env.VITE_TENANT_PARAM || "orgId";
 const SEND_TENANT_PARAM = (import.meta.env.VITE_SEND_TENANT_PARAM || "0") === "1";
 
+// Backend ORIGIN (strip any trailing /api if someone sets it that way later)
+const BACKEND_ORIGIN = BASE.replace(/\/api\/?$/i, "");
+
 /* ---- Debug (leave while diagnosing) ---- */
-console.log("[VITE_API_BASE]", import.meta.env.VITE_API_BASE);
-console.log("[VITE_TENANT_HEADER]", import.meta.env.VITE_TENANT_HEADER);
-console.log("[VITE_TENANT_PARAM]", import.meta.env.VITE_TENANT_PARAM);
-console.log("[VITE_SEND_TENANT_PARAM]", import.meta.env.VITE_SEND_TENANT_PARAM);
-console.log("[api] normalized BASE =", BASE);
+try {
+  // eslint-disable-next-line no-console
+  console.log("[VITE_API_BASE]", import.meta.env.VITE_API_BASE);
+  // eslint-disable-next-line no-console
+  console.log("[VITE_TENANT_HEADER]", import.meta.env.VITE_TENANT_HEADER);
+  // eslint-disable-next-line no-console
+  console.log("[VITE_TENANT_PARAM]", import.meta.env.VITE_TENANT_PARAM);
+  // eslint-disable-next-line no-console
+  console.log("[VITE_SEND_TENANT_PARAM]", import.meta.env.VITE_SEND_TENANT_PARAM);
+  // eslint-disable-next-line no-console
+  console.log("[api] BASE =", BASE);
+  // eslint-disable-next-line no-console
+  console.log("[api] BACKEND_ORIGIN =", BACKEND_ORIGIN);
+} catch {}
 
 /* =========================================================
    ✅ DROP-IN FIX (Option 1): force global axios defaults too
@@ -73,6 +89,7 @@ export const api = axios.create({
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isIdempotent = (m) =>
   ["get", "delete", "head", "options"].includes(String(m || "get").toLowerCase());
+
 const isMultipart = (cfg) => {
   const h = cfg?.headers || {};
   const ct =
@@ -87,6 +104,7 @@ function getToken() {
     return "";
   }
 }
+
 function safeParseJwt(t) {
   try {
     const p = t.split(".");
@@ -96,9 +114,9 @@ function safeParseJwt(t) {
     return null;
   }
 }
+
 function getTenantId() {
   try {
-    // ✅ Added support for currentOrgId (your auth flow stores this)
     const stored =
       localStorage.getItem("currentOrgId") ||
       sessionStorage.getItem("currentOrgId") ||
@@ -106,7 +124,9 @@ function getTenantId() {
       sessionStorage.getItem("orgId") ||
       localStorage.getItem("tenantId") ||
       sessionStorage.getItem("tenantId");
+
     if (stored) return stored;
+
     const payload = safeParseJwt(getToken());
     return payload?.orgId || payload?.tenantId || payload?.org || payload?.tenant || null;
   } catch {
@@ -114,17 +134,19 @@ function getTenantId() {
   }
 }
 
+/* ---------------- FILE URL helper (use in UI) ---------------- */
+export function fileUrl(p) {
+  if (!p) return "";
+  if (/^https?:\/\//i.test(p)) return p;
+  const path = String(p).startsWith("/") ? String(p) : `/${p}`;
+  return `${BACKEND_ORIGIN}${path}`;
+}
+
 /* ---------------- aliasing for templates ---------------- */
 const INSPECTION_ALIAS_RULES = [
   { rx: /^\/templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
-  {
-    rx: /^\/inspection-templates(\/.*)?$/i,
-    to: (m) => `/inspection-forms${m[1] || ""}`,
-  },
-  {
-    rx: /^\/inspections\/templates(\/.*)?$/i,
-    to: (m) => `/inspections/forms${m[1] || ""}`,
-  },
+  { rx: /^\/inspection-templates(\/.*)?$/i, to: (m) => `/inspection-forms${m[1] || ""}` },
+  { rx: /^\/inspections\/templates(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
   { rx: /^\/inspection-forms(\/.*)?$/i, to: (m) => `/inspections/forms${m[1] || ""}` },
 ];
 
@@ -142,6 +164,7 @@ function splitUrl(u, base) {
     return { path: path || "/", qs };
   }
 }
+
 function applyAlias(path) {
   for (const r of INSPECTION_ALIAS_RULES) {
     const m = path.match(r.rx);
@@ -149,11 +172,16 @@ function applyAlias(path) {
   }
   return path;
 }
+
 function aliasUrl(u) {
   try {
     const { path, qs } = splitUrl(u, BASE);
+
+    // If someone passes "/api/..." normalize to "/..." before aliasing rules
     const plain = path.replace(/^\/api(\/|$)/i, "/");
     const aliased = applyAlias(plain);
+
+    // Keep original URL if no change
     return aliased === plain ? u : aliased + qs;
   } catch {
     return u;
@@ -221,9 +249,7 @@ async function inspectionsMockAdapter(config) {
 
   /* --------- TEMPLATES (forms) --------- */
   if (isFormsPath(path)) {
-    const m = path.match(
-      /^\/(?:.+\/)?(?:inspections\/forms|inspection-forms)(?:\/([^/?#]+))?/i
-    );
+    const m = path.match(/^\/(?:.+\/)?(?:inspections\/forms|inspection-forms)(?:\/([^/?#]+))?/i);
     const id = m && m[1] ? decodeURIComponent(m[1]) : null;
     let items = lsLoad(LS_FORMS, []);
 
@@ -248,11 +274,13 @@ async function inspectionsMockAdapter(config) {
       out.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
       return resOK(config, out.slice(0, limit), 200);
     }
+
     if (method === "get" && id) {
       const f = items.find((x) => String(x._id || x.id) === String(id));
       if (!f) return resErr(config, 404, { error: "Form not found" });
       return resOK(config, f, 200);
     }
+
     if (method === "post" && !id) {
       const now = nowISO();
       const title = (body.title || body.name || "").trim() || "Untitled form";
@@ -274,6 +302,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_FORMS, items);
       return resOK(config, created, 201);
     }
+
     if ((method === "put" || method === "patch") && id) {
       const idx = items.findIndex((x) => String(x._id || x.id) === String(id));
       if (idx < 0) return resErr(config, 404, { error: "Form not found" });
@@ -289,6 +318,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_FORMS, items);
       return resOK(config, merged, 200);
     }
+
     if (method === "delete" && id) {
       const before = items.length;
       items = items.filter((x) => String(x._id || x.id) !== String(id));
@@ -296,6 +326,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_FORMS, items);
       return resOK(config, { ok: true }, 200);
     }
+
     return resErr(config, 400, { error: "Unsupported forms op" });
   }
 
@@ -314,11 +345,13 @@ async function inspectionsMockAdapter(config) {
       out.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0));
       return resOK(config, out.slice(0, Number(limit) || 500), 200);
     }
+
     if (method === "get" && id) {
       const s = items.find((x) => String(x._id || x.id) === String(id));
       if (!s) return resErr(config, 404, { error: "Submission not found" });
       return resOK(config, s, 200);
     }
+
     if (method === "post" && !id) {
       const now = nowISO();
       const actor = actorFromToken();
@@ -327,6 +360,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_SUBMS, items);
       return resOK(config, created, 201);
     }
+
     if ((method === "put" || method === "patch") && id) {
       const idx = items.findIndex((x) => String(x._id || x.id) === String(id));
       if (idx < 0) return resErr(config, 404, { error: "Submission not found" });
@@ -343,6 +377,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_SUBMS, items);
       return resOK(config, merged, 200);
     }
+
     if (method === "delete" && id) {
       const before = items.length;
       items = items.filter((x) => String(x._id || x.id) !== String(id));
@@ -350,6 +385,7 @@ async function inspectionsMockAdapter(config) {
       lsSave(LS_SUBMS, items);
       return resOK(config, { ok: true }, 200);
     }
+
     return resErr(config, 400, { error: "Unsupported submissions op" });
   }
 
@@ -372,6 +408,7 @@ api.interceptors.request.use((config) => {
         if (k.toLowerCase() === "cache-control") delete config.headers[k];
       }
     }
+
     // default Accept
     config.headers = config.headers || {};
     if (!config.headers.Accept) config.headers.Accept = "application/json";
@@ -395,8 +432,7 @@ api.interceptors.request.use((config) => {
           if (config.data instanceof FormData) {
             if (!config.data.has(TENANT_PARAM)) config.data.append(TENANT_PARAM, tenantId);
           } else if (config.data && typeof config.data === "object") {
-            if (!(TENANT_PARAM in config.data))
-              config.data = { [TENANT_PARAM]: tenantId, ...config.data };
+            if (!(TENANT_PARAM in config.data)) config.data = { [TENANT_PARAM]: tenantId, ...config.data };
           } else {
             config.data = { [TENANT_PARAM]: tenantId };
           }
@@ -404,9 +440,20 @@ api.interceptors.request.use((config) => {
       }
     }
 
-    // Aliases
+    // Inspections aliases
     if (config.url) config.url = aliasUrl(config.url);
+
+    // IMPORTANT: if someone uses this api instance to fetch /files or /uploads,
+    // make sure it goes to backend origin (not Vercel).
+    // (This doesn't affect <img src> etc; those should use fileUrl() in UI.)
+    if (config.url) {
+      const { path } = splitUrl(config.url, BASE);
+      if (/^\/(files|uploads)\b/i.test(path)) {
+        config.baseURL = BACKEND_ORIGIN;
+      }
+    }
   } catch {}
+
   return config;
 });
 
@@ -431,9 +478,9 @@ api.interceptors.response.use(
 
     if (safeToRetry) {
       cfg._retryCount = count + 1;
-      const base = 300 * Math.pow(2, count);
+      const baseDelay = 300 * Math.pow(2, count);
       const jitter = Math.random() * 300;
-      await sleep(base + jitter);
+      await sleep(baseDelay + jitter);
       return api.request(cfg);
     }
 
@@ -446,12 +493,15 @@ api.interceptors.response.use(
         const retryCfg = { ...config, _mockRetried: true, adapter: inspectionsMockAdapter };
         return api.request(retryCfg);
       }
+
       const pathOnly = splitUrl(config.url, BASE).path;
       if (!response && (isFormsPath(pathOnly) || isSubsPath(pathOnly)) && !config._mockRetried) {
         const retryCfg = { ...config, _mockRetried: true, adapter: inspectionsMockAdapter };
         return api.request(retryCfg);
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
 
     return Promise.reject(error);
   }
@@ -508,6 +558,7 @@ function projectIdFromTask(t) {
     (t?.project && t.project.$oid) ??
     (t?.projectId && t.projectId.$oid) ??
     null;
+
   if (!v) return "";
   if (typeof v === "string" || typeof v === "number") return String(v);
   if (typeof v === "object") return v.$oid ? String(v.$oid) : String(v);
@@ -526,11 +577,13 @@ export async function listProjectTasks(projectId, params = {}) {
     if (Array.isArray(data?.tasks) && data.tasks.length > 0) return data.tasks;
     return null;
   };
+
   try {
     const { data } = await api.get(`/projects/${projectId}/tasks`, { params: p });
     const ok = accept(data);
     if (ok) return ok;
   } catch {}
+
   for (const key of ["projectId", "project", "project_id"]) {
     try {
       const { data } = await api.get(`/tasks`, { params: { ...p, [key]: projectId } });
@@ -538,18 +591,17 @@ export async function listProjectTasks(projectId, params = {}) {
       if (ok) return ok.filter((t) => taskMatchesProject(t, projectId));
     } catch {}
   }
+
   try {
     const { data } = await api.get(`/tasks`, { params: p });
     if (Array.isArray(data)) return data.filter((t) => taskMatchesProject(t, projectId));
   } catch {}
+
   return [];
 }
 export async function listProjects(params = {}) {
   const { q, status, tag, limit } = params;
-  const { data } = await api.get("/projects", {
-    params: { q, status, tag, limit },
-    _maxRetries: 2,
-  });
+  const { data } = await api.get("/projects", { params: { q, status, tag, limit }, _maxRetries: 2 });
   return Array.isArray(data) ? data : [];
 }
 export async function getProject(id) {
@@ -579,11 +631,7 @@ export async function setProjectGeofences(id, geoFences) {
   return data;
 }
 export async function appendProjectGeofences(id, geoFences) {
-  const { data } = await api.patch(
-    `/projects/${id}/geofences`,
-    { geoFences },
-    { _noRetry: true }
-  );
+  const { data } = await api.patch(`/projects/${id}/geofences`, { geoFences }, { _noRetry: true });
   return data;
 }
 export async function clearProjectGeofences(id) {
@@ -611,21 +659,14 @@ export async function listTaskMilestones(taskId, projectId) {
 
   if (projectId) {
     try {
-      const { data } = await api.get(`/projects/${projectId}/tasks/${taskId}/milestones`, {
-        _maxRetries: 2,
-      });
+      const { data } = await api.get(`/projects/${projectId}/tasks/${taskId}/milestones`, { _maxRetries: 2 });
       if (Array.isArray(data?.items)) return normalize(data.items);
       if (Array.isArray(data?.milestones)) return normalize(data.milestones);
       if (Array.isArray(data)) return normalize(data);
     } catch {}
   }
 
-  const candidates = [
-    `/tasks/${taskId}/milestones`,
-    `/tasks/${taskId}/checkpoints`,
-    `/tasks/${taskId}/stages`,
-  ];
-  for (const url of candidates) {
+  for (const url of [`/tasks/${taskId}/milestones`, `/tasks/${taskId}/checkpoints`, `/tasks/${taskId}/stages`]) {
     try {
       const { data } = await api.get(url, { _maxRetries: 2 });
       if (Array.isArray(data?.items)) return normalize(data.items);
