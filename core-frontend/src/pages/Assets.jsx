@@ -1,7 +1,7 @@
 // src/pages/Assets.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, fileUrl } from "../lib/api";
 
 /* --- Status chip --- */
 function StatusBadge({ value }) {
@@ -318,7 +318,7 @@ export default function Assets() {
           </thead>
           <tbody>
             {filtered.map(r => {
-              const url = thumbUrl(r);
+              const url = fileUrl(thumbUrl(r));
               return (
                 <tr key={r._id} style={rowStyle}>
                   <td className="border-t p-2 align-top">
