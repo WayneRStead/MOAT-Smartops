@@ -248,6 +248,7 @@ function taskLabelFrom(tasks, tidOrObj) {
   const t = tasks.find((x) => String(x._id) === tid);
   return t ? (t.title || tid) : tid;
 }
+
 export default function VehicleDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -324,9 +325,14 @@ export default function VehicleDetail() {
   const [openTrip, setOpenTrip] = useState(null);
   const [trips, setTrips] = useState([]);
   const [tripsLoading, setTripsLoading] = useState(false);
+
+  // tripErr now: for non-modal trip errors (e.g. list load / inline edit)
   const [tripErr, setTripErr] = useState("");
   const [tripInfo, setTripInfo] = useState("");
   const [tripSaving, setTripSaving] = useState(false);
+
+  // NEW: modal-scoped trip error (shows inside the lightbox)
+  const [tripModalErr, setTripModalErr] = useState("");
 
   const [odoStart, setOdoStart] = useState("");
   const [odoEnd, setOdoEnd] = useState("");
@@ -423,7 +429,7 @@ export default function VehicleDetail() {
       setInspModalTitle(insp.title || insp.templateName || "Inspection");
       setInspModalHtml(String(html));
       setInspModalOpen(true);
-    } catch (e) {
+    } catch {
       setInspModalTitle("Inspection");
       setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
       setInspModalOpen(true);
@@ -479,15 +485,117 @@ export default function VehicleDetail() {
       setRErr(e?.response?.data?.error || String(e));
     }
   }
+
+  // --- Logbook API wrappers (fix "not found" by trying multiple endpoints + quiet 404s) ---
+  function normalizeListResp(data) {
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.rows)) return data.rows;
+    if (Array.isArray(data?.results)) return data.results;
+    return [];
+  }
+  async function apiGetLogbookList() {
+    const attempts = [
+      { method: "get", url: "/logbook", params: { vehicleId: id, limit: 200 } },
+      { method: "get", url: "/logbooks", params: { vehicleId: id, limit: 200 } },
+      { method: "get", url: `/vehicles/${id}/logbook`, params: { limit: 200 } },
+      { method: "get", url: `/vehicles/${id}/logbook-entries`, params: { limit: 200 } },
+      { method: "get", url: `/vehicles/${id}/entries`, params: { limit: 200 } },
+    ];
+
+    let lastErr = null;
+    for (const a of attempts) {
+      try {
+        const { data } = await api[a.method](a.url, a.params ? { params: a.params } : undefined);
+        const list = normalizeListResp(data);
+        if (Array.isArray(list)) return list;
+        return [];
+      } catch (e) {
+        lastErr = e;
+        if (e?.response?.status === 404) continue; // try next
+        // for non-404, keep trying others but remember the error
+        continue;
+      }
+    }
+
+    // if everything 404, return empty with no error
+    if (lastErr?.response?.status === 404) return [];
+    throw lastErr || new Error("Failed to load logbook");
+  }
+
+  async function apiCreateLogbookEntry(payload) {
+    const attempts = [
+      { url: "/logbook", body: payload },
+      { url: "/logbooks", body: payload },
+      { url: `/vehicles/${id}/logbook`, body: payload },
+      { url: `/vehicles/${id}/logbook-entries`, body: payload },
+    ];
+    let lastErr = null;
+    for (const a of attempts) {
+      try {
+        const { data } = await api.post(a.url, a.body);
+        return data;
+      } catch (e) {
+        lastErr = e;
+        if (e?.response?.status === 404) continue;
+        continue;
+      }
+    }
+    throw lastErr || new Error("Failed to create log entry");
+  }
+
+  async function apiUpdateLogbookEntry(entryId, patch) {
+    const attempts = [
+      { url: `/logbook/${entryId}`, body: patch },
+      { url: `/logbooks/${entryId}`, body: patch },
+      { url: `/vehicles/${id}/logbook/${entryId}`, body: patch },
+      { url: `/vehicles/${id}/logbook-entries/${entryId}`, body: patch },
+    ];
+    let lastErr = null;
+    for (const a of attempts) {
+      try {
+        const { data } = await api.put(a.url, a.body);
+        return data;
+      } catch (e) {
+        lastErr = e;
+        if (e?.response?.status === 404) continue;
+        continue;
+      }
+    }
+    throw lastErr || new Error("Failed to update log entry");
+  }
+
+  async function apiDeleteLogbookEntry(entryId) {
+    const attempts = [
+      { url: `/logbook/${entryId}` },
+      { url: `/logbooks/${entryId}` },
+      { url: `/vehicles/${id}/logbook/${entryId}` },
+      { url: `/vehicles/${id}/logbook-entries/${entryId}` },
+    ];
+    let lastErr = null;
+    for (const a of attempts) {
+      try {
+        await api.delete(a.url);
+        return true;
+      } catch (e) {
+        lastErr = e;
+        if (e?.response?.status === 404) continue;
+        continue;
+      }
+    }
+    throw lastErr || new Error("Failed to delete log entry");
+  }
+
   async function loadLogbook() {
     setLbErr("");
     setLbInfo("");
     try {
-      const params = { vehicleId: id, limit: 200 };
-      const { data } = await api.get("/logbook", { params });
-      setEntries(Array.isArray(data) ? data : []);
+      const list = await apiGetLogbookList();
+      setEntries(Array.isArray(list) ? list : []);
     } catch (e) {
-      setLbErr(e?.response?.data?.error || String(e));
+      // only show a "real" error (not a missing endpoint)
+      const msg = e?.response?.data?.error || String(e);
+      setLbErr(msg);
     }
   }
 
@@ -512,50 +620,50 @@ export default function VehicleDetail() {
   }
 
   // REPLACE: loadInspections to quietly try multiple APIs and fall back to logbook 'inspection' entries
-async function loadInspections() {
-  setInspErr("");
-  setInspInfo("");
+  async function loadInspections() {
+    setInspErr("");
+    setInspInfo("");
 
-  async function tryGet(url, params) {
-    try {
-      const { data } = await api.get(url, { params });
-      if (Array.isArray(data)) return data;
-      if (Array.isArray(data?.items)) return data.items;
-      return Array.isArray(data?.rows) ? data.rows : data;
-    } catch (e) {
-      if (e?.response?.status === 404) return { _404: true };
-      return { _err: e };
+    async function tryGet(url, params) {
+      try {
+        const { data } = await api.get(url, { params });
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.items)) return data.items;
+        return Array.isArray(data?.rows) ? data.rows : data;
+      } catch (e) {
+        if (e?.response?.status === 404) return { _404: true };
+        return { _err: e };
+      }
     }
+
+    // 1) Try likely endpoints
+    const paramsA = { vehicleId: id, limit: 200 };
+    const paramsB = { subjectType: "vehicle", subjectId: id, limit: 200 };
+
+    let res =
+      (await tryGet("/inspections", paramsA)) ||
+      (await tryGet("/inspection", paramsA)) ||
+      (await tryGet("/inspections", paramsB)) ||
+      (await tryGet("/inspection", paramsB));
+
+    // 2) If all 404 or error, fallback: derive from logbook entries of type 'inspection'
+    if (!Array.isArray(res)) {
+      const fromLogbook = (entries || [])
+        .filter((e) => (e?.type || "").toLowerCase() === "inspection")
+        .map((e) => ({
+          _id: e._id,
+          ts: e.ts || e.date,
+          title: e.title || "Inspection",
+          userId: e.userId || e.user,
+          status: e.status || e.result || (e.notes ? "recorded" : "—"),
+          _source: "logbook",
+        }));
+      setInspections(fromLogbook);
+      return;
+    }
+
+    setInspections(res);
   }
-
-  // 1) Try likely endpoints
-  const paramsA = { vehicleId: id, limit: 200 };
-  const paramsB = { subjectType: "vehicle", subjectId: id, limit: 200 };
-
-  let res =
-    (await tryGet("/inspections", paramsA)) ||
-    (await tryGet("/inspection", paramsA)) ||
-    (await tryGet("/inspections", paramsB)) ||
-    (await tryGet("/inspection", paramsB));
-
-  // 2) If all 404 or error, fallback: derive from logbook entries of type 'inspection'
-  if (!Array.isArray(res)) {
-    const fromLogbook = (entries || [])
-      .filter((e) => (e?.type || "").toLowerCase() === "inspection")
-      .map((e) => ({
-        _id: e._id,
-        ts: e.ts || e.date,
-        title: e.title || "Inspection",
-        userId: e.userId || e.user,
-        status: e.status || e.result || (e.notes ? "recorded" : "—"),
-        _source: "logbook",
-      }));
-    setInspections(fromLogbook);
-    return;
-  }
-
-  setInspections(res);
-}
 
   /* -------- Trips loader (robust to 404 on /open) -------- */
   async function loadTrips() {
@@ -592,9 +700,14 @@ async function loadInspections() {
     loadTrips();
     loadVendorsList();
     loadPurchasesList();
-    loadInspections();
+    // important: if inspections depend on logbook fallback, reload after entries arrives
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  useEffect(() => {
+    loadInspections();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries]);
 
   // ----- Vehicle meta -----
   async function save(patch) {
@@ -627,6 +740,17 @@ async function loadInspections() {
     d.setDate(d.getDate() + Number(addDays || 0));
     return d.toISOString().slice(0, 10);
   }
+
+  // ----- Derived (needed before generateNext...) -----
+  const currentOdo = useMemo(() => {
+    const tMax = latestOdoFromTrips(trips);
+    const lMax = latestOdoFromEntries(entries);
+    if (tMax == null && lMax == null) return null;
+    if (tMax == null) return lMax;
+    if (lMax == null) return tMax;
+    return Math.max(tMax, lMax);
+  }, [trips, entries]);
+
   async function generateNextFromRecurringTokens(sourceReminderNotes, completedDateISO, odoAtCompletion) {
     const cat = parseReminderCategory(sourceReminderNotes) || "service";
     const recurDays = parseRecurDays(sourceReminderNotes);
@@ -784,6 +908,7 @@ async function loadInspections() {
       setRErr(e2?.response?.data?.error || String(e2));
     }
   }
+
   // ----- Logbook CRUD -----
   async function createEntry(e) {
     e?.preventDefault?.();
@@ -814,18 +939,15 @@ async function loadInspections() {
         odometerEnd: odoNum,
         odometer: odoNum,
       };
-      const { data } = await api.post("/logbook", payload);
+
+      const data = await apiCreateLogbookEntry(payload);
+
       setEntries((prev) => [data, ...prev]);
       if (lbForm.completeReminderId) {
         const r = (reminders || []).find((x) => String(x._id) === String(lbForm.completeReminderId));
         const existingNotes = r?.notes || "";
-        const completedDate = lbForm.ts
-          ? lbForm.ts.slice(0, 10)
-          : new Date().toISOString().slice(0, 10);
-        const withoutCompleted = existingNotes.replace(
-          /\(\s*Completed:\s*[^)]+?\)\s*/i,
-          ""
-        );
+        const completedDate = lbForm.ts ? lbForm.ts.slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const withoutCompleted = existingNotes.replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "");
         const newNotes = `${withoutCompleted} (Completed: ${completedDate})`.trim();
         await api.put(`/vehicles/${id}/reminders/${lbForm.completeReminderId}`, {
           active: false,
@@ -840,13 +962,9 @@ async function loadInspections() {
               parsePairId(rr.notes || "") === pairId
           );
           for (const sib of siblings) {
-            const sibBase = (sib.notes || "")
-              .replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "")
-              .trim();
+            const sibBase = (sib.notes || "").replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "").trim();
             const sibNote = `${sibBase} (Completed: ${completedDate})`.trim();
-            await api
-              .put(`/vehicles/${id}/reminders/${sib._id}`, { active: false, notes: sibNote })
-              .catch(() => {});
+            await api.put(`/vehicles/${id}/reminders/${sib._id}`, { active: false, notes: sibNote }).catch(() => {});
           }
         }
         const odoForNext = lbForm.odometer !== "" ? Number(lbForm.odometer) : currentOdo;
@@ -874,7 +992,7 @@ async function loadInspections() {
     setLbErr("");
     setLbInfo("");
     try {
-      await api.delete(`/logbook/${entryId}`);
+      await apiDeleteLogbookEntry(entryId);
       setEntries((prev) => prev.filter((x) => x._id !== entryId));
       setLbInfo("Log entry deleted.");
     } catch (e2) {
@@ -883,15 +1001,11 @@ async function loadInspections() {
   }
   function beginEditEntry(entry) {
     const d = entryDisplay(entry);
-    const tagRest = (entry.tags || []).filter(
-      (t) => t && t.toLowerCase() !== (d.type || "").toLowerCase()
-    );
+    const tagRest = (entry.tags || []).filter((t) => t && t.toLowerCase() !== (d.type || "").toLowerCase());
     setLbEditId(entry._id);
     setLbEditForm({
       type: d.type || "other",
-      ts: entry.ts
-        ? new Date(entry.ts).toISOString().slice(0, 16)
-        : new Date().toISOString().slice(0, 16),
+      ts: entry.ts ? new Date(entry.ts).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16),
       odometer: d.odometer ?? "",
       cost: d.cost ?? "",
       vendor: d.vendor ?? "",
@@ -901,15 +1015,7 @@ async function loadInspections() {
   }
   function cancelLbEdit() {
     setLbEditId("");
-    setLbEditForm({
-      type: "service",
-      ts: "",
-      odometer: "",
-      cost: "",
-      vendor: "",
-      tags: "",
-      notes: "",
-    });
+    setLbEditForm({ type: "service", ts: "", odometer: "", cost: "", vendor: "", tags: "", notes: "" });
   }
   async function saveLbEdit() {
     if (!lbEditId) return;
@@ -939,7 +1045,9 @@ async function loadInspections() {
         odometerEnd: odoNum,
         odometer: odoNum,
       };
-      const { data } = await api.put(`/logbook/${lbEditId}`, patch);
+
+      const data = await apiUpdateLogbookEntry(lbEditId, patch);
+
       setEntries((prev) => prev.map((x) => (String(x._id) === String(lbEditId) ? data : x)));
       setLbInfo("Log entry updated.");
       cancelLbEdit();
@@ -961,8 +1069,17 @@ async function loadInspections() {
   /* ---------------- Trips actions ---------------- */
   async function handleStartTrip(e) {
     e?.preventDefault?.();
+    setTripModalErr("");
     setTripErr("");
     setTripInfo("");
+
+    // basic client-side check
+    const s = Number(odoStart);
+    if (!Number.isFinite(s) || s < 0) {
+      setTripModalErr("Enter a valid odometer start.");
+      return;
+    }
+
     try {
       let startPhotoUrl;
       if (startFile) {
@@ -972,7 +1089,7 @@ async function loadInspections() {
       const g = await getGeo().catch(() => null);
       const usageTag = tripUsage === "private" ? "private" : "business";
       const payload = {
-        odoStart: Number(odoStart),
+        odoStart: s,
         projectId: tripProjectId || undefined,
         taskId: tripTaskId || undefined,
         startPhotoUrl,
@@ -996,15 +1113,32 @@ async function loadInspections() {
       setTimeout(() => setTripInfo(""), 1500);
       setStartTripOpen(false);
     } catch (e2) {
-      setTripErr(e2?.response?.data?.error || String(e2));
+      // IMPORTANT: show errors inside the lightbox
+      setTripModalErr(e2?.response?.data?.error || String(e2));
     }
   }
 
   async function handleEndTrip(e) {
     e?.preventDefault?.();
     if (!openTrip) return;
+
+    setTripModalErr("");
     setTripErr("");
     setTripInfo("");
+
+    // client-side validation so the error appears IN the lightbox
+    const start = Number(openTrip?.odoStart);
+    const end = Number(odoEnd);
+
+    if (!Number.isFinite(end) || end < 0) {
+      setTripModalErr("Enter a valid odometer end.");
+      return;
+    }
+    if (Number.isFinite(start) && end < start) {
+      setTripModalErr(`Odometer end cannot be lower than the start (${start}).`);
+      return;
+    }
+
     try {
       let endPhotoUrl;
       if (endFile) {
@@ -1013,7 +1147,7 @@ async function loadInspections() {
       }
       const g = await getGeo().catch(() => null);
       const patch = {
-        odoEnd: Number(odoEnd),
+        odoEnd: end,
         endPhotoUrl,
         ...(tripNotes && tripNotes.trim() ? { notes: tripNotes.trim() } : {}),
         ...(g
@@ -1034,7 +1168,8 @@ async function loadInspections() {
       setTimeout(() => setTripInfo(""), 1500);
       setEndTripOpen(false);
     } catch (e2) {
-      setTripErr(e2?.response?.data?.error || String(e2));
+      // IMPORTANT: show errors inside the lightbox
+      setTripModalErr(e2?.response?.data?.error || String(e2));
     }
   }
 
@@ -1147,16 +1282,6 @@ async function loadInspections() {
     return t ? String(t.projectId) === String(pid) : false;
   }
 
-  // ----- Derived -----
-  const currentOdo = useMemo(() => {
-    const tMax = latestOdoFromTrips(trips);
-    const lMax = latestOdoFromEntries(entries);
-    if (tMax == null && lMax == null) return null;
-    if (tMax == null) return lMax;
-    if (lMax == null) return tMax;
-    return Math.max(tMax, lMax);
-  }, [trips, entries]);
-
   const lastServiceDate = useMemo(() => {
     const svc = (entries || [])
       .filter((e) => resolveEntryType(e) === "service" && e.ts)
@@ -1165,24 +1290,23 @@ async function loadInspections() {
   }, [entries]);
 
   const tripDriverOptions = useMemo(() => {
-    const ids = Array.from(
-      new Set(trips.map((t) => t.driverUserId || t.driverId).filter(Boolean).map(String))
-    );
-    return ids.map((id) => ({ id, label: userLabel(id) }));
+    const ids = Array.from(new Set(trips.map((t) => t.driverUserId || t.driverId).filter(Boolean).map(String)));
+    return ids.map((id2) => ({ id: id2, label: userLabel(id2) }));
   }, [trips, users]);
+
   const tripProjectOptions = useMemo(() => {
     const ids = Array.from(new Set(trips.map((t) => t.projectId).filter(Boolean).map(String)));
-    return ids.map((id) => ({ id, label: projectLabel(id) }));
+    return ids.map((id2) => ({ id: id2, label: projectLabel(id2) }));
   }, [trips, projects]);
+
   const tripTaskOptions = useMemo(() => {
     const ids = Array.from(new Set(trips.map((t) => t.taskId).filter(Boolean).map(String)));
-    return ids.map((id) => ({ id, label: taskLabel(id) }));
+    return ids.map((id2) => ({ id: id2, label: taskLabel(id2) }));
   }, [trips, tasks]);
 
   const filteredTrips = useMemo(() => {
     return trips.filter((t) => {
-      if (tripDriverFilter && String(t.driverUserId || t.driverId) !== String(tripDriverFilter))
-        return false;
+      if (tripDriverFilter && String(t.driverUserId || t.driverId) !== String(tripDriverFilter)) return false;
       if (tripProjectFilter && String(t.projectId) !== String(tripProjectFilter)) return false;
       if (tripTaskFilter && String(t.taskId) !== String(tripTaskFilter)) return false;
       if (tripDateFrom) {
@@ -1234,81 +1358,12 @@ async function loadInspections() {
     URL.revokeObjectURL(url);
   }
 
-  // ADD: Export Trips CSV with usage + coordinates
-function exportTripCsv() {
-  const rows = [
-    [
-      "Started",
-      "Ended",
-      "OdoStart",
-      "OdoEnd",
-      "Distance(km)",
-      "Driver",
-      "Project",
-      "Task",
-      "Usage",
-      "StartLng",
-      "StartLat",
-      "EndLng",
-      "EndLat",
-      "Notes",
-    ],
-    ...filteredTrips.map((t) => {
-      const start = pickLngLat(t.startLocation || {}, "") || pickLngLat(t, "start") || [ "", "" ];
-      const end   = pickLngLat(t.endLocation   || {}, "") || pickLngLat(t, "end")   || [ "", "" ];
-      const usage = getUsageFromTrip(t);
-      const who   = userLabel(t.driverUserId || t.driverId);
-      const proj  = projectLabel(t.projectId);
-      const task  = taskLabel(t.taskId);
-      const dist  = t.distance ?? (t.odoStart != null && t.odoEnd != null
-        ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart))
-        : "");
-      return [
-        t.startedAt ? new Date(t.startedAt).toISOString() : "",
-        t.endedAt   ? new Date(t.endedAt).toISOString()   : "",
-        t.odoStart ?? "",
-        t.odoEnd ?? "",
-        dist,
-        who,
-        proj,
-        task,
-        usage,
-        start[0],
-        start[1],
-        end[0],
-        end[1],
-        (t.notes || "").replace(/\r?\n/g, " "),
-      ];
-    }),
-  ];
-
-  const csv = rows
-    .map((r) =>
-      r
-        .map((cell) => {
-          const s = String(cell ?? "");
-          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-        })
-        .join(",")
-    )
-    .join("\n");
-
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `vehicle_${v?.reg || id}_trips.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
   // Robust coordinate picker
   function pickLngLat(obj, prefix) {
     if (!obj) return null;
     if (obj.coordinates && Array.isArray(obj.coordinates) && obj.coordinates.length >= 2) {
       const [lng, lat] = obj.coordinates;
-      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat)))
-        return [Number(lng), Number(lat)];
+      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat))) return [Number(lng), Number(lat)];
     }
     const cand = [
       [obj[`${prefix}Lng`], obj[`${prefix}Lat`]],
@@ -1319,95 +1374,159 @@ function exportTripCsv() {
       [obj[`${prefix}_long`], obj[`${prefix}_lat`]],
     ];
     for (const [lng, lat] of cand) {
-      if (
-        lng != null &&
-        lat != null &&
-        Number.isFinite(Number(lng)) &&
-        Number.isFinite(Number(lat))
-      ) {
+      if (lng != null && lat != null && Number.isFinite(Number(lng)) && Number.isFinite(Number(lat))) {
         return [Number(lng), Number(lat)];
       }
     }
     const nested = obj[prefix];
     if (nested && nested.lng != null && nested.lat != null) {
       const { lng, lat } = nested;
-      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat)))
-        return [Number(lng), Number(lat)];
+      if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat))) return [Number(lng), Number(lat)];
     }
     return null;
   }
 
+  // ADD: Export Trips CSV with usage + coordinates
+  function exportTripCsv() {
+    const rows = [
+      [
+        "Started",
+        "Ended",
+        "OdoStart",
+        "OdoEnd",
+        "Distance(km)",
+        "Driver",
+        "Project",
+        "Task",
+        "Usage",
+        "StartLng",
+        "StartLat",
+        "EndLng",
+        "EndLat",
+        "Notes",
+      ],
+      ...filteredTrips.map((t) => {
+        const start = pickLngLat(t.startLocation || {}, "") || pickLngLat(t, "start") || ["", ""];
+        const end = pickLngLat(t.endLocation || {}, "") || pickLngLat(t, "end") || ["", ""];
+        const usage = getUsageFromTrip(t);
+        const who = userLabel(t.driverUserId || t.driverId);
+        const proj = projectLabel(t.projectId);
+        const task = taskLabel(t.taskId);
+        const dist =
+          t.distance ??
+          (t.odoStart != null && t.odoEnd != null ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart)) : "");
+        return [
+          t.startedAt ? new Date(t.startedAt).toISOString() : "",
+          t.endedAt ? new Date(t.endedAt).toISOString() : "",
+          t.odoStart ?? "",
+          t.odoEnd ?? "",
+          dist,
+          who,
+          proj,
+          task,
+          usage,
+          start[0],
+          start[1],
+          end[0],
+          end[1],
+          (t.notes || "").replace(/\r?\n/g, " "),
+        ];
+      }),
+    ];
+
+    const csv = rows
+      .map((r) =>
+        r
+          .map((cell) => {
+            const s = String(cell ?? "");
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          })
+          .join(",")
+      )
+      .join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vehicle_${v?.reg || id}_trips.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // REPLACE: exportTripsKml with stronger coordinate discovery
-function exportTripsKml() {
-  const esc = (s) => String(s ?? "").replace(/[<&>]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
-  const header = `<?xml version="1.0" encoding="UTF-8"?>
+  function exportTripsKml() {
+    const esc = (s) => String(s ?? "").replace(/[<&>]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]));
+    const header = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Vehicle ${esc(v?.reg || id)} Trips</name>`;
-  const footer = `</Document></kml>`;
+    const footer = `</Document></kml>`;
 
-  const items = filteredTrips.flatMap((t, i) => {
-    const start =
-      pickLngLat(t.startLocation || {}, "") ||
-      pickLngLat(t, "start") ||
-      pickLngLat({ start: { lng: t?.start?.lng, lat: t?.start?.lat } }, "start") ||
-      null;
+    const items = filteredTrips.flatMap((t, i) => {
+      const start =
+        pickLngLat(t.startLocation || {}, "") ||
+        pickLngLat(t, "start") ||
+        pickLngLat({ start: { lng: t?.start?.lng, lat: t?.start?.lat } }, "start") ||
+        null;
 
-    const end =
-      pickLngLat(t.endLocation || {}, "") ||
-      pickLngLat(t, "end") ||
-      pickLngLat({ end: { lng: t?.end?.lng, lat: t?.end?.lat } }, "end") ||
-      null;
+      const end =
+        pickLngLat(t.endLocation || {}, "") ||
+        pickLngLat(t, "end") ||
+        pickLngLat({ end: { lng: t?.end?.lng, lat: t?.end?.lat } }, "end") ||
+        null;
 
-    const who   = userLabel(t.driverUserId || t.driverId);
-    const proj  = projectLabel(t.projectId);
-    const task  = taskLabel(t.taskId);
-    const usage = getUsageFromTrip(t);
-    const dist  = t.distance ?? (t.odoStart != null && t.odoEnd != null
-      ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart))
-      : "");
+      const who = userLabel(t.driverUserId || t.driverId);
+      const proj = projectLabel(t.projectId);
+      const task = taskLabel(t.taskId);
+      const usage = getUsageFromTrip(t);
+      const dist =
+        t.distance ??
+        (t.odoStart != null && t.odoEnd != null ? Math.max(0, Number(t.odoEnd) - Number(t.odoStart)) : "");
 
-    const desc = [
-      `<b>Started</b>: ${t.startedAt ? new Date(t.startedAt).toLocaleString() : "—"}`,
-      `<b>Ended</b>: ${t.endedAt ? new Date(t.endedAt).toLocaleString() : "—"}`,
-      `<b>Odo</b>: ${t.odoStart ?? "—"} → ${t.odoEnd ?? "—"}`,
-      `<b>Distance</b>: ${dist || "—"} km`,
-      `<b>Driver</b>: ${esc(who)}`,
-      `<b>Project</b>: ${esc(proj)}`,
-      `<b>Task</b>: ${esc(task)}`,
-      `<b>Usage</b>: ${esc(usage)}`,
-      t.notes ? `<b>Notes</b>: ${esc(t.notes)}` : "",
-    ].filter(Boolean).join("<br/>");
+      const desc = [
+        `<b>Started</b>: ${t.startedAt ? new Date(t.startedAt).toLocaleString() : "—"}`,
+        `<b>Ended</b>: ${t.endedAt ? new Date(t.endedAt).toLocaleString() : "—"}`,
+        `<b>Odo</b>: ${t.odoStart ?? "—"} → ${t.odoEnd ?? "—"}`,
+        `<b>Distance</b>: ${dist || "—"} km`,
+        `<b>Driver</b>: ${esc(who)}`,
+        `<b>Project</b>: ${esc(proj)}`,
+        `<b>Task</b>: ${esc(task)}`,
+        `<b>Usage</b>: ${esc(usage)}`,
+        t.notes ? `<b>Notes</b>: ${esc(t.notes)}` : "",
+      ]
+        .filter(Boolean)
+        .join("<br/>");
 
-    const name = `Trip ${i + 1} ${t.startedAt ? new Date(t.startedAt).toISOString() : ""}`;
+      const name = `Trip ${i + 1} ${t.startedAt ? new Date(t.startedAt).toISOString() : ""}`;
 
-    if (start && end) {
-      return [
-        `<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description><LineString><coordinates>${start[0]},${start[1]},0 ${end[0]},${end[1]},0</coordinates></LineString></Placemark>`,
-        `<Placemark><name>${esc(name)} (Start)</name><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
-        `<Placemark><name>${esc(name)} (End)</name><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
-      ];
-    }
-    if (start) {
-      return [
-        `<Placemark><name>${esc(name)} (Start)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
-      ];
-    }
-    if (end) {
-      return [
-        `<Placemark><name>${esc(name)} (End)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
-      ];
-    }
-    return [`<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description></Placemark>`];
-  });
+      if (start && end) {
+        return [
+          `<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description><LineString><coordinates>${start[0]},${start[1]},0 ${end[0]},${end[1]},0</coordinates></LineString></Placemark>`,
+          `<Placemark><name>${esc(name)} (Start)</name><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
+          `<Placemark><name>${esc(name)} (End)</name><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
+        ];
+      }
+      if (start) {
+        return [
+          `<Placemark><name>${esc(name)} (Start)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${start[0]},${start[1]},0</coordinates></Point></Placemark>`,
+        ];
+      }
+      if (end) {
+        return [
+          `<Placemark><name>${esc(name)} (End)</name><description><![CDATA[${desc}]]></description><Point><coordinates>${end[0]},${end[1]},0</coordinates></Point></Placemark>`,
+        ];
+      }
+      return [`<Placemark><name>${esc(name)}</name><description><![CDATA[${desc}]]></description></Placemark>`];
+    });
 
-  const kml = `${header}\n${items.join("\n")}\n${footer}`;
-  const blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `vehicle_${v?.reg || id}_trips.kml`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+    const kml = `${header}\n${items.join("\n")}\n${footer}`;
+    const blob = new Blob([kml], { type: "application/vnd.google-earth.kml+xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vehicle_${v?.reg || id}_trips.kml`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   // ---------- Purchases helpers ----------
   function vendorLabel(vendor) {
@@ -1454,8 +1573,7 @@ function exportTripsKml() {
       const payload = {
         vehicleId: id,
         vendorId: vendorId || undefined,
-        vendorName:
-          !vendorId && pForm.newVendorName.trim() ? pForm.newVendorName.trim() : undefined,
+        vendorName: !vendorId && pForm.newVendorName.trim() ? pForm.newVendorName.trim() : undefined,
         type: pForm.type,
         date: pForm.date ? new Date(pForm.date).toISOString() : undefined,
         cost: pForm.cost !== "" ? Number(pForm.cost) : undefined,
@@ -1543,8 +1661,7 @@ function exportTripsKml() {
       }
       const patch = {
         vendorId: vendorId || undefined,
-        vendorName:
-          !vendorId && editForm.newVendorName.trim() ? editForm.newVendorName.trim() : undefined,
+        vendorName: !vendorId && editForm.newVendorName.trim() ? editForm.newVendorName.trim() : undefined,
         type: editForm.type,
         date: editForm.date ? new Date(editForm.date).toISOString() : undefined,
         cost: editForm.cost !== "" ? Number(editForm.cost) : undefined,
@@ -1585,15 +1702,14 @@ function exportTripsKml() {
     { id: "purchases", label: "Purchases" },
     { id: "logbook", label: "Logbook" },
   ];
-  function scrollToSection(id) {
-    const el = document.getElementById(id);
+  function scrollToSection(sectionId) {
+    const el = document.getElementById(sectionId);
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+
   // ----- UI derived header bits -----
   const meta = useMemo(() => {
-    const name = v
-      ? v.name || v.displayName || [v.make, v.model].filter(Boolean).join(" ") || "Vehicle"
-      : "Vehicle";
+    const name = v ? v.name || v.displayName || [v.make, v.model].filter(Boolean).join(" ") || "Vehicle" : "Vehicle";
     return {
       name,
       vin: v?.vin ?? "—",
@@ -1626,9 +1742,15 @@ function exportTripsKml() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn btn-ghost" onClick={del}>Delete</button>
-          <button className="btn" onClick={() => window.print()}>Print PDF</button>
-          <button className="btn" onClick={() => navigate(-1)}>Back</button>
+          <button className="btn btn-ghost" onClick={del}>
+            Delete
+          </button>
+          <button className="btn" onClick={() => window.print()}>
+            Print PDF
+          </button>
+          <button className="btn" onClick={() => navigate(-1)}>
+            Back
+          </button>
         </div>
       </div>
 
@@ -1660,52 +1782,115 @@ function exportTripsKml() {
         <div className="rounded-xl border border-border bg-panel p-3 space-y-3">
           <div className="text-lg font-semibold mb-1">Meta</div>
 
-          <label className="block text-sm">Registration
-            <input className="w-full" value={v.reg ?? ""} onChange={(e) => setV({ ...v, reg: e.target.value })} onBlur={() => save({ reg: v.reg || "" })} />
+          <label className="block text-sm">
+            Registration
+            <input
+              className="w-full"
+              value={v.reg ?? ""}
+              onChange={(e) => setV({ ...v, reg: e.target.value })}
+              onBlur={() => save({ reg: v.reg || "" })}
+            />
           </label>
 
           <div className="grid grid-cols-2 gap-2">
-            <label className="block text-sm">Make
-              <input className="w-full" value={v.make ?? ""} onChange={(e) => setV({ ...v, make: e.target.value })} onBlur={() => save({ make: v.make || "" })} />
+            <label className="block text-sm">
+              Make
+              <input
+                className="w-full"
+                value={v.make ?? ""}
+                onChange={(e) => setV({ ...v, make: e.target.value })}
+                onBlur={() => save({ make: v.make || "" })}
+              />
             </label>
-            <label className="block text-sm">Model
-              <input className="w-full" value={v.model ?? ""} onChange={(e) => setV({ ...v, model: e.target.value })} onBlur={() => save({ model: v.model || "" })} />
+            <label className="block text-sm">
+              Model
+              <input
+                className="w-full"
+                value={v.model ?? ""}
+                onChange={(e) => setV({ ...v, model: e.target.value })}
+                onBlur={() => save({ model: v.model || "" })}
+              />
             </label>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <label className="block text-sm">Year
-              <input className="w-full" type="number" inputMode="numeric" min="1900" max="2100" value={v.year ?? ""} onChange={(e) => setV({ ...v, year: e.target.value })} onBlur={() => save({ year: v.year ? Number(v.year) : undefined })} />
+            <label className="block text-sm">
+              Year
+              <input
+                className="w-full"
+                type="number"
+                inputMode="numeric"
+                min="1900"
+                max="2100"
+                value={v.year ?? ""}
+                onChange={(e) => setV({ ...v, year: e.target.value })}
+                onBlur={() => save({ year: v.year ? Number(v.year) : undefined })}
+              />
             </label>
-            <label className="block text-sm">VIN
-              <input className="w-full" value={v.vin ?? ""} onChange={(e) => setV({ ...v, vin: e.target.value })} onBlur={() => save({ vin: v.vin || "" })} placeholder="e.g. 1HGBH41JXMN109186" />
+            <label className="block text-sm">
+              VIN
+              <input
+                className="w-full"
+                value={v.vin ?? ""}
+                onChange={(e) => setV({ ...v, vin: e.target.value })}
+                onBlur={() => save({ vin: v.vin || "" })}
+                placeholder="e.g. 1HGBH41JXMN109186"
+              />
             </label>
           </div>
 
-          <label className="block text-sm">Type
-            <input className="w-full" value={v.type ?? ""} onChange={(e) => setV({ ...v, type: e.target.value })} onBlur={() => save({ type: v.type || "", vehicleType: v.type || "" })} placeholder="e.g. Ute, Van, Truck" />
+          <label className="block text-sm">
+            Type
+            <input
+              className="w-full"
+              value={v.type ?? ""}
+              onChange={(e) => setV({ ...v, type: e.target.value })}
+              onBlur={() => save({ type: v.type || "", vehicleType: v.type || "" })}
+              placeholder="e.g. Ute, Van, Truck"
+            />
           </label>
 
-          <label className="block text-sm">Project
+          <label className="block text-sm">
+            Project
             <select className="w-full" value={v.projectId || ""} onChange={handleVehicleProjectChange}>
               <option value="">— none —</option>
-              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+              {projects.map((p) => (
+                <option key={p._id} value={p._id}>
+                  {p.name}
+                </option>
+              ))}
             </select>
           </label>
 
           {/* Driver */}
-          <label className="block text-sm">Driver
+          <label className="block text-sm">
+            Driver
             <div className="flex items-center gap-2">
-              <select className="w-full" value={selectedDriverId} onChange={(e) => {
-                const val = e.target.value;
-                setV((prev) => ({ ...prev, driverId: val || "", driver: undefined }));
-                save({ driverId: val || null });
-              }}>
+              <select
+                className="w-full"
+                value={selectedDriverId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setV((prev) => ({ ...prev, driverId: val || "", driver: undefined }));
+                  save({ driverId: val || null });
+                }}
+              >
                 <option value="">— none —</option>
-                {users.map((u) => (<option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>))}
+                {users.map((u) => (
+                  <option key={u._id} value={u._id}>
+                    {u.name || u.email || u.username}
+                  </option>
+                ))}
               </select>
               {selectedDriverId && (
-                <button type="button" className="btn btn-sm" onClick={() => { setV((prev) => ({ ...prev, driverId: "", driver: null })); save({ driverId: null }); }}>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setV((prev) => ({ ...prev, driverId: "", driver: null }));
+                    save({ driverId: null });
+                  }}
+                >
                   Clear
                 </button>
               )}
@@ -1714,30 +1899,49 @@ function exportTripsKml() {
           </label>
 
           {/* Task allocation */}
-          <label className="block text-sm">Task
+          <label className="block text-sm">
+            Task
             <div className="flex items-center gap-2">
-              <select className="w-full" value={v?.task?._id || v?.taskId || ""} onChange={(e) => {
-                const val = e.target.value || "";
-                setV((prev) => ({ ...prev, taskId: val, task: undefined }));
-                save({ taskId: val || null });
-              }}>
+              <select
+                className="w-full"
+                value={v?.task?._id || v?.taskId || ""}
+                onChange={(e) => {
+                  const val = e.target.value || "";
+                  setV((prev) => ({ ...prev, taskId: val, task: undefined }));
+                  save({ taskId: val || null });
+                }}
+              >
                 <option value="">— none —</option>
-                {tasksForVehicleProject.map((t) => (<option key={t._id} value={t._id}>{t.title || t._id}</option>))}
+                {tasksForVehicleProject.map((t) => (
+                  <option key={t._id} value={t._id}>
+                    {t.title || t._id}
+                  </option>
+                ))}
               </select>
               {(v?.task?._id || v?.taskId) && (
-                <button type="button" className="btn btn-sm" onClick={() => { setV((prev) => ({ ...prev, taskId: "", task: null })); save({ taskId: null }); }}>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setV((prev) => ({ ...prev, taskId: "", task: null }));
+                    save({ taskId: null });
+                  }}
+                >
                   Clear
                 </button>
               )}
             </div>
             {(v?.task?._id || v?.taskId) && (
               <div className="mt-1 text-xs">
-                <Link className="link" to={`/tasks/${v?.task?._id || v?.taskId}`}>Open task</Link>
+                <Link className="link" to={`/tasks/${v?.task?._id || v?.taskId}`}>
+                  Open task
+                </Link>
               </div>
             )}
           </label>
 
-          <label className="block text-sm">Status
+          <label className="block text-sm">
+            Status
             <div className="flex items-center gap-2">
               <StatusBadge value={v.status || "active"} />
               <select value={v.status || "active"} onChange={(e) => setStatus(e.target.value)}>
@@ -1750,7 +1954,8 @@ function exportTripsKml() {
           </label>
 
           <div className="text-sm text-gray-600">
-            Created: {v.createdAt ? new Date(v.createdAt).toLocaleString() : "—"}<br />
+            Created: {v.createdAt ? new Date(v.createdAt).toLocaleString() : "—"}
+            <br />
             Updated: {v.updatedAt ? new Date(v.updatedAt).toLocaleString() : "—"}
           </div>
         </div>
@@ -1759,15 +1964,31 @@ function exportTripsKml() {
         <div id="reminders" className="rounded-xl border border-border bg-panel p-3 space-y-3 scroll-mt-20">
           <div className="flex items-center justify-between">
             <div className="text-lg font-semibold">Service Reminders</div>
-            <button type="button" className={`chip ${showCompletedReminders ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-700"}`} onClick={() => setShowCompletedReminders((s) => !s)}>
+            <button
+              type="button"
+              className={`chip ${showCompletedReminders ? "bg-blue-100 text-blue-800" : "bg-gray-100 text-gray-700"}`}
+              onClick={() => setShowCompletedReminders((s) => !s)}
+            >
               {showCompletedReminders ? "Hide completed" : "Show completed"}
             </button>
           </div>
 
           <div className="text-sm text-gray-700">
-            {nextDue?.dateDue && (<span className="mr-3">Next date: <b>{new Date(nextDue.dateDue.dueDate).toLocaleDateString()}</b></span>)}
-            {nextDue?.odoDue && (<span className="mr-3">Next km: <b>{nextDue.odoDue.dueOdometer} km</b></span>)}
-            {currentOdo != null && (<span>Current ODO: <b>{currentOdo} km</b></span>)}
+            {nextDue?.dateDue && (
+              <span className="mr-3">
+                Next date: <b>{new Date(nextDue.dateDue.dueDate).toLocaleDateString()}</b>
+              </span>
+            )}
+            {nextDue?.odoDue && (
+              <span className="mr-3">
+                Next km: <b>{nextDue.odoDue.dueOdometer} km</b>
+              </span>
+            )}
+            {currentOdo != null && (
+              <span>
+                Current ODO: <b>{currentOdo} km</b>
+              </span>
+            )}
           </div>
 
           {rErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{rErr}</div>}
@@ -1775,27 +1996,44 @@ function exportTripsKml() {
 
           {/* Create */}
           <form onSubmit={addReminder} className="grid md:grid-cols-12 gap-2">
-            <label className="text-sm md:col-span-2">Category
+            <label className="text-sm md:col-span-2">
+              Category
               <select className="w-full" value={rForm.category} onChange={(e) => setRForm({ ...rForm, category: e.target.value })}>
-                {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                {LOG_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
               </select>
             </label>
-            <label className="text-sm md:col-span-2">Type
+            <label className="text-sm md:col-span-2">
+              Type
               <select className="w-full" value={rForm.kind} onChange={(e) => setRForm({ ...rForm, kind: e.target.value })}>
                 <option value="date">By date</option>
                 <option value="odometer">By odometer</option>
               </select>
             </label>
             {rForm.kind === "date" ? (
-              <label className="text-sm md:col-span-3">Due date
+              <label className="text-sm md:col-span-3">
+                Due date
                 <input className="w-full" type="date" value={rForm.dueDate} onChange={(e) => setRForm({ ...rForm, dueDate: e.target.value })} required />
               </label>
             ) : (
-              <label className="text-sm md:col-span-3">Due km
-                <input className="w-full" type="number" inputMode="numeric" min="0" value={rForm.dueOdometer} onChange={(e) => setRForm({ ...rForm, dueOdometer: e.target.value })} required />
+              <label className="text-sm md:col-span-3">
+                Due km
+                <input
+                  className="w-full"
+                  type="number"
+                  inputMode="numeric"
+                  min="0"
+                  value={rForm.dueOdometer}
+                  onChange={(e) => setRForm({ ...rForm, dueOdometer: e.target.value })}
+                  required
+                />
               </label>
             )}
-            <label className="text-sm md:col-span-5">Notes
+            <label className="text-sm md:col-span-5">
+              Notes
               <input className="w-full" value={rForm.notes} onChange={(e) => setRForm({ ...rForm, notes: e.target.value })} />
             </label>
 
@@ -1807,11 +2045,29 @@ function exportTripsKml() {
                   <input type="checkbox" checked={rForm.recurring} onChange={(e) => setRForm((f) => ({ ...f, recurring: e.target.checked }))} />
                   <span>Recurring</span>
                 </label>
-                <label className="text-sm md:col-span-2">Every (days)
-                  <input className="w-full" type="number" min="0" value={rForm.recurDays} onChange={(e) => setRForm((f) => ({ ...f, recurDays: e.target.value }))} placeholder="e.g. 365" disabled={!rForm.recurring} />
+                <label className="text-sm md:col-span-2">
+                  Every (days)
+                  <input
+                    className="w-full"
+                    type="number"
+                    min="0"
+                    value={rForm.recurDays}
+                    onChange={(e) => setRForm((f) => ({ ...f, recurDays: e.target.value }))}
+                    placeholder="e.g. 365"
+                    disabled={!rForm.recurring}
+                  />
                 </label>
-                <label className="text-sm md:col-span-2">Every (km)
-                  <input className="w-full" type="number" min="0" value={rForm.recurKm} onChange={(e) => setRForm((f) => ({ ...f, recurKm: e.target.value }))} placeholder="e.g. 10000" disabled={!rForm.recurring} />
+                <label className="text-sm md:col-span-2">
+                  Every (km)
+                  <input
+                    className="w-full"
+                    type="number"
+                    min="0"
+                    value={rForm.recurKm}
+                    onChange={(e) => setRForm((f) => ({ ...f, recurKm: e.target.value }))}
+                    placeholder="e.g. 10000"
+                    disabled={!rForm.recurring}
+                  />
                 </label>
                 <div className="text-xs text-gray-600 md:col-span-6">
                   Set one or both. If both are set, the system pairs date+km reminders and will auto-close the sibling when one completes.
@@ -1820,7 +2076,9 @@ function exportTripsKml() {
             )}
 
             <div className="md:col-span-12">
-              <button className="btn btn-primary" type="submit">Add reminder</button>
+              <button className="btn btn-primary" type="submit">
+                Add reminder
+              </button>
             </div>
           </form>
 
@@ -1841,28 +2099,57 @@ function exportTripsKml() {
                     const s = reminderStatus(r, currentOdo);
                     const completedOn = parseReminderCompletedOn(r.notes || "");
                     const rowTintStyle =
-                      s.code === "overdue" ? { backgroundColor: "#fee2e2" }
-                      : s.code === "due-soon" ? { backgroundColor: "#fffbeb" }
-                      : {};
+                      s.code === "overdue"
+                        ? { backgroundColor: "#fee2e2" }
+                        : s.code === "due-soon"
+                        ? { backgroundColor: "#fffbeb" }
+                        : {};
                     const isEditing = rEditId === r._id;
                     return (
                       <tr key={r._id} style={rowTintStyle}>
                         <td className="border-b border-border p-2">
-                          {!isEditing ? cat : (
-                            <select className="p-1 border border-border rounded" value={rEditForm.category} onChange={(e) => setREditForm((f) => ({ ...f, category: e.target.value }))}>
-                              {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                          {!isEditing ? (
+                            cat
+                          ) : (
+                            <select
+                              className="p-1 border border-border rounded"
+                              value={rEditForm.category}
+                              onChange={(e) => setREditForm((f) => ({ ...f, category: e.target.value }))}
+                            >
+                              {LOG_TYPES.map((t) => (
+                                <option key={t} value={t}>
+                                  {t}
+                                </option>
+                              ))}
                             </select>
                           )}
                         </td>
                         <td className="border-b border-border p-2">{r.kind}</td>
                         <td className="border-b border-border p-2">
                           {!isEditing ? (
-                            r.kind === "date" ? (r.dueDate ? new Date(r.dueDate).toLocaleDateString() : "—")
-                            : (r.dueOdometer != null ? `${r.dueOdometer} km` : "—")
+                            r.kind === "date"
+                              ? r.dueDate
+                                ? new Date(r.dueDate).toLocaleDateString()
+                                : "—"
+                              : r.dueOdometer != null
+                              ? `${r.dueOdometer} km`
+                              : "—"
                           ) : r.kind === "date" ? (
-                            <input className="p-1 border border-border rounded" type="date" value={rEditForm.dueDate} onChange={(e) => setREditForm((f) => ({ ...f, dueDate: e.target.value }))} />
+                            <input
+                              className="p-1 border border-border rounded"
+                              type="date"
+                              value={rEditForm.dueDate}
+                              onChange={(e) => setREditForm((f) => ({ ...f, dueDate: e.target.value }))}
+                            />
                           ) : (
-                            <input className="p-1 border border-border rounded w-28" type="number" inputMode="numeric" min="0" value={rEditForm.dueOdometer} onChange={(e) => setREditForm((f) => ({ ...f, dueOdometer: e.target.value }))} />
+                            <input
+                              className="p-1 border border-border rounded w-28"
+                              type="number"
+                              inputMode="numeric"
+                              min="0"
+                              value={rEditForm.dueOdometer}
+                              onChange={(e) => setREditForm((f) => ({ ...f, dueOdometer: e.target.value }))}
+                            />
                           )}
                         </td>
                         <td className="border-b border-border p-2">
@@ -1870,18 +2157,42 @@ function exportTripsKml() {
                             stripReminderTokens(r.notes || "—") || "—"
                           ) : (
                             <div className="flex flex-col gap-2">
-                              <input className="p-1 border border-border rounded w-full" value={rEditForm.notes} onChange={(e) => setREditForm((f) => ({ ...f, notes: e.target.value }))} />
+                              <input
+                                className="p-1 border border-border rounded w-full"
+                                value={rEditForm.notes}
+                                onChange={(e) => setREditForm((f) => ({ ...f, notes: e.target.value }))}
+                              />
                               {rEditForm.category === "service" && (
                                 <div className="flex items-end gap-2 text-xs">
                                   <label className="inline-flex items-center gap-1">
-                                    <input type="checkbox" checked={rEditForm.recurring} onChange={(e) => setREditForm((f) => ({ ...f, recurring: e.target.checked }))} />
+                                    <input
+                                      type="checkbox"
+                                      checked={rEditForm.recurring}
+                                      onChange={(e) => setREditForm((f) => ({ ...f, recurring: e.target.checked }))}
+                                    />
                                     <span>Recurring</span>
                                   </label>
-                                  <label>Days:&nbsp;
-                                    <input className="p-1 border border-border rounded w-20" type="number" min="0" value={rEditForm.recurDays} onChange={(e) => setREditForm((f) => ({ ...f, recurDays: e.target.value }))} disabled={!rEditForm.recurring} />
+                                  <label>
+                                    Days:&nbsp;
+                                    <input
+                                      className="p-1 border border-border rounded w-20"
+                                      type="number"
+                                      min="0"
+                                      value={rEditForm.recurDays}
+                                      onChange={(e) => setREditForm((f) => ({ ...f, recurDays: e.target.value }))}
+                                      disabled={!rEditForm.recurring}
+                                    />
                                   </label>
-                                  <label>Km:&nbsp;
-                                    <input className="p-1 border border-border rounded w-24" type="number" min="0" value={rEditForm.recurKm} onChange={(e) => setREditForm((f) => ({ ...f, recurKm: e.target.value }))} disabled={!rEditForm.recurring} />
+                                  <label>
+                                    Km:&nbsp;
+                                    <input
+                                      className="p-1 border border-border rounded w-24"
+                                      type="number"
+                                      min="0"
+                                      value={rEditForm.recurKm}
+                                      onChange={(e) => setREditForm((f) => ({ ...f, recurKm: e.target.value }))}
+                                      disabled={!rEditForm.recurring}
+                                    />
                                   </label>
                                 </div>
                               )}
@@ -1904,13 +2215,21 @@ function exportTripsKml() {
                         <td className="border-b border-border p-2 text-right">
                           {!isEditing ? (
                             <>
-                              <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditReminder(r)}>Edit</button>
-                              <button type="button" className="btn btn-sm" onClick={() => deleteReminder(r._id)}>Delete</button>
+                              <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditReminder(r)}>
+                                Edit
+                              </button>
+                              <button type="button" className="btn btn-sm" onClick={() => deleteReminder(r._id)}>
+                                Delete
+                              </button>
                             </>
                           ) : (
                             <>
-                              <button type="button" className="btn btn-sm mr-1" onClick={saveEditReminder}>Save</button>
-                              <button type="button" className="btn btn-sm" onClick={cancelEditReminder}>Cancel</button>
+                              <button type="button" className="btn btn-sm mr-1" onClick={saveEditReminder}>
+                                Save
+                              </button>
+                              <button type="button" className="btn btn-sm" onClick={cancelEditReminder}>
+                                Cancel
+                              </button>
                             </>
                           )}
                         </td>
@@ -1918,7 +2237,11 @@ function exportTripsKml() {
                     );
                   })}
                 {(!reminders || reminders.length === 0) && (
-                  <tr><td className="p-4 text-center" colSpan={7}>No reminders</td></tr>
+                  <tr>
+                    <td className="p-4 text-center" colSpan={7}>
+                      No reminders
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -1932,9 +2255,27 @@ function exportTripsKml() {
           <div className="text-lg font-semibold">Vehicle Trips</div>
           <div className="flex items-center gap-2">
             {!openTrip ? (
-              <button type="button" className="btn" onClick={() => setStartTripOpen(true)}>Start trip</button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setTripModalErr("");
+                  setStartTripOpen(true);
+                }}
+              >
+                Start trip
+              </button>
             ) : (
-              <button type="button" className="btn" onClick={() => setEndTripOpen(true)}>End trip</button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setTripModalErr("");
+                  setEndTripOpen(true);
+                }}
+              >
+                End trip
+              </button>
             )}
             <button className="btn" onClick={exportTripsKml} disabled={!filteredTrips.length} title={!filteredTrips.length ? "No trips to export" : "Export trips to KML"} type="button">
               Export KML
@@ -1944,10 +2285,16 @@ function exportTripsKml() {
             </button>
           </div>
         </div>
+
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             {tripsLoading && <div className="text-sm text-gray-500">Loading…</div>}
-            {tripErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{tripErr}</div>}
+
+            {/* IMPORTANT: only show tripErr in the card when no trip modal is open */}
+            {!startTripOpen && !endTripOpen && tripErr && (
+              <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{tripErr}</div>
+            )}
+
             {tripInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{tripInfo}</div>}
           </div>
         </div>
@@ -1956,31 +2303,58 @@ function exportTripsKml() {
         <fieldset className="rounded-xl border border-border p-3">
           <legend className="px-2 text-xs uppercase tracking-wide text-gray-600">Trip Filters</legend>
           <div className="flex flex-wrap gap-2 items-end">
-            <label className="text-sm">Driver
+            <label className="text-sm">
+              Driver
               <select className="w-48" value={tripDriverFilter} onChange={(e) => setTripDriverFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripDriverOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
+                {tripDriverOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
-            <label className="text-sm">Project
+            <label className="text-sm">
+              Project
               <select className="w-48" value={tripProjectFilter} onChange={(e) => setTripProjectFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripProjectOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
+                {tripProjectOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
-            <label className="text-sm">Task
+            <label className="text-sm">
+              Task
               <select className="w-48" value={tripTaskFilter} onChange={(e) => setTripTaskFilter(e.target.value)}>
                 <option value="">Any</option>
-                {tripTaskOptions.map((opt) => (<option key={opt.id} value={opt.id}>{opt.label}</option>))}
+                {tripTaskOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
-            <label className="text-sm">From
+            <label className="text-sm">
+              From
               <input className="w-44" type="date" value={tripDateFrom} onChange={(e) => setTripDateFrom(e.target.value)} />
             </label>
-            <label className="text-sm">To
+            <label className="text-sm">
+              To
               <input className="w-44" type="date" value={tripDateTo} onChange={(e) => setTripDateTo(e.target.value)} />
             </label>
-            <button type="button" className="btn" onClick={() => { setTripDriverFilter(""); setTripProjectFilter(""); setTripTaskFilter(""); setTripDateFrom(""); setTripDateTo(""); }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setTripDriverFilter("");
+                setTripProjectFilter("");
+                setTripTaskFilter("");
+                setTripDateFrom("");
+                setTripDateTo("");
+              }}
+            >
               Clear filters
             </button>
             <div className="text-sm text-gray-600 ml-auto">
@@ -2004,57 +2378,133 @@ function exportTripsKml() {
                   return (
                     <tr key={trip._id}>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (trip.startedAt ? new Date(trip.startedAt).toLocaleString() : "—") : (
-                          <input className="p-1 border border-border rounded" type="datetime-local" value={tripEditForm.startedAt} onChange={(e) => setTripEditForm((f) => ({ ...f, startedAt: e.target.value }))} />
+                        {!isEditing ? (
+                          trip.startedAt ? new Date(trip.startedAt).toLocaleString() : "—"
+                        ) : (
+                          <input
+                            className="p-1 border border-border rounded"
+                            type="datetime-local"
+                            value={tripEditForm.startedAt}
+                            onChange={(e) => setTripEditForm((f) => ({ ...f, startedAt: e.target.value }))}
+                          />
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "—") : (
-                          <input className="p-1 border border-border rounded" type="datetime-local" value={tripEditForm.endedAt} onChange={(e) => setTripEditForm((f) => ({ ...f, endedAt: e.target.value }))} />
+                        {!isEditing ? (
+                          trip.endedAt ? new Date(trip.endedAt).toLocaleString() : "—"
+                        ) : (
+                          <input
+                            className="p-1 border border-border rounded"
+                            type="datetime-local"
+                            value={tripEditForm.endedAt}
+                            onChange={(e) => setTripEditForm((f) => ({ ...f, endedAt: e.target.value }))}
+                          />
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (<>{trip.odoStart ?? "—"} → {trip.odoEnd ?? "—"}</>) : (
+                        {!isEditing ? (
+                          <>
+                            {trip.odoStart ?? "—"} → {trip.odoEnd ?? "—"}
+                          </>
+                        ) : (
                           <div className="flex items-center gap-1">
-                            <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={tripEditForm.odoStart} onChange={(e) => setTripEditForm((f) => ({ ...f, odoStart: e.target.value }))} placeholder="start" />
+                            <input
+                              className="p-1 border border-border rounded w-24"
+                              type="number"
+                              inputMode="numeric"
+                              value={tripEditForm.odoStart}
+                              onChange={(e) => setTripEditForm((f) => ({ ...f, odoStart: e.target.value }))}
+                              placeholder="start"
+                            />
                             <span>→</span>
-                            <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={tripEditForm.odoEnd} onChange={(e) => setTripEditForm((f) => ({ ...f, odoEnd: e.target.value }))} placeholder="end" />
+                            <input
+                              className="p-1 border border-border rounded w-24"
+                              type="number"
+                              inputMode="numeric"
+                              value={tripEditForm.odoEnd}
+                              onChange={(e) => setTripEditForm((f) => ({ ...f, odoEnd: e.target.value }))}
+                              placeholder="end"
+                            />
                           </div>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? userLabel(trip.driverUserId || trip.driverId) : (
-                          <select className="p-1 border border-border rounded" value={tripEditForm.driverUserId} onChange={(e) => setTripEditForm((f) => ({ ...f, driverUserId: e.target.value }))}>
+                        {!isEditing ? (
+                          userLabel(trip.driverUserId || trip.driverId)
+                        ) : (
+                          <select
+                            className="p-1 border border-border rounded"
+                            value={tripEditForm.driverUserId}
+                            onChange={(e) => setTripEditForm((f) => ({ ...f, driverUserId: e.target.value }))}
+                          >
                             <option value="">— none —</option>
-                            {users.map((u) => (<option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>))}
+                            {users.map((u) => (
+                              <option key={u._id} value={u._id}>
+                                {u.name || u.email || u.username}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
                         {!isEditing ? (
-                          trip.projectId ? <Link className="link" to={`/projects/${trip.projectId}`}>{projectLabel(trip.projectId)}</Link> : "—"
+                          trip.projectId ? (
+                            <Link className="link" to={`/projects/${trip.projectId}`}>
+                              {projectLabel(trip.projectId)}
+                            </Link>
+                          ) : (
+                            "—"
+                          )
                         ) : (
-                          <select className="p-1 border border-border rounded" value={tripEditForm.projectId} onChange={(e) => {
-                            const pid = e.target.value || "";
-                            setTripEditForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
-                          }}>
+                          <select
+                            className="p-1 border border-border rounded"
+                            value={tripEditForm.projectId}
+                            onChange={(e) => {
+                              const pid = e.target.value || "";
+                              setTripEditForm((f) => ({
+                                ...f,
+                                projectId: pid,
+                                taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId,
+                              }));
+                            }}
+                          >
                             <option value="">— none —</option>
-                            {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+                            {projects.map((p) => (
+                              <option key={p._id} value={p._id}>
+                                {p.name}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
                         {!isEditing ? (
-                          trip.taskId ? <Link className="link" to={`/tasks/${trip.taskId}`}>{taskLabel(trip.taskId)}</Link> : "—"
+                          trip.taskId ? (
+                            <Link className="link" to={`/tasks/${trip.taskId}`}>
+                              {taskLabel(trip.taskId)}
+                            </Link>
+                          ) : (
+                            "—"
+                          )
                         ) : (
-                          <select className="p-1 border border-border rounded" value={tripEditForm.taskId} onChange={(e) => setTripEditForm((f) => ({ ...f, taskId: e.target.value }))}>
+                          <select
+                            className="p-1 border border-border rounded"
+                            value={tripEditForm.taskId}
+                            onChange={(e) => setTripEditForm((f) => ({ ...f, taskId: e.target.value }))}
+                          >
                             <option value="">— none —</option>
-                            {tasksForTripEditProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+                            {tasksForTripEditProject.map((t) => (
+                              <option key={t._id} value={t._id}>
+                                {t.title}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? usage : (
+                        {!isEditing ? (
+                          usage
+                        ) : (
                           <select className="p-1 border border-border rounded" value={tripEditForm.usage} onChange={(e) => setTripEditForm((f) => ({ ...f, usage: e.target.value }))}>
                             <option value="business">business</option>
                             <option value="private">private</option>
@@ -2077,20 +2527,29 @@ function exportTripsKml() {
                         </div>
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (trip.notes || "—") : (
+                        {!isEditing ? (
+                          trip.notes || "—"
+                        ) : (
                           <input className="p-1 border border-border rounded w-full" value={tripEditForm.notes} onChange={(e) => setTripEditForm((f) => ({ ...f, notes: e.target.value }))} />
                         )}
                       </td>
                       <td className="border-b border-border p-2 text-right">
                         {!isEditing ? (
-                          !isOpenRow ? <button type="button" className="btn btn-sm" onClick={() => beginEditTrip(trip)}>Edit</button>
-                          : <span className="text-xs text-gray-500">End trip to edit</span>
+                          !isOpenRow ? (
+                            <button type="button" className="btn btn-sm" onClick={() => beginEditTrip(trip)}>
+                              Edit
+                            </button>
+                          ) : (
+                            <span className="text-xs text-gray-500">End trip to edit</span>
+                          )
                         ) : (
                           <>
                             <button type="button" className="btn btn-sm mr-1" onClick={saveEditTrip} disabled={tripSaving} title={tripSaving ? "Saving…" : "Save changes"}>
                               {tripSaving ? "Saving…" : "Save"}
                             </button>
-                            <button type="button" className="btn btn-sm" onClick={cancelEditTrip} disabled={tripSaving}>Cancel</button>
+                            <button type="button" className="btn btn-sm" onClick={cancelEditTrip} disabled={tripSaving}>
+                              Cancel
+                            </button>
                           </>
                         )}
                       </td>
@@ -2098,7 +2557,11 @@ function exportTripsKml() {
                   );
                 })
               ) : (
-                <tr><td className="p-3 text-center" colSpan={11}>No trips match filters</td></tr>
+                <tr>
+                  <td className="p-3 text-center" colSpan={11}>
+                    No trips match filters
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
@@ -2110,7 +2573,9 @@ function exportTripsKml() {
         <div className="flex items-center justify-between">
           <div className="text-lg font-semibold">Purchases</div>
           <div className="flex items-center gap-2">
-            <button type="button" className="btn" onClick={() => setPurchaseModalOpen(true)}>Add purchase</button>
+            <button type="button" className="btn" onClick={() => setPurchaseModalOpen(true)}>
+              Add purchase
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -2128,27 +2593,40 @@ function exportTripsKml() {
               {purchases.length ? (
                 purchases.map((p) => {
                   const isEditing = editId === p._id;
-                  const receiptUrl = p.receiptPhoto?.url || p.receiptPhotoUrl || p.photoUrl;
                   return (
                     <tr key={p._id}>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (p.date ? new Date(p.date).toLocaleDateString() : "—") : (
+                        {!isEditing ? (
+                          p.date ? new Date(p.date).toLocaleDateString() : "—"
+                        ) : (
                           <input className="p-1 border border-border rounded w-36" type="date" value={editForm.date} onChange={(e) => setEditForm((f) => ({ ...f, date: e.target.value }))} />
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (p.type || "—") : (
+                        {!isEditing ? (
+                          p.type || "—"
+                        ) : (
                           <select className="p-1 border border-border rounded" value={editForm.type} onChange={(e) => setEditForm((f) => ({ ...f, type: e.target.value }))}>
-                            {PURCHASE_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                            {PURCHASE_TYPES.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (vendorLabel(p.vendor)) : (
+                        {!isEditing ? (
+                          vendorLabel(p.vendor)
+                        ) : (
                           <div className="flex items-center gap-2">
                             <select className="p-1 border border-border rounded" value={editForm.vendorId} onChange={(e) => setEditForm((f) => ({ ...f, vendorId: e.target.value }))}>
                               <option value="">— none —</option>
-                              {vendors.map((vnd) => (<option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>{vnd.name}</option>))}
+                              {vendors.map((vnd) => (
+                                <option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>
+                                  {vnd.name}
+                                </option>
+                              ))}
                               <option value="__new__">+ Add new vendor…</option>
                             </select>
                             {(editForm.vendorId === "" || editForm.vendorId === "__new__") && (
@@ -2158,89 +2636,115 @@ function exportTripsKml() {
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (p.cost ?? "—") : (
+                        {!isEditing ? (
+                          p.cost ?? "—"
+                        ) : (
                           <input className="p-1 border border-border rounded w-24" type="number" inputMode="decimal" min="0" value={editForm.cost} onChange={(e) => setEditForm((f) => ({ ...f, cost: e.target.value }))} />
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (projectLabel(p.projectId)) : (
-                          <select className="p-1 border border-border rounded" value={editForm.projectId} onChange={(e) => {
-                            const pid = e.target.value || "";
-                            setEditForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
-                          }}>
+                        {!isEditing ? (
+                          projectLabel(p.projectId)
+                        ) : (
+                          <select
+                            className="p-1 border border-border rounded"
+                            value={editForm.projectId}
+                            onChange={(e) => {
+                              const pid = e.target.value || "";
+                              setEditForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
+                            }}
+                          >
                             <option value="">— none —</option>
-                            {projects.map((pr) => (<option key={pr._id} value={pr._id}>{pr.name}</option>))}
+                            {projects.map((pr) => (
+                              <option key={pr._id} value={pr._id}>
+                                {pr.name}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (taskLabel(p.taskId)) : (
+                        {!isEditing ? (
+                          taskLabel(p.taskId)
+                        ) : (
                           <select className="p-1 border border-border rounded" value={editForm.taskId} onChange={(e) => setEditForm((f) => ({ ...f, taskId: e.target.value }))}>
                             <option value="">— none —</option>
-                            {tasksForPurchaseEditProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+                            {tasksForPurchaseEditProject.map((t) => (
+                              <option key={t._id} value={t._id}>
+                                {t.title}
+                              </option>
+                            ))}
                           </select>
                         )}
                       </td>
                       <td className="border-b border-border p-2">
-                        {!isEditing ? (p.notes || "—") : (
+                        {!isEditing ? (
+                          p.notes || "—"
+                        ) : (
                           <input className="p-1 border border-border rounded w-full" value={editForm.notes} onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))} />
                         )}
                       </td>
-                      {/* REPLACE the Purchases "Receipt" <td> cell with this */}
-<td className="border-b border-border p-2">
-  {(() => {
-    const candidate =
-      p.receiptPhoto?.url ||
-      p.receiptPhotoUrl ||
-      p.photo?.url ||
-      p.photoUrl ||
-      (Array.isArray(p.attachments) && p.attachments[0]?.url) ||
-      (typeof p.receipt === "string" ? p.receipt : p.receipt?.url) ||
-      "";
 
-    const url = candidate ? toAbsoluteUrl(candidate) : "";
+                      {/* Receipt */}
+                      <td className="border-b border-border p-2">
+                        {(() => {
+                          const candidate =
+                            p.receiptPhoto?.url ||
+                            p.receiptPhotoUrl ||
+                            p.photo?.url ||
+                            p.photoUrl ||
+                            (Array.isArray(p.attachments) && p.attachments[0]?.url) ||
+                            (typeof p.receipt === "string" ? p.receipt : p.receipt?.url) ||
+                            "";
 
-    if (isEditing) {
-      return (
-        <div className="text-left">
-          {url && (
-            <div className="mb-2">
-              <a href={url} target="_blank" rel="noreferrer" className="link text-xs">Open current</a>
-            </div>
-          )}
-          <label className="text-xs">
-            Replace receipt photo
-            <input className="w-full" type="file" accept="image/*"
-              onChange={(e) => setEditPhotoFile(e.target.files?.[0] || null)} />
-          </label>
-        </div>
-      );
-    }
+                          const url = candidate ? toAbsoluteUrl(candidate) : "";
 
-    return url ? (
-      <a href={url} target="_blank" rel="noreferrer" title="Receipt">
-        <img
-          src={url}
-          alt="Receipt"
-          style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
-        />
-      </a>
-    ) : (
-      <span className="text-xs text-gray-400">—</span>
-    );
-  })()}
-</td>
+                          if (isEditing) {
+                            return (
+                              <div className="text-left">
+                                {url && (
+                                  <div className="mb-2">
+                                    <a href={url} target="_blank" rel="noreferrer" className="link text-xs">
+                                      Open current
+                                    </a>
+                                  </div>
+                                )}
+                                <label className="text-xs">
+                                  Replace receipt photo
+                                  <input className="w-full" type="file" accept="image/*" onChange={(e) => setEditPhotoFile(e.target.files?.[0] || null)} />
+                                </label>
+                              </div>
+                            );
+                          }
+
+                          return url ? (
+                            <a href={url} target="_blank" rel="noreferrer" title="Receipt">
+                              <img src={url} alt="Receipt" style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }} />
+                            </a>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          );
+                        })()}
+                      </td>
 
                       <td className="border-b border-border p-2 text-right">
                         {!isEditing ? (
                           <>
-                            <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditPurchase(p)}>Edit</button>
-                            <button type="button" className="btn btn-sm" onClick={() => handleDeletePurchase(p._id)}>Delete</button>
+                            <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditPurchase(p)}>
+                              Edit
+                            </button>
+                            <button type="button" className="btn btn-sm" onClick={() => handleDeletePurchase(p._id)}>
+                              Delete
+                            </button>
                           </>
                         ) : (
                           <>
-                            <button type="button" className="btn btn-sm mr-1" onClick={saveEditPurchase}>Save</button>
-                            <button type="button" className="btn btn-sm" onClick={cancelEdit}>Cancel</button>
+                            <button type="button" className="btn btn-sm mr-1" onClick={saveEditPurchase}>
+                              Save
+                            </button>
+                            <button type="button" className="btn btn-sm" onClick={cancelEdit}>
+                              Cancel
+                            </button>
                           </>
                         )}
                       </td>
@@ -2248,7 +2752,11 @@ function exportTripsKml() {
                   );
                 })
               ) : (
-                <tr><td className="p-3 text-center" colSpan={9}>No purchases yet</td></tr>
+                <tr>
+                  <td className="p-3 text-center" colSpan={9}>
+                    No purchases yet
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
@@ -2260,12 +2768,18 @@ function exportTripsKml() {
         <div className="flex items-center justify-between">
           <div className="text-lg font-semibold">Logbook</div>
           <div className="flex items-center gap-2">
-            <button type="button" className="btn" onClick={() => setLbModalOpen(true)}>Add entry</button>
-            <button className="btn" onClick={exportLogbookCsv}>Export CSV</button>
+            <button type="button" className="btn" onClick={() => setLbModalOpen(true)}>
+              Add entry
+            </button>
+            <button className="btn" onClick={exportLogbookCsv}>
+              Export CSV
+            </button>
           </div>
         </div>
 
-        <div className="text-sm text-gray-700">Entries: <b>{entries.length}</b></div>
+        <div className="text-sm text-gray-700">
+          Entries: <b>{entries.length}</b>
+        </div>
 
         {lbErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{lbErr}</div>}
         {lbInfo && <div className="rounded border border-green-200 bg-green-100 p-2 text-sm">{lbInfo}</div>}
@@ -2283,59 +2797,91 @@ function exportTripsKml() {
                 return (
                   <tr key={e._id}>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.ts ? new Date(d.ts).toLocaleString() : "—") : (
+                      {!isEditing ? (
+                        d.ts ? new Date(d.ts).toLocaleString() : "—"
+                      ) : (
                         <input className="p-1 border border-border rounded" type="datetime-local" value={lbEditForm.ts} onChange={(ev) => setLbEditForm((f) => ({ ...f, ts: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.type) : (
+                      {!isEditing ? (
+                        d.type
+                      ) : (
                         <select className="p-1 border border-border rounded" value={lbEditForm.type} onChange={(ev) => setLbEditForm((f) => ({ ...f, type: ev.target.value }))}>
-                          {LOG_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+                          {LOG_TYPES.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
                         </select>
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.odometer ?? "—") : (
+                      {!isEditing ? (
+                        d.odometer ?? "—"
+                      ) : (
                         <input className="p-1 border border-border rounded w-24" type="number" inputMode="numeric" value={lbEditForm.odometer} onChange={(ev) => setLbEditForm((f) => ({ ...f, odometer: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.cost !== "" ? d.cost : "—") : (
+                      {!isEditing ? (
+                        d.cost !== "" ? d.cost : "—"
+                      ) : (
                         <input className="p-1 border border-border rounded w-24" type="number" inputMode="decimal" min="0" value={lbEditForm.cost} onChange={(ev) => setLbEditForm((f) => ({ ...f, cost: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.vendor || "—") : (
+                      {!isEditing ? (
+                        d.vendor || "—"
+                      ) : (
                         <input className="p-1 border border-border rounded" value={lbEditForm.vendor} onChange={(ev) => setLbEditForm((f) => ({ ...f, vendor: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? ((d.tags || []).join(", ") || "—") : (
+                      {!isEditing ? (
+                        (d.tags || []).join(", ") || "—"
+                      ) : (
                         <input className="p-1 border border-border rounded" value={lbEditForm.tags} onChange={(ev) => setLbEditForm((f) => ({ ...f, tags: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2">
-                      {!isEditing ? (d.notes || "—") : (
+                      {!isEditing ? (
+                        d.notes || "—"
+                      ) : (
                         <input className="p-1 border border-border rounded w-full" value={lbEditForm.notes} onChange={(ev) => setLbEditForm((f) => ({ ...f, notes: ev.target.value }))} />
                       )}
                     </td>
                     <td className="border-b border-border p-2 text-right">
                       {!isEditing ? (
                         <>
-                          <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditEntry(e)}>Edit</button>
-                          <button type="button" className="btn btn-sm" onClick={() => deleteEntry(e._id)}>Delete</button>
+                          <button type="button" className="btn btn-sm mr-1" onClick={() => beginEditEntry(e)}>
+                            Edit
+                          </button>
+                          <button type="button" className="btn btn-sm" onClick={() => deleteEntry(e._id)}>
+                            Delete
+                          </button>
                         </>
                       ) : (
                         <>
-                          <button type="button" className="btn btn-sm mr-1" onClick={saveLbEdit}>Save</button>
-                          <button type="button" className="btn btn-sm" onClick={cancelLbEdit}>Cancel</button>
+                          <button type="button" className="btn btn-sm mr-1" onClick={saveLbEdit}>
+                            Save
+                          </button>
+                          <button type="button" className="btn btn-sm" onClick={cancelLbEdit}>
+                            Cancel
+                          </button>
                         </>
                       )}
                     </td>
                   </tr>
                 );
               })}
-              {!entries.length && <tr><td className="p-4 text-center" colSpan={8}>No log entries</td></tr>}
+              {!entries.length && (
+                <tr>
+                  <td className="p-4 text-center" colSpan={8}>
+                    No log entries
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -2343,7 +2889,6 @@ function exportTripsKml() {
         {/* Inspections inline list (view links) */}
         <div className="rounded-xl border border-border p-3">
           <div className="text-md font-semibold mb-2">Inspections</div>
-          {/* Quietly handle missing endpoints */}
           {!inspections.length ? (
             <div className="text-sm text-gray-600">No inspections recorded for this vehicle.</div>
           ) : (
@@ -2360,7 +2905,11 @@ function exportTripsKml() {
                       <td className="border-b border-border p-2">{userLabel(insp.userId || insp.user)}</td>
                       <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
-                        {insp._id && <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>View</Link>}
+                        {insp._id && (
+                          <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>
+                            View
+                          </Link>
+                        )}
                         <button type="button" className="link text-sm underline" onClick={() => openInspectionLightbox(insp)} title="Quick view">
                           view
                         </button>
@@ -2378,37 +2927,65 @@ function exportTripsKml() {
       <Modal
         open={startTripOpen}
         title="Start trip"
-        onClose={() => setStartTripOpen(false)}
-        footer={<><button className="btn" onClick={handleStartTrip}>Start trip</button></>}
+        onClose={() => {
+          setTripModalErr("");
+          setStartTripOpen(false);
+        }}
+        footer={
+          <>
+            <button className="btn" onClick={handleStartTrip}>
+              Start trip
+            </button>
+          </>
+        }
       >
+        {tripModalErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{tripModalErr}</div>}
+
         <div className="grid md:grid-cols-2 gap-3">
-          <label className="text-sm">Odometer start
+          <label className="text-sm">
+            Odometer start
             <input className="w-full" type="number" min="0" required value={odoStart} onChange={(e) => setOdoStart(e.target.value)} placeholder="e.g. 10234.5" />
           </label>
-          <label className="text-sm">Photo (start)
+          <label className="text-sm">
+            Photo (start)
             <input className="w-full" type="file" accept="image/*" capture="environment" onChange={(e) => setStartFile(e.target.files?.[0] || null)} />
           </label>
-          <label className="text-sm">Usage
+          <label className="text-sm">
+            Usage
             <select className="w-full" value={tripUsage} onChange={(e) => setTripUsage(e.target.value)}>
               <option value="business">business</option>
               <option value="private">private</option>
             </select>
           </label>
           <div />
-          <label className="text-sm">Project (optional)
-            <select className="w-full" value={tripProjectId} onChange={(e) => {
-              const pid = e.target.value || "";
-              setTripProjectId(pid);
-              if (tripTaskId && !taskMatchesProject(tripTaskId, pid)) setTripTaskId("");
-            }}>
+          <label className="text-sm">
+            Project (optional)
+            <select
+              className="w-full"
+              value={tripProjectId}
+              onChange={(e) => {
+                const pid = e.target.value || "";
+                setTripProjectId(pid);
+                if (tripTaskId && !taskMatchesProject(tripTaskId, pid)) setTripTaskId("");
+              }}
+            >
               <option value="">— none —</option>
-              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+              {projects.map((p) => (
+                <option key={p._id} value={p._id}>
+                  {p.name}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="text-sm">Task (optional)
+          <label className="text-sm">
+            Task (optional)
             <select className="w-full" value={tripTaskId} onChange={(e) => setTripTaskId(e.target.value)}>
               <option value="">— none —</option>
-              {tasksForTripProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+              {tasksForTripProject.map((t) => (
+                <option key={t._id} value={t._id}>
+                  {t.title}
+                </option>
+              ))}
             </select>
           </label>
         </div>
@@ -2417,21 +2994,49 @@ function exportTripsKml() {
       <Modal
         open={endTripOpen}
         title="End trip"
-        onClose={() => setEndTripOpen(false)}
-        footer={<><button className="btn" onClick={handleEndTrip}>End trip</button></>}
+        onClose={() => {
+          setTripModalErr("");
+          setEndTripOpen(false);
+        }}
+        footer={
+          <>
+            <button className="btn" onClick={handleEndTrip}>
+              End trip
+            </button>
+          </>
+        }
       >
-        {!openTrip ? <div className="text-sm text-gray-600">No open trip.</div> : (
+        {tripModalErr && <div className="rounded border border-red-200 bg-red-50 p-2 text-sm">{tripModalErr}</div>}
+
+        {!openTrip ? (
+          <div className="text-sm text-gray-600">No open trip.</div>
+        ) : (
           <div className="grid md:grid-cols-2 gap-3">
             <div className="md:col-span-2 text-sm">
               <b>Open trip:</b> started {openTrip.startedAt ? new Date(openTrip.startedAt).toLocaleString() : "—"} · ODO start: {openTrip.odoStart ?? "—"}
             </div>
-            <label className="text-sm">Odometer end
-              <input className="w-full" type="number" min={openTrip.odoStart ?? 0} required value={odoEnd} onChange={(e) => setOdoEnd(e.target.value)} placeholder="e.g. 10245.8" />
+            <label className="text-sm">
+              Odometer end
+              <input
+                className="w-full"
+                type="number"
+                min={openTrip.odoStart ?? 0}
+                required
+                value={odoEnd}
+                onChange={(e) => {
+                  setOdoEnd(e.target.value);
+                  // clear modal error as user edits
+                  if (tripModalErr) setTripModalErr("");
+                }}
+                placeholder="e.g. 10245.8"
+              />
             </label>
-            <label className="text-sm">Photo (end)
+            <label className="text-sm">
+              Photo (end)
               <input className="w-full" type="file" accept="image/*" capture="environment" onChange={(e) => setEndFile(e.target.files?.[0] || null)} />
             </label>
-            <label className="text-sm md:col-span-2">Notes (optional)
+            <label className="text-sm md:col-span-2">
+              Notes (optional)
               <input className="w-full" value={tripNotes} onChange={(e) => setTripNotes(e.target.value)} placeholder="Trip notes…" />
             </label>
           </div>
@@ -2442,54 +3047,89 @@ function exportTripsKml() {
         open={purchaseModalOpen}
         title="Add purchase"
         onClose={() => setPurchaseModalOpen(false)}
-        footer={<><button className="btn btn-primary" onClick={handleAddPurchase}>Add purchase</button></>}
+        footer={
+          <>
+            <button className="btn btn-primary" onClick={handleAddPurchase}>
+              Add purchase
+            </button>
+          </>
+        }
       >
         <form onSubmit={handleAddPurchase} className="grid md:grid-cols-2 gap-2" onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}>
-          <label className="text-sm">Vendor
+          <label className="text-sm">
+            Vendor
             <select className="w-full" value={pForm.vendorId} onChange={(e) => setPForm((f) => ({ ...f, vendorId: e.target.value }))}>
               <option value="">— none —</option>
-              {vendors.map((vnd) => (<option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>{vnd.name}</option>))}
+              {vendors.map((vnd) => (
+                <option key={vnd._id || vnd.id} value={vnd._id || vnd.id}>
+                  {vnd.name}
+                </option>
+              ))}
               <option value="__new__">+ Add new vendor…</option>
             </select>
           </label>
           {(pForm.vendorId === "" || pForm.vendorId === "__new__") && (
-            <label className="text-sm">New vendor name
+            <label className="text-sm">
+              New vendor name
               <input className="w-full" value={pForm.newVendorName} onChange={(e) => setPForm((f) => ({ ...f, newVendorName: e.target.value }))} placeholder="e.g. AutoCare Pty" />
             </label>
           )}
-          <label className="text-sm">Type
+          <label className="text-sm">
+            Type
             <select className="w-full" value={pForm.type} onChange={(e) => setPForm((f) => ({ ...f, type: e.target.value }))}>
-              {PURCHASE_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+              {PURCHASE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="text-sm">Date
+          <label className="text-sm">
+            Date
             <input className="w-full" type="date" value={pForm.date} onChange={(e) => setPForm((f) => ({ ...f, date: e.target.value }))} />
           </label>
-          <label className="text-sm">Cost
+          <label className="text-sm">
+            Cost
             <input className="w-full" type="number" inputMode="decimal" min="0" value={pForm.cost} onChange={(e) => setPForm((f) => ({ ...f, cost: e.target.value }))} />
           </label>
 
-          {/* NEW: receipt photo */}
-          <label className="text-sm">Receipt photo (optional)
+          {/* receipt photo */}
+          <label className="text-sm">
+            Receipt photo (optional)
             <input className="w-full" type="file" accept="image/*" onChange={(e) => setPPhotoFile(e.target.files?.[0] || null)} />
           </label>
 
-          <label className="text-sm">Project
-            <select className="w-full" value={pForm.projectId} onChange={(e) => {
-              const pid = e.target.value || "";
-              setPForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
-            }}>
+          <label className="text-sm">
+            Project
+            <select
+              className="w-full"
+              value={pForm.projectId}
+              onChange={(e) => {
+                const pid = e.target.value || "";
+                setPForm((f) => ({ ...f, projectId: pid, taskId: f.taskId && !taskMatchesProject(f.taskId, pid) ? "" : f.taskId }));
+              }}
+            >
               <option value="">— none —</option>
-              {projects.map((p) => (<option key={p._id} value={p._id}>{p.name}</option>))}
+              {projects.map((p) => (
+                <option key={p._id} value={p._id}>
+                  {p.name}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="text-sm">Task
+          <label className="text-sm">
+            Task
             <select className="w-full" value={pForm.taskId} onChange={(e) => setPForm((f) => ({ ...f, taskId: e.target.value }))}>
               <option value="">— none —</option>
-              {tasksForPurchaseProject.map((t) => (<option key={t._id} value={t._id}>{t.title}</option>))}
+              {tasksForPurchaseProject.map((t) => (
+                <option key={t._id} value={t._id}>
+                  {t.title}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="text-sm md:col-span-2">Notes
+          <label className="text-sm md:col-span-2">
+            Notes
             <input className="w-full" value={pForm.notes} onChange={(e) => setPForm((f) => ({ ...f, notes: e.target.value }))} placeholder="What was purchased / reference / invoice # …" />
           </label>
         </form>
@@ -2499,7 +3139,13 @@ function exportTripsKml() {
         open={inspModalOpen}
         title={inspModalTitle}
         onClose={() => setInspModalOpen(false)}
-        footer={<><button className="btn" onClick={() => setInspModalOpen(false)}>Close</button></>}
+        footer={
+          <>
+            <button className="btn" onClick={() => setInspModalOpen(false)}>
+              Close
+            </button>
+          </>
+        }
       >
         <div className="max-h-[70vh] overflow-auto border border-border rounded p-2">
           {/* eslint-disable-next-line react/no-danger */}
@@ -2511,49 +3157,75 @@ function exportTripsKml() {
         open={lbModalOpen}
         title="Add logbook entry"
         onClose={() => setLbModalOpen(false)}
-        footer={<><button className="btn btn-primary" onClick={createEntry}>Add entry</button></>}
+        footer={
+          <>
+            <button className="btn btn-primary" onClick={createEntry}>
+              Add entry
+            </button>
+          </>
+        }
       >
         <form onSubmit={createEntry} className="grid md:grid-cols-3 gap-2" onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}>
-          <label className="text-sm">Type
+          <label className="text-sm">
+            Type
             <select className="w-full" value={lbForm.type} onChange={(e) => setLbForm({ ...lbForm, type: e.target.value })}>
-              {LOG_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              {LOG_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
             </select>
           </label>
-          <label className="text-sm">Timestamp
+          <label className="text-sm">
+            Timestamp
             <input className="w-full" type="datetime-local" value={lbForm.ts} onChange={(e) => setLbForm({ ...lbForm, ts: e.target.value })} />
           </label>
-          <label className="text-sm">Odometer (km)
+          <label className="text-sm">
+            Odometer (km)
             <input className="w-full" type="number" inputMode="numeric" min="0" value={lbForm.odometer} onChange={(e) => setLbForm({ ...lbForm, odometer: e.target.value })} />
           </label>
-          <label className="text-sm">Cost
+          <label className="text-sm">
+            Cost
             <input className="w-full" type="number" inputMode="decimal" min="0" value={lbForm.cost} onChange={(e) => setLbForm({ ...lbForm, cost: e.target.value })} />
           </label>
-          <label className="text-sm">Vendor
+          <label className="text-sm">
+            Vendor
             <input className="w-full" value={lbForm.vendor} onChange={(e) => setLbForm({ ...lbForm, vendor: e.target.value })} />
           </label>
-          <label className="text-sm">Tags (comma)
+          <label className="text-sm">
+            Tags (comma)
             <input className="w-full" value={lbForm.tags} onChange={(e) => setLbForm({ ...lbForm, tags: e.target.value })} placeholder="service, warranty" />
           </label>
-          <label className="text-sm md:col-span-3">Notes
+          <label className="text-sm md:col-span-3">
+            Notes
             <textarea className="w-full" rows={3} value={lbForm.notes} onChange={(e) => setLbForm({ ...lbForm, notes: e.target.value })} />
           </label>
-          <label className="text-sm md:col-span-3">Completes reminder (optional)
+          <label className="text-sm md:col-span-3">
+            Completes reminder (optional)
             <select className="w-full" value={lbForm.completeReminderId} onChange={(e) => setLbForm({ ...lbForm, completeReminderId: e.target.value })}>
               <option value="">— none —</option>
               {(reminders || []).filter((r) => r.active).map((r) => (
                 <option key={r._id} value={r._id}>
-                  {(parseReminderCategory(r.notes || "") || "—") + " · " + (r.kind === "date"
-                    ? `Date: ${r.dueDate ? new Date(r.dueDate).toLocaleDateString() : "—"}`
-                    : `Odo: ${r.dueOdometer ?? "—"} km`)}
+                  {(parseReminderCategory(r.notes || "") || "—") +
+                    " · " +
+                    (r.kind === "date"
+                      ? `Date: ${r.dueDate ? new Date(r.dueDate).toLocaleDateString() : "—"}`
+                      : `Odo: ${r.dueOdometer ?? "—"} km`)}
                 </option>
               ))}
             </select>
           </label>
           <div className="md:col-span-3">
             <div className="flex flex-wrap gap-2">
-              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "service", tags: "service", ts: new Date().toISOString().slice(0, 16) })); }}>+ Service</button>
-              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "tyres", tags: "tyre", ts: new Date().toISOString().slice(0, 16) })); }}>+ Tyres</button>
-              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "other", tags: "fuel", ts: new Date().toISOString().slice(0, 16) })); }}>+ Fuel</button>
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "service", tags: "service", ts: new Date().toISOString().slice(0, 16) })); }}>
+                + Service
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "tyres", tags: "tyre", ts: new Date().toISOString().slice(0, 16) })); }}>
+                + Tyres
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => { setLbForm((f) => ({ ...f, type: "other", tags: "fuel", ts: new Date().toISOString().slice(0, 16) })); }}>
+                + Fuel
+              </button>
             </div>
           </div>
         </form>
