@@ -632,7 +632,7 @@ export default function AssetDetail() {
     const title = asset?.name || "Asset";
     const proj = projName;
     const code = asset?.code || "";
-    const thumb = (asset?.attachments || [])[0]?.url || "";
+    const thumb = fileUrl((asset?.attachments || [])[0]?.url || "");
     const css = `
       body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:0; padding:12px; background:#fff;}
       .card{border:1px solid #ddd; padding:12px; border-radius:10px; width:${labelSize === "small" ? "320px" : "400px"}}
@@ -899,10 +899,11 @@ export default function AssetDetail() {
           {(asset.attachments || []).map((att) => {
             const isImage = (att.mime || "").startsWith("image/");
             const uploadedAt = att.uploadedAt ? new Date(att.uploadedAt).toLocaleString() : "";
+            const attHref = fileUrl(att.url);
             return (
               <div key={att._id || att.url} className="border rounded-lg overflow-hidden bg-white" style={{ width: 160 }}>
                 <a
-                  href={att.url}
+                  href={fileUrl(att.url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="block"
@@ -921,14 +922,14 @@ export default function AssetDetail() {
                   >
                     {isImage ? (
                       <img
-                        src={att.url}
+                        src={fileUrl(att.url)}
                         alt={att.filename || "attachment"}
                         style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                        onError={(e) => {
-                          e.currentTarget.style.display = "none";
-                          const p = e.currentTarget.parentElement;
-                          if (p) p.innerHTML = "<div style='font-size:40px'>📄</div>";
-                        }}
+                       onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const p = e.currentTarget.parentElement;
+                        if (p) p.innerHTML = "<div style='font-size:40px'>📄</div>";
+                    }}
                       />
                     ) : (
                       <div className="text-4xl" aria-hidden>
