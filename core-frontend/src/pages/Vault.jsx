@@ -1,6 +1,6 @@
 // src/pages/Vault.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { api } from "../lib/api";
+import { api, fileUrl } from "../lib/api";
 
 /** --- id helper (handles _id or id) --- **/
 const docIdOf = (d) => (d && (d._id || d.id)) ? String(d._id || d.id) : "";
@@ -94,6 +94,8 @@ export default function Vault() {
   // create modal
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState({ title: "", folder: "", tags: "" });
+  const [createFile, setCreateFile] = useState(null);
+  const [createSaving, setCreateSaving] = useState(false);
 
   // edit modal
   const [editDoc, setEditDoc] = useState(null);
@@ -105,7 +107,7 @@ export default function Vault() {
   const [previewDoc, setPreviewDoc] = useState(null); // a full doc row
   const [pvLoading, setPvLoading] = useState(false);
   const [pvErr, setPvErr] = useState("");
-  const [pvUrl, setPvUrl] = useState("");  // object URL for media/pdf
+  const [pvUrl, setPvUrl] = useState("");   // object URL for media/pdf
   const [pvText, setPvText] = useState(""); // text preview (for text/*)
 
   // debounce search
@@ -128,29 +130,6 @@ export default function Vault() {
   }
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [includeDeleted, qDeb]);
-
-  async function doCreate(e) {
-    e.preventDefault();
-    setErr(""); setInfo("");
-    const body = {
-      title: (creating.title || "").trim(),
-      folder: (creating.folder || "").trim(),
-      tags: (creating.tags || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-    };
-    if (!body.title) return setErr("Title required");
-    try {
-      const { data: doc } = await api.post("/documents", body);
-      setDocs((prev) => [doc, ...prev]);
-      setCreating({ title: "", folder: "", tags: "" });
-      setInfo("Document created.");
-      setShowCreate(false);
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
-    }
-  }
 
   async function doRename(id, title) {
     const safeId = String(id || "");
@@ -175,8 +154,53 @@ export default function Vault() {
       });
       setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
       setInfo("Version uploaded.");
+      return updated;
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
+      throw e;
+    }
+  }
+
+  async function doCreate(e) {
+    e.preventDefault();
+    setErr(""); setInfo("");
+    setCreateSaving(true);
+
+    const body = {
+      title: (creating.title || "").trim(),
+      folder: (creating.folder || "").trim(),
+      tags: (creating.tags || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
+    if (!body.title) {
+      setCreateSaving(false);
+      return setErr("Title required");
+    }
+
+    try {
+      // 1) Create the document row
+      const { data: doc } = await api.post("/documents", body);
+
+      let finalDoc = doc;
+
+      // 2) If user selected a file, upload immediately as first version
+      if (createFile) {
+        finalDoc = await doUploadVersion(docIdOf(doc), createFile);
+      }
+
+      // 3) Update list + reset form
+      setDocs((prev) => [finalDoc, ...prev]);
+      setCreating({ title: "", folder: "", tags: "" });
+      setCreateFile(null);
+
+      setInfo(createFile ? "Document created and file uploaded." : "Document created.");
+      setShowCreate(false);
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
+    } finally {
+      setCreateSaving(false);
     }
   }
 
@@ -223,12 +247,17 @@ export default function Vault() {
     setPreviewDoc(doc);
     setPvErr("");
     setPvText("");
+    if (pvUrl) {
+      try { URL.revokeObjectURL(pvUrl); } catch {}
+    }
     setPvUrl("");
-    const url = doc?.latest?.url;
+
+    const rawUrl = doc?.latest?.url;
+    const absUrl = fileUrl(rawUrl); // ✅ critical fix: always backend origin
     const filename = doc?.latest?.filename || doc?.title || "document";
     const declaredMime = doc?.latest?.mime || guessMimeFromName(filename);
 
-    if (!url) {
+    if (!rawUrl) {
       setPvErr("No file uploaded yet.");
       return;
     }
@@ -240,7 +269,7 @@ export default function Vault() {
 
     setPvLoading(true);
     try {
-      const res = await fetch(url, { credentials: "include" });
+      const res = await fetch(absUrl, { credentials: "include" });
       if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
       const ct = res.headers.get("content-type") || declaredMime || "application/octet-stream";
       if (isTextLike(ct)) {
@@ -276,7 +305,7 @@ export default function Vault() {
     );
   }, [previewDoc]);
 
-  const isPdf   = useMemo(() => previewMime === "application/pdf", [previewMime]);
+  const isPdf = useMemo(() => previewMime === "application/pdf", [previewMime]);
   const isImage = useMemo(() => previewMime.startsWith("image/"), [previewMime]);
   const isVideo = useMemo(() => previewMime.startsWith("video/"), [previewMime]);
   const isAudio = useMemo(() => previewMime.startsWith("audio/"), [previewMime]);
@@ -301,15 +330,18 @@ export default function Vault() {
     setErr(""); setInfo("");
     try {
       const id = docIdOf(editDoc);
+
       // rename if changed
       const trimmed = (editTitle || "").trim();
       if (trimmed && trimmed !== (editDoc.title || "")) {
         await doRename(id, trimmed);
       }
+
       // upload if selected
       if (editFile) {
         await doUploadVersion(id, editFile);
       }
+
       closeEditModal();
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
@@ -365,6 +397,7 @@ export default function Vault() {
             {docs.length ? (
               docs.map((d, idx) => {
                 const id = docIdOf(d);
+                const latestAbs = d?.latest?.url ? fileUrl(d.latest.url) : "";
                 return (
                   <tr key={id || `row-${idx}`} className={d.deletedAt ? "opacity-60" : ""}>
                     <td className="align-top">
@@ -394,13 +427,27 @@ export default function Vault() {
                           className="underline text-left"
                           title="Open preview"
                           onClick={() => openPreview(d)}
-                          style={{ maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          style={{
+                            maxWidth: 340,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
                         >
                           {d.latest.filename}
                         </button>
                       ) : (
                         <span className="text-gray-500">—</span>
                       )}
+
+                      {/* Optional: direct "open" link (uses backend origin) */}
+                      {latestAbs ? (
+                        <div className="text-xs mt-1">
+                          <a className="underline" href={latestAbs} target="_blank" rel="noreferrer">
+                            Open in new tab
+                          </a>
+                        </div>
+                      ) : null}
                     </td>
 
                     <td className="align-top"><TagOrDash value={d.tags} /></td>
@@ -473,11 +520,37 @@ export default function Vault() {
               placeholder="safety, onboarding"
             />
           </label>
+
+          {/* ✅ Upload at create-time */}
+          <label className="text-sm md:col-span-2">
+            Upload file (optional)
+            <input
+              className="border p-2 w-full"
+              type="file"
+              onChange={(e) => setCreateFile(e.target.files?.[0] || null)}
+            />
+            <div className="text-xs text-gray-600 mt-1">
+              If you choose a file here, it will be uploaded immediately after the document is created.
+            </div>
+          </label>
+
           <div className="md:col-span-2 flex items-center gap-2 pt-1">
-            <button className="px-3 py-2 bg-black text-white rounded" type="submit">
-              Create
+            <button
+              className="px-3 py-2 bg-black text-white rounded disabled:opacity-60"
+              type="submit"
+              disabled={createSaving}
+            >
+              {createSaving ? "Creating…" : "Create"}
             </button>
-            <button type="button" className="px-3 py-2 border rounded" onClick={() => setShowCreate(false)}>
+            <button
+              type="button"
+              className="px-3 py-2 border rounded"
+              onClick={() => {
+                setShowCreate(false);
+                setCreateFile(null);
+              }}
+              disabled={createSaving}
+            >
               Cancel
             </button>
           </div>
@@ -518,7 +591,10 @@ export default function Vault() {
               >
                 {editSaving ? "Saving…" : "Save"}
               </button>
-              <button className="px-3 py-2 border rounded" onClick={closeEditModal}>Cancel</button>
+              <button className="px-3 py-2 border rounded" onClick={closeEditModal}>
+                Cancel
+              </button>
+
               <div className="ml-auto flex items-center gap-2">
                 {!editDoc.deletedAt && (
                   <button
@@ -556,7 +632,13 @@ export default function Vault() {
         >
           <div
             className="bg-white rounded-2xl shadow-2xl"
-            style={{ width: "100%", maxWidth: 1000, maxHeight: "90vh", display: "flex", flexDirection: "column" }}
+            style={{
+              width: "100%",
+              maxWidth: 1000,
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+            }}
             onMouseDown={(e) => e.stopPropagation()}
           >
             {/* header */}
@@ -565,13 +647,18 @@ export default function Vault() {
                 <div className="font-medium truncate" title={previewDoc.latest?.filename || previewDoc.title}>
                   {previewDoc.title || previewDoc.latest?.filename || "Document"}
                 </div>
-                <div className="text-xs text-gray-600">
-                  Type: {previewMime || "unknown"}
-                </div>
+                <div className="text-xs text-gray-600">Type: {previewMime || "unknown"}</div>
               </div>
               <div className="flex items-center gap-2">
                 {previewDoc?.latest?.url && (
-                  <a className="btn btn-sm" href={previewDoc.latest.url} target="_blank" rel="noreferrer">Download</a>
+                  <a
+                    className="btn btn-sm"
+                    href={fileUrl(previewDoc.latest.url)}  // ✅ backend origin
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Download
+                  </a>
                 )}
                 <button className="btn btn-sm" onClick={closePreview}>Close</button>
               </div>
@@ -608,14 +695,24 @@ export default function Vault() {
                       <img
                         src={pvUrl}
                         alt={previewDoc.latest?.filename || previewDoc.title}
-                        style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain", borderRadius: 8, background: "white" }}
+                        style={{
+                          maxWidth: "100%",
+                          maxHeight: "75vh",
+                          objectFit: "contain",
+                          borderRadius: 8,
+                          background: "white",
+                        }}
                       />
                     </div>
                   )}
 
                   {isVideo && pvUrl && (
                     <div className="p-3">
-                      <video src={pvUrl} controls style={{ width: "100%", maxHeight: "75vh", background: "black", borderRadius: 8 }} />
+                      <video
+                        src={pvUrl}
+                        controls
+                        style={{ width: "100%", maxHeight: "75vh", background: "black", borderRadius: 8 }}
+                      />
                     </div>
                   )}
 
