@@ -14,6 +14,7 @@ function guessMimeFromName(name = "") {
     jpg: "image/jpeg",
     jpeg: "image/jpeg",
     gif: "image/gif",
+    tiff: "image/tiff",
     webp: "image/webp",
     svg: "image/svg+xml",
     mp4: "video/mp4",
@@ -439,16 +440,7 @@ export default function Vault() {
                       ) : (
                         <span className="text-gray-500">—</span>
                       )}
-
-                      {/* Optional: direct "open" link (uses backend origin) */}
-                      {latestAbs ? (
-                        <div className="text-xs mt-1">
-                          <a className="underline" href={latestAbs} target="_blank" rel="noreferrer">
-                            Open in new tab
-                          </a>
-                        </div>
-                      ) : null}
-                    </td>
+                     </td>
 
                     <td className="align-top"><TagOrDash value={d.tags} /></td>
                     <td className="align-top"><Dash value={d.folder} /></td>
