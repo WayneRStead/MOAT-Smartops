@@ -1,7 +1,7 @@
 // src/pages/AssetDetail.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, fileUrl } from "../lib/api";
 
 /* ---------------- time helpers ---------------- */
 function toLocalDateTimeInput(date) {
