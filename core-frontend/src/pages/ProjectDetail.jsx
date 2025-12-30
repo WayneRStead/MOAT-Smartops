@@ -1,7 +1,7 @@
 // src/pages/ProjectDetail.jsx — Print-as-seen, manager notes-only, Tasks open TaskDetail in lightbox
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, fileUrl } from "../lib/api";
 import { listProjectTasks } from "../lib/api";
 import ProjectTasksTimeline from "../components/ProjectTasksTimeline";
 import ProjectInspections from "../components/ProjectInspections.jsx";
@@ -639,7 +639,7 @@ export default function ProjectDetail({ id: propId, onClose }) {
         return;
       }
 
-      const res = await fetch(url, { credentials: "include" });
+      const res = await fetch(fileUrl(url), { credentials: "include" });
       if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
       const contentType = res.headers.get("content-type") || declaredMime;
 
@@ -662,8 +662,8 @@ export default function ProjectDetail({ id: propId, onClose }) {
   async function downloadDoc(doc) {
     try {
       if (doc?.latest?.url) {
-        window.open(doc.latest.url, "_blank", "noopener,noreferrer");
-        return;
+       window.open(fileUrl(doc.latest.url), "_blank", "noopener,noreferrer");
+       return;
       }
       const safeId = docIdOf(doc);
       const res = await api.get(`/documents/${encodeURIComponent(safeId)}/download`, { responseType: "blob" });
