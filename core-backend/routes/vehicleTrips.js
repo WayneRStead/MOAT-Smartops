@@ -53,11 +53,9 @@ function getBucket() {
 }
 
 /** Build an absolute URL that always matches however this router is mounted. */
-function absoluteUrlForFile(req, fileId) {
-  const origin = `${req.protocol}://${req.get("host")}`;
-  // req.baseUrl includes the mount path (e.g. "/api") if mounted there
-  const base = req.baseUrl || "";
-  return `${origin}${base}/files/vehicle-trips/${fileId}`;
+function absoluteUrlForFile(_req, fileId) {
+  // IMPORTANT: return a RELATIVE URL so existing frontend helpers keep working
+  return `/files/vehicle-trips/${fileId}`;
 }
 
 async function saveFileToGridFS(req, file) {
