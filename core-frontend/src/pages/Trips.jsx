@@ -32,7 +32,6 @@ export default function Trips() {
   async function loadTrips() {
     setErr("");
     try {
-      // Try both common list endpoints
       const params = { limit: 200 };
       if (q) params.q = q;
       if (status) params.status = status;
@@ -98,7 +97,6 @@ export default function Trips() {
         notes: (form.notes || "").trim() || undefined,
         status: "not_started",
       };
-      // Try vehicle-trips first, fall back to /trips
       let res;
       try {
         res = await api.post("/vehicle-trips", payload);
@@ -107,7 +105,6 @@ export default function Trips() {
       }
       setInfo("Trip created.");
       setForm(emptyForm);
-      // Prepend for snappy UI
       setTrips((prev) => [res.data, ...prev]);
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
@@ -133,7 +130,6 @@ export default function Trips() {
   }
 
   async function robustTripSave(id, patch) {
-    // Try multiple shapes & endpoints; accept whichever sticks
     const attempts = [
       { m: "put", u: `/vehicle-trips/${id}`, b: patch },
       { m: "patch", u: `/vehicle-trips/${id}`, b: patch },
@@ -144,7 +140,6 @@ export default function Trips() {
     for (const a of attempts) {
       try {
         await api[a.m](a.u, a.b);
-        // Re-fetch single to confirm persistence
         let got;
         try {
           got = (await api.get(`/vehicle-trips/${id}`)).data;
@@ -186,9 +181,9 @@ export default function Trips() {
 
   // ---------- Start / End ----------
   function getNowIso() {
-    const d = new Date();
-    return d.toISOString();
+    return new Date().toISOString();
   }
+
   function getGeo() {
     return new Promise((resolve) => {
       if (!navigator.geolocation) return resolve(null);
@@ -212,13 +207,13 @@ export default function Trips() {
     const ts = getNowIso();
     const where = await getGeo();
 
-    // Try action endpoints first, then generic patch
     const actionBodies = [
       { m: "patch", u: `/vehicle-trips/${id}/start`, b: { startedAt: ts, startLocation: where, status: "in_progress" } },
       { m: "post", u: `/vehicle-trips/${id}/start`, b: { startedAt: ts, startLocation: where, status: "in_progress" } },
       { m: "patch", u: `/trips/${id}/start`, b: { startedAt: ts, startLocation: where, status: "in_progress" } },
       { m: "post", u: `/trips/${id}/start`, b: { startedAt: ts, startLocation: where, status: "in_progress" } },
     ];
+
     let ok = false;
     for (const a of actionBodies) {
       try {
@@ -227,10 +222,10 @@ export default function Trips() {
         break;
       } catch {}
     }
-    if (!ok) {
-      ok = await robustTripSave(id, { startedAt: ts, startLocation: where || undefined, status: "in_progress" });
-    } else {
-      // refresh
+
+    if (!ok) ok = await robustTripSave(id, { startedAt: ts, startLocation: where || undefined, status: "in_progress" });
+
+    if (ok) {
       try {
         const got = (await api.get(`/vehicle-trips/${id}`)).data;
         setTrips((prev) => prev.map((x) => (x._id === id ? got : x)));
@@ -240,8 +235,8 @@ export default function Trips() {
           setTrips((prev) => prev.map((x) => (x._id === id ? got : x)));
         } catch {}
       }
+      setInfo("Trip started.");
     }
-    if (ok) setInfo("Trip started.");
   }
 
   async function endTrip(t) {
@@ -257,6 +252,7 @@ export default function Trips() {
       { m: "patch", u: `/trips/${id}/end`, b: { endedAt: ts, endLocation: where, status: "ended" } },
       { m: "post", u: `/trips/${id}/end`, b: { endedAt: ts, endLocation: where, status: "ended" } },
     ];
+
     let ok = false;
     for (const a of actionBodies) {
       try {
@@ -265,9 +261,10 @@ export default function Trips() {
         break;
       } catch {}
     }
-    if (!ok) {
-      ok = await robustTripSave(id, { endedAt: ts, endLocation: where || undefined, status: "ended" });
-    } else {
+
+    if (!ok) ok = await robustTripSave(id, { endedAt: ts, endLocation: where || undefined, status: "ended" });
+
+    if (ok) {
       try {
         const got = (await api.get(`/vehicle-trips/${id}`)).data;
         setTrips((prev) => prev.map((x) => (x._id === id ? got : x)));
@@ -277,8 +274,8 @@ export default function Trips() {
           setTrips((prev) => prev.map((x) => (x._id === id ? got : x)));
         } catch {}
       }
+      setInfo("Trip ended.");
     }
-    if (ok) setInfo("Trip ended.");
   }
 
   // ---------- Soft delete / restore ----------
@@ -298,6 +295,7 @@ export default function Trips() {
       setErr(e?.response?.data?.error || String(e));
     }
   }
+
   async function restore(id) {
     setErr("");
     setInfo("");
@@ -323,7 +321,6 @@ export default function Trips() {
       {err && <div className="text-red-600 mb-2">{err}</div>}
       {info && <div className="text-green-700 mb-2">{info}</div>}
 
-      {/* Filters */}
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <input
           className="border p-2"
@@ -348,16 +345,10 @@ export default function Trips() {
         </button>
       </div>
 
-      {/* Create */}
       <form onSubmit={createTrip} className="grid md:grid-cols-4 gap-2 border rounded p-3 mb-4">
         <label className="text-sm">
           Vehicle
-          <select
-            className="border p-2 w-full"
-            value={form.vehicleId}
-            onChange={(e) => setForm({ ...form, vehicleId: e.target.value })}
-            required
-          >
+          <select className="border p-2 w-full" value={form.vehicleId} onChange={(e) => setForm({ ...form, vehicleId: e.target.value })} required>
             <option value="">— select —</option>
             {vehicles.map((v) => (
               <option key={v._id || v.id} value={String(v._id || v.id)}>
@@ -368,11 +359,7 @@ export default function Trips() {
         </label>
         <label className="text-sm">
           Driver
-          <select
-            className="border p-2 w-full"
-            value={form.driverId}
-            onChange={(e) => setForm({ ...form, driverId: e.target.value })}
-          >
+          <select className="border p-2 w-full" value={form.driverId} onChange={(e) => setForm({ ...form, driverId: e.target.value })}>
             <option value="">— none —</option>
             {users.map((u) => (
               <option key={u._id} value={String(u._id)}>
@@ -383,19 +370,13 @@ export default function Trips() {
         </label>
         <label className="text-sm md:col-span-2">
           Notes
-          <input
-            className="border p-2 w-full"
-            value={form.notes}
-            onChange={(e) => setForm({ ...form, notes: e.target.value })}
-            placeholder="Optional"
-          />
+          <input className="border p-2 w-full" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Optional" />
         </label>
         <div className="md:col-span-4">
           <button className="px-3 py-2 bg-black text-white rounded">Create Trip</button>
         </div>
       </form>
 
-      {/* Table */}
       <table className="w-full border text-sm">
         <thead>
           <tr className="bg-gray-50">
@@ -416,11 +397,7 @@ export default function Trips() {
               <tr key={t._id} className={t.deletedAt ? "opacity-60" : ""}>
                 <td className="border p-2">
                   {isEditing ? (
-                    <select
-                      className="border p-1"
-                      value={editing.vehicleId}
-                      onChange={(e) => setEditing({ ...editing, vehicleId: e.target.value })}
-                    >
+                    <select className="border p-1" value={editing.vehicleId} onChange={(e) => setEditing({ ...editing, vehicleId: e.target.value })}>
                       <option value="">— none —</option>
                       {vehicles.map((v) => (
                         <option key={v._id || v.id} value={String(v._id || v.id)}>
@@ -434,11 +411,7 @@ export default function Trips() {
                 </td>
                 <td className="border p-2">
                   {isEditing ? (
-                    <select
-                      className="border p-1"
-                      value={editing.driverId}
-                      onChange={(e) => setEditing({ ...editing, driverId: e.target.value })}
-                    >
+                    <select className="border p-1" value={editing.driverId} onChange={(e) => setEditing({ ...editing, driverId: e.target.value })}>
                       <option value="">— none —</option>
                       {users.map((u) => (
                         <option key={u._id} value={String(u._id)}>
@@ -452,11 +425,7 @@ export default function Trips() {
                 </td>
                 <td className="border p-2">
                   {isEditing ? (
-                    <select
-                      className="border p-1"
-                      value={editing.status}
-                      onChange={(e) => setEditing({ ...editing, status: e.target.value })}
-                    >
+                    <select className="border p-1" value={editing.status} onChange={(e) => setEditing({ ...editing, status: e.target.value })}>
                       <option value="not_started">not_started</option>
                       <option value="in_progress">in_progress</option>
                       <option value="ended">ended</option>
@@ -491,12 +460,7 @@ export default function Trips() {
                 </td>
                 <td className="border p-2">
                   {isEditing ? (
-                    <input
-                      className="border p-1 w-full"
-                      value={editing.notes}
-                      onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
-                      placeholder="Notes"
-                    />
+                    <input className="border p-1 w-full" value={editing.notes} onChange={(e) => setEditing({ ...editing, notes: e.target.value })} placeholder="Notes" />
                   ) : (
                     <div className="text-xs">{t.notes || "—"}</div>
                   )}

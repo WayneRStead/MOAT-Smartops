@@ -68,6 +68,38 @@ function toAbsoluteUrl(u) {
   return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
 
+// Normalize URLs we store in Mongo so they remain valid across deployments.
+// If the backend returns a relative path, we keep it relative (e.g. "/uploads/..").
+// If it returns an absolute URL, we keep it absolute.
+function normalizeStoredUrl(u) {
+  if (!u) return "";
+  return String(u).trim();
+}
+
+// Read trip photo URL regardless of backend shape:
+// - trip.startPhoto.url
+// - trip.startPhotoUrl
+// - trip.startPhoto (string)
+// Same for end.
+function tripPhotoUrl(trip, which /* "start" | "end" */) {
+  const obj =
+    which === "start"
+      ? trip?.startPhoto || trip?.start_photo || trip?.photoStart
+      : trip?.endPhoto || trip?.end_photo || trip?.photoEnd;
+
+  const direct =
+    which === "start"
+      ? trip?.startPhotoUrl || trip?.start_photo_url || trip?.photoStartUrl || trip?.startPhoto
+      : trip?.endPhotoUrl || trip?.end_photo_url || trip?.photoEndUrl || trip?.endPhoto;
+
+  const candidate =
+    (obj && typeof obj === "object" ? obj.url || obj.path || obj.location : "") ||
+    (typeof obj === "string" ? obj : "") ||
+    (typeof direct === "string" ? direct : "");
+
+  return candidate ? toAbsoluteUrl(candidate) : "";
+}
+
 /* --- Geolocation helper (non-blocking) --- */
 function getGeo(timeoutMs = 6000) {
   return new Promise((resolve) => {
@@ -1084,7 +1116,7 @@ export default function VehicleDetail() {
       let startPhotoUrl;
       if (startFile) {
         const { url } = await uploadTripPhoto(startFile);
-        startPhotoUrl = url;
+        startPhotoUrl = normalizeStoredUrl(url);
       }
       const g = await getGeo().catch(() => null);
       const usageTag = tripUsage === "private" ? "private" : "business";
@@ -1143,7 +1175,7 @@ export default function VehicleDetail() {
       let endPhotoUrl;
       if (endFile) {
         const { url } = await uploadTripPhoto(endFile);
-        endPhotoUrl = url;
+        endPhotoUrl = normalizeStoredUrl(url);
       }
       const g = await getGeo().catch(() => null);
       const patch = {
@@ -1547,7 +1579,7 @@ export default function VehicleDetail() {
     if (!file) return null;
     try {
       const { url } = await uploadTripPhoto(file);
-      return url ? { url } : null;
+      return url ? { url: normalizeStoredUrl(url) } : null;
     } catch {
       return null;
     }
@@ -2513,19 +2545,33 @@ export default function VehicleDetail() {
                       </td>
                       <td className="border-b border-border p-2">{trip.distance != null ? `${trip.distance} km` : "—"}</td>
                       <td className="border-b border-border p-2">
-                        <div className="flex gap-2">
-                          {trip.startPhoto?.url && (
-                            <a href={toAbsoluteUrl(trip.startPhoto.url)} target="_blank" rel="noreferrer" title="Start photo">
-                              <img src={toAbsoluteUrl(trip.startPhoto.url)} alt="Start" style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }} />
-                            </a>
-                          )}
-                          {trip.endPhoto?.url && (
-                            <a href={toAbsoluteUrl(trip.endPhoto.url)} target="_blank" rel="noreferrer" title="End photo">
-                              <img src={toAbsoluteUrl(trip.endPhoto.url)} alt="End" style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }} />
-                            </a>
-                          )}
-                        </div>
-                      </td>
+  <div className="flex gap-2">
+    {(() => {
+      const sUrl = tripPhotoUrl(trip, "start");
+      return sUrl ? (
+        <a href={sUrl} target="_blank" rel="noreferrer" title="Start photo">
+          <img
+            src={sUrl}
+            alt="Start"
+            style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
+          />
+        </a>
+      ) : null;
+    })()}
+    {(() => {
+      const eUrl = tripPhotoUrl(trip, "end");
+      return eUrl ? (
+        <a href={eUrl} target="_blank" rel="noreferrer" title="End photo">
+          <img
+            src={eUrl}
+            alt="End"
+            style={{ width: 72, height: 48, objectFit: "cover", borderRadius: 6 }}
+          />
+        </a>
+      ) : null;
+    })()}
+  </div>
+</td>
                       <td className="border-b border-border p-2">
                         {!isEditing ? (
                           trip.notes || "—"
