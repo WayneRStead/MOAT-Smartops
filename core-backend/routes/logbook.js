@@ -16,11 +16,11 @@ function computeDistance(start, end) {
   if (start == null || end == null) return undefined;
   const s = Number(start);
   const e = Number(end);
-  if (Number.isNaN(s) || Number.isNaN(e)) return undefined;
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return undefined;
   return Math.max(0, e - s);
 }
 
-// Prefer org from middleware (req.org), fallback to req.user.orgId
+// Prefer org from middleware (req.org), fallback to headers resolved by your auth middleware
 function getOrgId(req) {
   return req.org?._id || req.orgId || req.user?.orgId || undefined;
 }
@@ -47,10 +47,12 @@ function stripUndef(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
 
-/* ------------------------------ GridFS ------------------------------ */
+/* ------------------------------ GridFS (optional) ------------------------------ */
 /**
  * Bucket name: "logbook"
  * Collections: logbook.files + logbook.chunks
+ *
+ * NOTE: This is only used by /upload and /:id/attach endpoints below.
  */
 function getBucket() {
   const db = mongoose.connection?.db;
@@ -66,8 +68,8 @@ function toObjectIdOrNull(id) {
   }
 }
 
+// IMPORTANT: keep relative URL (frontend can prefix backend origin)
 function fileUrl(_req, fileId) {
-  // IMPORTANT: keep relative URL
   return `/files/logbook/${fileId}`;
 }
 
@@ -121,39 +123,14 @@ async function saveFileToGridFS(req, file) {
   };
 }
 
-/* ------------------------- FILE SERVING (GLOBAL) ------------------------- */
-/**
- * GET /files/logbook/:fileId
- * Streams from GridFS.
- *
- * This router is mounted at "/" and "/api" (in index.js),
- * so this works at both:
- * - /files/logbook/:fileId
- * - /api/files/logbook/:fileId
- */
-router.get("/files/logbook/:fileId", async (req, res, next) => {
-  try {
-    const fileId = toObjectIdOrNull(req.params.fileId);
-    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
-
-    const bucket = getBucket();
-    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
-    if (!files || !files.length) return res.status(404).json({ error: "File not found" });
-
-    const f = files[0];
-    res.setHeader("Content-Type", f.contentType || "application/octet-stream");
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-
-    const dl = bucket.openDownloadStream(fileId);
-    dl.on("error", (e) => next(e));
-    dl.pipe(res);
-  } catch (e) {
-    next(e);
-  }
-});
-
 /* ------------------------------- LIST ------------------------------- */
-// GET /logbook?vehicleId=&q=&tag=&from=&to=&minKm=&maxKm=&limit=
+/**
+ * Because this router is mounted at:
+ *   /logbook   and  /api/logbook
+ * these handlers MUST be rooted at "/"
+ *
+ * GET /logbook?vehicleId=&q=&tag=&from=&to=&minKm=&maxKm=&limit=
+ */
 router.get("/", async (req, res) => {
   try {
     const { vehicleId, q, tag, from, to, minKm, maxKm, limit } = req.query;
@@ -188,7 +165,11 @@ router.get("/", async (req, res) => {
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
 
-    const rows = await VehicleLog.find(find).sort({ ts: -1, createdAt: -1 }).limit(lim).lean();
+    const rows = await VehicleLog.find(find)
+      .sort({ ts: -1, createdAt: -1 })
+      .limit(lim)
+      .lean();
+
     res.json(rows);
   } catch (e) {
     console.error("GET /logbook error:", e);
@@ -197,7 +178,10 @@ router.get("/", async (req, res) => {
 });
 
 /* ------------------------------ CREATE ------------------------------ */
-// POST /logbook
+/**
+ * POST /logbook
+ * (because router is mounted at /logbook)
+ */
 router.post("/", async (req, res) => {
   try {
     const { vehicleId, title, notes = "", tags = [], ts, odometerStart, odometerEnd } = req.body || {};
@@ -233,7 +217,10 @@ router.post("/", async (req, res) => {
 });
 
 /* ------------------------------- UPDATE ------------------------------ */
-// PUT /logbook/:id
+/**
+ * PUT /logbook/:id
+ * (because router is mounted at /logbook)
+ */
 router.put("/:id", async (req, res) => {
   try {
     const orgFilter = buildOrgFilter(req);
@@ -265,7 +252,9 @@ router.put("/:id", async (req, res) => {
 });
 
 /* ------------------------------- DELETE ------------------------------ */
-// DELETE /logbook/:id
+/**
+ * DELETE /logbook/:id
+ */
 router.delete("/:id", async (req, res) => {
   try {
     const orgFilter = buildOrgFilter(req);
@@ -279,10 +268,9 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-/* --------------------------- FILE UPLOAD API --------------------------- */
+/* --------------------------- FILE UPLOAD API (optional) --------------------------- */
 /**
- * POST /logbook/upload
- * Uploads a file to GridFS and returns {fileId, url, ...}
+ * POST /logbook/upload  (because mounted at /logbook)
  */
 router.post("/upload", upload.single("file"), async (req, res, next) => {
   try {
@@ -295,8 +283,7 @@ router.post("/upload", upload.single("file"), async (req, res, next) => {
 });
 
 /**
- * POST /logbook/:id/attach
- * Uploads a file AND attaches to the logbook entry if schema supports attachments.
+ * POST /logbook/:id/attach  (because mounted at /logbook)
  */
 router.post("/:id/attach", upload.single("file"), async (req, res, next) => {
   try {
@@ -308,28 +295,34 @@ router.post("/:id/attach", upload.single("file"), async (req, res, next) => {
 
     const meta = await saveFileToGridFS(req, req.file);
 
+    // only attach if schema supports it
     const hasAttachments = !!VehicleLog.schema.path("attachments");
-    if (!hasAttachments) {
-      // Still return uploaded file info even if log schema doesn't support attaching
-      return res.json({ ok: true, file: meta, note: "VehicleLog schema has no attachments field; file uploaded only." });
+    if (hasAttachments) {
+      row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
+      row.attachments.push({
+        fileId: meta.fileId,
+        url: meta.url,
+        filename: meta.filename,
+        mime: meta.mime,
+        size: meta.size,
+        uploadedBy: req.user?._id || undefined,
+        uploadedAt: new Date(),
+      });
+      await row.save();
     }
 
-    row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
-    row.attachments.push({
-      fileId: meta.fileId,
-      url: meta.url,
-      filename: meta.filename,
-      mime: meta.mime,
-      size: meta.size,
-      uploadedBy: req.user?._id ? String(req.user._id) : undefined,
-      uploadedAt: new Date(),
-    });
-
-    await row.save();
-    res.json(row.toObject());
+    res.json({ ok: true, file: meta, logbook: hasAttachments ? row.toObject() : undefined });
   } catch (e) {
     next(e);
   }
 });
+
+/* ------------------------- FILE SERVING NOTE -------------------------
+   The URL we return is /files/logbook/:fileId, but this router is mounted at /logbook,
+   so it would NOT be reachable as /files/logbook/:fileId unless you mount a separate
+   public file-serving route elsewhere.
+
+   For now, log entry CREATE/LIST/UPDATE/DELETE will work.
+--------------------------------------------------------------------- */
 
 module.exports = router;
