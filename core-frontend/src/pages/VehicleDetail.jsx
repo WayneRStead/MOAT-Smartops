@@ -82,22 +82,43 @@ function normalizeStoredUrl(u) {
 // - trip.startPhoto (string)
 // Same for end.
 function tripPhotoUrl(trip, which /* "start" | "end" */) {
-  const obj =
+  const photo =
     which === "start"
-      ? trip?.startPhoto || trip?.start_photo || trip?.photoStart
-      : trip?.endPhoto || trip?.end_photo || trip?.photoEnd;
+      ? (trip?.startPhoto || trip?.start_photo || trip?.startImage)
+      : (trip?.endPhoto || trip?.end_photo || trip?.endImage);
 
-  const direct =
-    which === "start"
-      ? trip?.startPhotoUrl || trip?.start_photo_url || trip?.photoStartUrl || trip?.startPhoto
-      : trip?.endPhotoUrl || trip?.end_photo_url || trip?.photoEndUrl || trip?.endPhoto;
+  // 1) If backend stored a direct URL, use it
+  let url =
+    (typeof photo === "string" && photo) ||
+    (photo && typeof photo.url === "string" && photo.url) ||
+    "";
 
-  const candidate =
-    (obj && typeof obj === "object" ? obj.url || obj.path || obj.location : "") ||
-    (typeof obj === "string" ? obj : "") ||
-    (typeof direct === "string" ? direct : "");
+  // 2) If no url, but we have a filename, build the /files URL
+  // IMPORTANT: do NOT use photo._id (Mongoose subdocs often have _id!)
+  if (!url) {
+    const filename =
+      (photo && typeof photo.filename === "string" && photo.filename) ||
+      "";
 
-  return candidate ? toAbsoluteUrl(candidate) : "";
+    if (filename) url = `/files/vehicle-trips/${filename}`;
+  }
+
+  if (!url) return "";
+
+  // 3) Make relative /files URLs absolute to the backend origin
+  // so the browser loads from Render, not Vercel.
+  const backend =
+    import.meta.env.VITE_API_BASE ||
+    import.meta.env.VITE_BACKEND_ORIGIN ||
+    "";
+
+  // If already absolute (http/https), return as is
+  if (/^https?:\/\//i.test(url)) return url;
+
+  // Ensure we don't double up slashes
+  const b = backend.replace(/\/+$/, "");
+  const u = url.startsWith("/") ? url : `/${url}`;
+  return `${b}${u}`;
 }
 
 /* --- Geolocation helper (non-blocking) --- */

@@ -1,7 +1,15 @@
 // core-backend/routes/vehicleTrips.js
+//
+// ✅ DROP-IN replacement
+// - Stores ALL trip photos in MongoDB GridFS bucket: vehicleTrips.files / vehicleTrips.chunks
+// - Returns URLs like: /files/vehicle-trips/<FILENAME>
+//   (this matches the index.js handler we added that streams by *filename*)
+// - Does NOT write to /uploads on disk (Render filesystem is ephemeral)
+
 const express = require("express");
 const multer = require("multer");
 const mongoose = require("mongoose");
+const { GridFSBucket } = require("mongodb");
 
 const Vehicle = require("../models/Vehicle");
 const VehicleTrip = require("../models/VehicleTrip");
@@ -38,66 +46,78 @@ function readGeo(body = {}) {
   return { lat, lng, acc: acc == null ? undefined : acc };
 }
 
+function getOrgId(req) {
+  // resolveOrgContext usually sets one of these; keep it defensive.
+  return (
+    req.org?._id ||
+    req.orgId ||
+    req.organization?._id ||
+    req.tenant?._id ||
+    req.user?.orgId ||
+    undefined
+  );
+}
+
 /* ------------------------------ GridFS ------------------------------ */
 /**
- * We store trip & receipt images in MongoDB GridFS.
- * Collection/bucket name: "vehicleTrips"
- *
- * NOTE: This uses the existing mongoose connection (mongoose.connection.db)
- * so it will work as long as your app connects to MongoDB before routes are used.
+ * Bucket name MUST match your MongoDB collections:
+ * - vehicleTrips.files
+ * - vehicleTrips.chunks
  */
 function getBucket() {
   const db = mongoose.connection?.db;
-  if (!db) throw new Error("MongoDB connection not ready (mongoose.connection.db missing).");
-  return new mongoose.mongo.GridFSBucket(db, { bucketName: "vehicleTrips" });
+  if (!db) throw new Error("MongoDB not ready (mongoose.connection.db missing).");
+  return new GridFSBucket(db, { bucketName: "vehicleTrips" });
 }
 
-/** Build an absolute URL that always matches however this router is mounted. */
-function absoluteUrlForFile(_req, fileId) {
-  // IMPORTANT: return a RELATIVE URL so existing frontend helpers keep working
-  return `/files/vehicle-trips/${fileId}`;
+function makeSafeFilename(originalname = "photo") {
+  const safe = String(originalname).replace(/[^\w.-]+/g, "_");
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
 }
 
-async function saveFileToGridFS(req, file) {
-  if (!file) throw new Error("No file provided");
+/**
+ * IMPORTANT:
+ * We return URLs that look like "/files/vehicle-trips/<filename>"
+ * because your index.js now streams *by filename* from GridFS as a fallback.
+ */
+function urlForFilename(filename) {
+  return `/files/vehicle-trips/${filename}`;
+}
 
+async function saveFileToGridFS(file, extraMeta = {}) {
+  if (!file) throw new Error("No file");
   const bucket = getBucket();
-  const safeName = String(file.originalname || "photo").replace(/[^\w.-]+/g, "_");
-  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
 
-  // Store metadata so we can set headers on download
+  const filename = makeSafeFilename(file.originalname);
+
   const uploadStream = bucket.openUploadStream(filename, {
     contentType: file.mimetype,
     metadata: {
       originalname: file.originalname,
       mimetype: file.mimetype,
       size: file.size,
+      ...extraMeta,
     },
   });
 
-  // file.buffer exists because we use multer.memoryStorage()
   uploadStream.end(file.buffer);
 
-  const done = await new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     uploadStream.on("finish", resolve);
     uploadStream.on("error", reject);
   });
 
-  const fileId = String(done?._id || uploadStream.id);
   return {
-    fileId,
     filename,
-    size: file.size,
+    url: urlForFilename(filename),
     mime: file.mimetype,
-    url: absoluteUrlForFile(req, fileId),
+    size: file.size,
   };
 }
 
 /* ------------------------------ uploads ------------------------------ */
 /**
- * IMPORTANT CHANGE:
- * - Before: multer.diskStorage() to Render filesystem (ephemeral)
- * - Now: multer.memoryStorage() + GridFS
+ * ✅ Memory storage (NOT disk)
  */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -108,51 +128,24 @@ const upload = multer({
   },
 });
 
-/* ------------------------------ file serving ------------------------------ */
-/**
- * GET /files/vehicle-trips/:fileId
- * Streams from GridFS.
- *
- * This path will be:
- * - /api/files/vehicle-trips/:fileId  if this router is mounted at /api
- * - /files/vehicle-trips/:fileId      if mounted at /
- *
- * We return ABSOLUTE URLs from uploads, so the frontend won't care.
- */
-router.get("/files/vehicle-trips/:fileId", async (req, res, next) => {
-  try {
-    const fileId = toObjectId(req.params.fileId);
-    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
-
-    const bucket = getBucket();
-
-    // Look up metadata so we can set content-type
-    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
-    if (!files || !files.length) return res.status(404).json({ error: "File not found" });
-
-    const f = files[0];
-    res.setHeader("Content-Type", f.contentType || "application/octet-stream");
-    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-
-    const dl = bucket.openDownloadStream(fileId);
-    dl.on("error", (e) => next(e));
-    dl.pipe(res);
-  } catch (err) {
-    next(err);
-  }
-});
-
 /* ------------------------------- reads -------------------------------- */
 // GET /vehicles/:vehicleId/trips  (list)
 router.get("/vehicles/:vehicleId/trips", async (req, res, next) => {
   try {
-    const { vehicleId } = req.params;
-    const vId = toObjectId(vehicleId);
+    const vId = toObjectId(req.params.vehicleId);
     if (!vId) return res.status(400).json({ error: "Invalid vehicle id" });
 
-    const { limit = 200, skip = 0, driverId, projectId, taskId } = req.query;
+    const { limit = 200, skip = 0, driverId, projectId, taskId, includeDeleted } = req.query;
+
     const q = { vehicleId: vId };
-    if (driverId) q.$or = [{ driverUserId: driverId }, { driverId: driverId }];
+
+    // Tenancy (if your data is org-scoped, this prevents cross-org leakage)
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    if (!includeDeleted) q.isDeleted = { $ne: true };
+
+    if (driverId) q.driverUserId = driverId;
     if (projectId) q.projectId = projectId;
     if (taskId) q.taskId = taskId;
 
@@ -174,8 +167,13 @@ router.get("/vehicles/:vehicleId/trips/open", async (req, res, next) => {
     const vId = toObjectId(req.params.vehicleId);
     if (!vId) return res.status(400).json({ error: "Invalid vehicle id" });
 
-    const open = await VehicleTrip.findOne({ vehicleId: vId, endedAt: { $exists: false } }).lean();
+    const q = { vehicleId: vId, status: "open", isDeleted: { $ne: true } };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const open = await VehicleTrip.findOne(q).lean();
     if (!open) return res.status(404).json({ error: "No open trip" });
+
     res.json(open);
   } catch (err) {
     next(err);
@@ -187,23 +185,25 @@ router.get("/vehicle-trips/:id", async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
     if (!tId) return res.status(400).json({ error: "Invalid id" });
-    const trip = await VehicleTrip.findById(tId).lean();
+
+    const q = { _id: tId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q).lean();
     if (!trip) return res.status(404).json({ error: "Not found" });
+
     res.json(trip);
   } catch (err) {
     next(err);
   }
 });
 
-// Alias: GET /vehicleTrips/:id
-router.get(
-  "/vehicleTrips/:id",
-  async (req, _res, next) => {
-    req.url = req.url.replace(/^\/vehicleTrips\//, "/vehicle-trips/"); // rewrite
-    next();
-  },
-  router
-);
+// Alias: GET /vehicleTrips/:id  → rewrite to /vehicle-trips/:id
+router.get("/vehicleTrips/:id", (req, _res, next) => {
+  req.url = req.url.replace(/^\/vehicleTrips\//, "/vehicle-trips/");
+  next();
+}, router);
 
 /* ----------------------- create / close trip --------------------------- */
 // POST /vehicles/:vehicleId/trips/start
@@ -212,13 +212,21 @@ router.post("/vehicles/:vehicleId/trips/start", async (req, res, next) => {
     const vId = toObjectId(req.params.vehicleId);
     if (!vId) return res.status(400).json({ error: "Invalid vehicle id" });
 
+    const orgId = getOrgId(req);
+
     const vehicle = await Vehicle.findById(vId);
     if (!vehicle) return res.status(404).json({ error: "Vehicle not found" });
 
-    const existing = await VehicleTrip.findOne({ vehicleId: vId, endedAt: { $exists: false } });
+    // Only one open trip per vehicle (per org if orgId exists)
+    const openQ = { vehicleId: vId, status: "open", isDeleted: { $ne: true } };
+    if (orgId) openQ.orgId = orgId;
+
+    const existing = await VehicleTrip.findOne(openQ);
     if (existing) return res.status(400).json({ error: "There is already an open trip for this vehicle." });
 
     const body = req.body || {};
+
+    // GEO
     const startGeo =
       body.startLat != null && body.startLng != null
         ? { lat: Number(body.startLat), lng: Number(body.startLng), acc: toNum(body.startAccuracy) }
@@ -236,35 +244,20 @@ router.post("/vehicles/:vehicleId/trips/start", async (req, res, next) => {
         ? { type: "Point", coordinates: [Number(body.startLng), Number(body.startLat)] }
         : undefined;
 
-    const trip = new VehicleTrip(
-      stripUndef({
-        vehicleId: vId,
-        startedAt: new Date(),
-        odoStart: toNum(body.odoStart),
-        driverUserId: body.driverUserId || body.driverId || vehicle.driverId || req.user?._id,
-        driverId: body.driverUserId || body.driverId || vehicle.driverId || req.user?._id, // mirror
-        projectId: body.projectId || vehicle.projectId || undefined,
-        taskId: body.taskId || vehicle.taskId || undefined,
-        notes: body.notes || undefined,
-        tags: Array.isArray(body.tags) ? body.tags : body.tags ? [body.tags] : undefined,
+    // Driver (required by your schema)
+    const driverUserId = body.driverUserId || body.driverId || vehicle.driverId || req.user?._id;
+    if (!driverUserId) return res.status(422).json({ error: "driverUserId is required (missing driver)." });
 
-        // keep compatibility with your current front-end payload
-        startPhoto: body.startPhotoUrl ? { url: body.startPhotoUrl } : undefined,
+    // OdoStart (required by your schema)
+    let odoStart = toNum(body.odoStart);
+    if (odoStart == null && Number.isFinite(vehicle?.odometer)) odoStart = Number(vehicle.odometer);
+    if (odoStart == null) return res.status(422).json({ error: "odoStart is required." });
 
-        // GEO
-        startGeo,
-        startLocation,
+    // Odometer guard: start must be >= last closed end & >= vehicle.odometer
+    const lastClosedQ = { vehicleId: vId, status: "closed", isDeleted: { $ne: true } };
+    if (orgId) lastClosedQ.orgId = orgId;
 
-        // Purpose
-        purpose: body.purpose === "Private" || body.purpose === "Business" ? body.purpose : "Business",
-      })
-    );
-
-    if (trip.odoStart == null && Number.isFinite(vehicle?.odometer)) {
-      trip.odoStart = Number(vehicle.odometer);
-    }
-
-    const lastClosed = await VehicleTrip.findOne({ vehicleId: vId, endedAt: { $ne: null } }).sort({ endedAt: -1 });
+    const lastClosed = await VehicleTrip.findOne(lastClosedQ).sort({ endedAt: -1, createdAt: -1 });
 
     const lastEndOdo = Number.isFinite(lastClosed?.odoEnd) ? Number(lastClosed.odoEnd) : undefined;
     const vehicleOdo = Number.isFinite(vehicle?.odometer) ? Number(vehicle.odometer) : undefined;
@@ -273,11 +266,35 @@ router.post("/vehicles/:vehicleId/trips/start", async (req, res, next) => {
       Number.isFinite(vehicleOdo) ? vehicleOdo : -Infinity
     );
 
-    if (Number.isFinite(floorOdo) && Number.isFinite(trip.odoStart) && trip.odoStart < floorOdo) {
+    if (Number.isFinite(floorOdo) && Number.isFinite(odoStart) && odoStart < floorOdo) {
       return res.status(422).json({
-        error: `Odometer start (${trip.odoStart}) cannot be less than last recorded end (${floorOdo}).`,
+        error: `Odometer start (${odoStart}) cannot be less than last recorded end (${floorOdo}).`,
       });
     }
+
+    const trip = new VehicleTrip(
+      stripUndef({
+        orgId,
+        vehicleId: vId,
+        driverUserId,
+        status: "open",
+        startedAt: new Date(),
+        odoStart,
+        projectId: body.projectId || vehicle.projectId || undefined,
+        taskId: body.taskId || vehicle.taskId || undefined,
+        notes: body.notes || undefined,
+        tags: Array.isArray(body.tags) ? body.tags : body.tags ? [body.tags] : undefined,
+        purpose: body.purpose === "Private" || body.purpose === "Business" ? body.purpose : "Business",
+        startGeo,
+        startLocation,
+
+        // Keep compatibility: if frontend sends a URL already, store it.
+        startPhoto: body.startPhotoUrl ? { url: body.startPhotoUrl } : undefined,
+
+        createdBy: req.user?.email || req.user?.username || undefined,
+        updatedBy: req.user?.email || req.user?.username || undefined,
+      })
+    );
 
     await trip.save();
     res.json(trip.toObject());
@@ -293,18 +310,22 @@ router.post("/vehicles/:vehicleId/trips/:tripId/end", async (req, res, next) => 
     const tId = toObjectId(req.params.tripId);
     if (!vId || !tId) return res.status(400).json({ error: "Invalid id" });
 
-    const trip = await VehicleTrip.findOne({ _id: tId, vehicleId: vId });
+    const orgId = getOrgId(req);
+
+    const q = { _id: tId, vehicleId: vId, isDeleted: { $ne: true } };
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q);
     if (!trip) return res.status(404).json({ error: "Trip not found" });
-    if (trip.endedAt) return res.status(400).json({ error: "Trip already ended" });
+    if (trip.status === "closed" || trip.endedAt) return res.status(400).json({ error: "Trip already ended" });
 
     const body = req.body || {};
     if (body.notes) trip.notes = String(body.notes);
-    if (body.endPhotoUrl) trip.endPhoto = { url: body.endPhotoUrl };
 
-    if (body.purpose === "Business" || body.purpose === "Private") {
-      trip.purpose = body.purpose;
-    }
+    // Purpose (optional update)
+    if (body.purpose === "Business" || body.purpose === "Private") trip.purpose = body.purpose;
 
+    // Odometer end (must be >= start)
     const incomingEnd = toNum(body.odoEnd);
     if (incomingEnd != null) {
       if (trip.odoStart != null && incomingEnd < Number(trip.odoStart)) {
@@ -315,13 +336,16 @@ router.post("/vehicles/:vehicleId/trips/:tripId/end", async (req, res, next) => 
       trip.odoEnd = incomingEnd;
     }
 
+    // GEO
     const endGeo =
       body.endLat != null && body.endLng != null
         ? { lat: Number(body.endLat), lng: Number(body.endLng), acc: toNum(body.endAccuracy) }
         : readGeo(body);
 
     const endLocation =
-      body?.endLocation?.type === "Point" && Array.isArray(body.endLocation.coordinates) && body.endLocation.coordinates.length >= 2
+      body?.endLocation?.type === "Point" &&
+      Array.isArray(body.endLocation.coordinates) &&
+      body.endLocation.coordinates.length >= 2
         ? {
             type: "Point",
             coordinates: [Number(body.endLocation.coordinates[0]), Number(body.endLocation.coordinates[1])],
@@ -333,10 +357,19 @@ router.post("/vehicles/:vehicleId/trips/:tripId/end", async (req, res, next) => 
         : undefined;
 
     trip.endGeo = endGeo || undefined;
-    trip.endLocation = endLocation;
+    trip.endLocation = endLocation || undefined;
 
+    // keep compatibility: if frontend sends URL directly
+    if (body.endPhotoUrl) trip.endPhoto = { url: body.endPhotoUrl };
+
+    // close + distance
     trip.endedAt = new Date();
+    trip.status = "closed";
     trip.distance = computeDistance(trip.odoStart, trip.odoEnd);
+
+    trip.updatedBy = req.user?.email || req.user?.username || trip.updatedBy;
+    trip.lastEditedAt = new Date();
+    trip.lastEditedBy = req.user?._id || trip.lastEditedBy;
 
     await trip.save();
     res.json(trip.toObject());
@@ -353,12 +386,12 @@ async function applyTripPatch(trip, patch) {
     odoStart: toNum(patch.odoStart),
     odoEnd: toNum(patch.odoEnd),
     driverUserId: patch.driverUserId || patch.driverId,
-    driverId: patch.driverUserId || patch.driverId,
     projectId: patch.projectId,
     taskId: patch.taskId,
     notes: patch.notes,
     tags: Array.isArray(patch.tags) ? patch.tags : undefined,
     purpose: patch.purpose === "Business" || patch.purpose === "Private" ? patch.purpose : undefined,
+    status: patch.status, // allow if caller uses open/closed/cancelled
   });
 
   Object.assign(trip, clean);
@@ -387,6 +420,10 @@ async function applyTripPatch(trip, patch) {
     trip.distance = Math.max(0, Number(trip.odoEnd) - Number(trip.odoStart));
   }
 
+  // keep status consistent with endedAt if someone patches endedAt
+  if (trip.endedAt && trip.status === "open") trip.status = "closed";
+  if (!trip.endedAt && trip.status === "closed") trip.status = "open";
+
   await trip.save();
   return trip;
 }
@@ -395,8 +432,14 @@ async function updateById(req, res, next) {
   try {
     const tId = toObjectId(req.params.id);
     if (!tId) return res.status(400).json({ error: "Invalid id" });
-    const trip = await VehicleTrip.findById(tId);
+
+    const q = { _id: tId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q);
     if (!trip) return res.status(404).json({ error: "Not found" });
+
     const updated = await applyTripPatch(trip, req.body || {});
     res.json(updated.toObject());
   } catch (err) {
@@ -405,16 +448,23 @@ async function updateById(req, res, next) {
 }
 router.patch("/vehicle-trips/:id", updateById);
 router.put("/vehicle-trips/:id", updateById);
+
+// aliases
 router.patch("/vehicleTrips/:id", updateById);
 router.put("/vehicleTrips/:id", updateById);
 
+// nested aliases: /vehicles/:vehicleId/trips/:tripId
 async function updateNested(req, res, next) {
   try {
     const vId = toObjectId(req.params.vehicleId);
     const tId = toObjectId(req.params.tripId);
     if (!vId || !tId) return res.status(400).json({ error: "Invalid id" });
 
-    const trip = await VehicleTrip.findOne({ _id: tId, vehicleId: vId });
+    const q = { _id: tId, vehicleId: vId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q);
     if (!trip) return res.status(404).json({ error: "Not found" });
 
     const updated = await applyTripPatch(trip, req.body || {});
@@ -431,8 +481,14 @@ router.get("/vehicle-trips/:id/audit", async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
     if (!tId) return res.status(400).json({ error: "Invalid id" });
-    const trip = await VehicleTrip.findById(tId).lean();
+
+    const q = { _id: tId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q).lean();
     if (!trip) return res.status(404).json({ error: "Not found" });
+
     res.json({ trip, history: [] });
   } catch (err) {
     next(err);
@@ -440,222 +496,97 @@ router.get("/vehicle-trips/:id/audit", async (req, res, next) => {
 });
 
 /* ------------------------------ uploads (GridFS) ------------------------------ */
-// POST /vehicle-trips/upload  (generic uploader; used by frontend)
+/**
+ * This endpoint is what your frontend logs show:
+ * POST https://moat-smartops.onrender.com/vehicle-trips/upload
+ *
+ * It returns:
+ *  { url: "/files/vehicle-trips/<filename>", filename, size, mime }
+ */
 router.post("/vehicle-trips/upload", upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file" });
-    const meta = await saveFileToGridFS(req, req.file);
+
+    const meta = await saveFileToGridFS(req.file, {
+      uploadedBy: String(req.user?._id || ""),
+      orgId: String(getOrgId(req) || ""),
+    });
+
     res.json(meta);
   } catch (err) {
     next(err);
   }
 });
 
-// POST /vehicle-trips/:id/upload-start
 router.post("/vehicle-trips/:id/upload-start", upload.single("file"), async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
     if (!tId) return res.status(400).json({ error: "Invalid id" });
     if (!req.file) return res.status(400).json({ error: "No file" });
 
-    const trip = await VehicleTrip.findById(tId);
+    const q = { _id: tId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q);
     if (!trip) return res.status(404).json({ error: "Not found" });
 
-    const meta = await saveFileToGridFS(req, req.file);
-    trip.startPhoto = {
-      url: meta.url,
-      fileId: meta.fileId,
-      filename: meta.filename,
-      size: meta.size,
-      mime: meta.mime,
-    };
-    await trip.save();
+    const meta = await saveFileToGridFS(req.file, {
+      uploadedBy: String(req.user?._id || ""),
+      orgId: String(orgId || ""),
+      tripId: String(trip._id),
+      kind: "start",
+    });
 
+    trip.startPhoto = {
+      filename: meta.filename,
+      url: meta.url,
+      mime: meta.mime,
+      size: meta.size,
+      uploadedBy: String(req.user?._id || ""),
+      uploadedAt: new Date(),
+    };
+    trip.updatedBy = req.user?.email || req.user?.username || trip.updatedBy;
+
+    await trip.save();
     res.json(trip.toObject());
   } catch (err) {
     next(err);
   }
 });
 
-// POST /vehicle-trips/:id/upload-end
 router.post("/vehicle-trips/:id/upload-end", upload.single("file"), async (req, res, next) => {
   try {
     const tId = toObjectId(req.params.id);
     if (!tId) return res.status(400).json({ error: "Invalid id" });
     if (!req.file) return res.status(400).json({ error: "No file" });
 
-    const trip = await VehicleTrip.findById(tId);
+    const q = { _id: tId };
+    const orgId = getOrgId(req);
+    if (orgId) q.orgId = orgId;
+
+    const trip = await VehicleTrip.findOne(q);
     if (!trip) return res.status(404).json({ error: "Not found" });
 
-    const meta = await saveFileToGridFS(req, req.file);
+    const meta = await saveFileToGridFS(req.file, {
+      uploadedBy: String(req.user?._id || ""),
+      orgId: String(orgId || ""),
+      tripId: String(trip._id),
+      kind: "end",
+    });
+
     trip.endPhoto = {
-      url: meta.url,
-      fileId: meta.fileId,
       filename: meta.filename,
-      size: meta.size,
+      url: meta.url,
       mime: meta.mime,
+      size: meta.size,
+      uploadedBy: String(req.user?._id || ""),
+      uploadedAt: new Date(),
     };
+    trip.updatedBy = req.user?.email || req.user?.username || trip.updatedBy;
+
     await trip.save();
-
     res.json(trip.toObject());
-  } catch (err) {
-    next(err);
-  }
-});
-
-/* ------------------------------- exports ------------------------------- */
-function pickLatLng(trip, which /* 'start' | 'end' */) {
-  const loc = trip?.[which + "Location"];
-  if (loc && Array.isArray(loc.coordinates) && loc.coordinates.length >= 2) {
-    const lng = Number(loc.coordinates[0]);
-    const lat = Number(loc.coordinates[1]);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-  }
-  const geo = trip?.[which + "Geo"];
-  if (geo && Number.isFinite(Number(geo.lat)) && Number.isFinite(Number(geo.lng))) {
-    return { lat: Number(geo.lat), lng: Number(geo.lng) };
-  }
-  return null;
-}
-
-function tripToCsvRow(t) {
-  const s = pickLatLng(t, "start") || {};
-  const e = pickLatLng(t, "end") || {};
-  return [
-    String(t._id || ""),
-    String(t.vehicleId || ""),
-    String(t.driverUserId || ""),
-    t.startedAt ? new Date(t.startedAt).toISOString() : "",
-    t.endedAt ? new Date(t.endedAt).toISOString() : "",
-    Number.isFinite(t.odoStart) ? t.odoStart : "",
-    Number.isFinite(t.odoEnd) ? t.odoEnd : "",
-    Number.isFinite(t.distance) ? t.distance : "",
-    t.purpose || "",
-    t.projectId || "",
-    t.taskId || "",
-    s.lat ?? "",
-    s.lng ?? "",
-    e.lat ?? "",
-    e.lng ?? "",
-    (t.notes || "").replace(/\r?\n/g, " "),
-    Array.isArray(t.tags) ? t.tags.join("|") : "",
-  ];
-}
-
-router.get("/vehicles/:vehicleId/trips.csv", async (req, res, next) => {
-  try {
-    const vId = toObjectId(req.params.vehicleId);
-    if (!vId) return res.status(400).json({ error: "Invalid vehicle id" });
-
-    const { limit = 1000, skip = 0 } = req.query;
-    const trips = await VehicleTrip.find({ vehicleId: vId })
-      .sort({ startedAt: 1, createdAt: 1 })
-      .skip(Number(skip) || 0)
-      .limit(Math.min(Number(limit) || 1000, 5000))
-      .lean();
-
-    const header = [
-      "tripId",
-      "vehicleId",
-      "driverUserId",
-      "startedAt",
-      "endedAt",
-      "odoStart",
-      "odoEnd",
-      "distance",
-      "purpose",
-      "projectId",
-      "taskId",
-      "startLat",
-      "startLng",
-      "endLat",
-      "endLng",
-      "notes",
-      "tags",
-    ];
-
-    const rows = trips.map(tripToCsvRow);
-    const csv = [header, ...rows]
-      .map((cols) =>
-        cols
-          .map((v) => {
-            const s = String(v ?? "");
-            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-          })
-          .join(",")
-      )
-      .join("\n");
-
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="vehicle-${String(vId)}-trips.csv"`);
-    res.send(csv);
-  } catch (err) {
-    next(err);
-  }
-});
-
-function kmlPlacemark(name, lat, lng, whenIso) {
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "";
-  return `
-    <Placemark>
-      <name>${name}</name>
-      ${whenIso ? `<TimeStamp><when>${whenIso}</when></TimeStamp>` : ""}
-      <Point><coordinates>${lng},${lat},0</coordinates></Point>
-    </Placemark>
-  `;
-}
-
-router.get("/vehicles/:vehicleId/trips.kml", async (req, res, next) => {
-  try {
-    const vId = toObjectId(req.params.vehicleId);
-    if (!vId) return res.status(400).json({ error: "Invalid vehicle id" });
-
-    const { limit = 1000, skip = 0 } = req.query;
-    const trips = await VehicleTrip.find({ vehicleId: vId })
-      .sort({ startedAt: 1, createdAt: 1 })
-      .skip(Number(skip) || 0)
-      .limit(Math.min(Number(limit) || 1000, 5000))
-      .lean();
-
-    const placemarks = [];
-    const lines = [];
-
-    for (const t of trips) {
-      const s = pickLatLng(t, "start");
-      const e = pickLatLng(t, "end");
-
-      if (s) placemarks.push(kmlPlacemark(`Trip ${t._id} start`, s.lat, s.lng, t.startedAt ? new Date(t.startedAt).toISOString() : ""));
-      if (e) placemarks.push(kmlPlacemark(`Trip ${t._id} end`, e.lat, e.lng, t.endedAt ? new Date(t.endedAt).toISOString() : ""));
-
-      if (s && e) {
-        lines.push(`
-          <Placemark>
-            <name>Trip ${t._id}</name>
-            <Style><LineStyle><width>3</width></LineStyle></Style>
-            <LineString>
-              <tessellate>1</tessellate>
-              <coordinates>
-                ${s.lng},${s.lat},0
-                ${e.lng},${e.lat},0
-              </coordinates>
-            </LineString>
-          </Placemark>
-        `);
-      }
-    }
-
-    const doc = `<?xml version="1.0" encoding="UTF-8"?>
-      <kml xmlns="http://www.opengis.net/kml/2.2">
-        <Document>
-          <name>Vehicle ${String(vId)} Trips</name>
-          ${placemarks.join("\n")}
-          ${lines.join("\n")}
-        </Document>
-      </kml>`;
-
-    res.setHeader("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="vehicle-${String(vId)}-trips.kml"`);
-    res.send(doc);
   } catch (err) {
     next(err);
   }

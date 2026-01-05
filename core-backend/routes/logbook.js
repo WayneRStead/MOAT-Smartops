@@ -1,61 +1,168 @@
 // core-backend/routes/logbook.js
-const express = require('express');
-const mongoose = require('mongoose');
-const { requireAuth } = require('../middleware/auth');
+const express = require("express");
+const mongoose = require("mongoose");
+const multer = require("multer");
 
 const router = express.Router();
 
-/* ------------------------- model resolution ------------------------- */
-// Prefer already-compiled model; only require if missing (prevents OverwriteModelError)
-const VehicleLog =
-  mongoose.models.VehicleLog || require('../models/VehicleLog');
+// Prefer already-compiled model; only require if missing
+const VehicleLog = mongoose.models.VehicleLog || require("../models/VehicleLog");
 
 /* ----------------------------- helpers ------------------------------ */
 const isValidId = (v) => mongoose.Types.ObjectId.isValid(String(v));
 const asObjectId = (v) => (isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
 
-// Build an org filter only if your VehicleLog schema has an orgId
-function buildOrgFilter(orgId) {
-  const path = VehicleLog.schema.path('orgId');
-  if (!path) return {}; // schema has no orgId; skip scoping
-  const s = String(orgId || '');
-  // If schema expects ObjectId, only add when valid; if String, pass through
-  if (path.instance === 'ObjectID') {
+function computeDistance(start, end) {
+  if (start == null || end == null) return undefined;
+  const s = Number(start);
+  const e = Number(end);
+  if (Number.isNaN(s) || Number.isNaN(e)) return undefined;
+  return Math.max(0, e - s);
+}
+
+// Prefer org from middleware (req.org), fallback to req.user.orgId
+function getOrgId(req) {
+  return req.org?._id || req.orgId || req.user?.orgId || undefined;
+}
+
+// Build an org filter only if schema supports orgId
+function buildOrgFilter(req) {
+  const orgId = getOrgId(req);
+  const path = VehicleLog.schema.path("orgId");
+  if (!path) return {};
+  if (!orgId) return {};
+
+  const s = String(orgId);
+
+  if (path.instance === "ObjectID") {
     return isValidId(s) ? { orgId: new mongoose.Types.ObjectId(s) } : {};
   }
-  if (path.instance === 'String') {
+  if (path.instance === "String") {
     return s ? { orgId: s } : {};
   }
   return {};
 }
 
-// Compute distance if both odometers provided
-function computeDistance(start, end) {
-  if (start == null || end == null) return undefined;
-  const s = Number(start), e = Number(end);
-  if (Number.isNaN(s) || Number.isNaN(e)) return undefined;
-  return Math.max(0, e - s);
+function stripUndef(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
+
+/* ------------------------------ GridFS ------------------------------ */
+/**
+ * Bucket name: "logbook"
+ * Collections: logbook.files + logbook.chunks
+ */
+function getBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) throw new Error("MongoDB connection not ready (mongoose.connection.db missing).");
+  return new mongoose.mongo.GridFSBucket(db, { bucketName: "logbook" });
+}
+
+function toObjectIdOrNull(id) {
+  try {
+    return new mongoose.Types.ObjectId(String(id));
+  } catch {
+    return null;
+  }
+}
+
+function fileUrl(_req, fileId) {
+  // IMPORTANT: keep relative URL
+  return `/files/logbook/${fileId}`;
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok =
+      /^image\//i.test(file.mimetype) ||
+      /^application\/pdf$/i.test(file.mimetype) ||
+      /^text\//i.test(file.mimetype) ||
+      /^application\/(msword|vnd\.openxmlformats-officedocument\..+)$/i.test(file.mimetype);
+    if (!ok) return cb(new Error("Unsupported file type."));
+    cb(null, true);
+  },
+});
+
+async function saveFileToGridFS(req, file) {
+  if (!file) throw new Error("No file provided");
+
+  const bucket = getBucket();
+  const safeName = String(file.originalname || "file").replace(/[^\w.-]+/g, "_");
+  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
+
+  const uploadStream = bucket.openUploadStream(filename, {
+    contentType: file.mimetype,
+    metadata: stripUndef({
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+      orgId: getOrgId(req) ? String(getOrgId(req)) : undefined,
+      uploadedBy: req.user?._id ? String(req.user._id) : undefined,
+    }),
+  });
+
+  uploadStream.end(file.buffer);
+
+  const done = await new Promise((resolve, reject) => {
+    uploadStream.on("finish", resolve);
+    uploadStream.on("error", reject);
+  });
+
+  const fileId = String(done?._id || uploadStream.id);
+
+  return {
+    fileId,
+    filename,
+    size: file.size,
+    mime: file.mimetype,
+    url: fileUrl(req, fileId),
+  };
+}
+
+/* ------------------------- FILE SERVING (GLOBAL) ------------------------- */
+/**
+ * GET /files/logbook/:fileId
+ * Streams from GridFS.
+ */
+router.get("/files/logbook/:fileId", async (req, res, next) => {
+  try {
+    const fileId = toObjectIdOrNull(req.params.fileId);
+    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
+
+    const bucket = getBucket();
+    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
+    if (!files || !files.length) return res.status(404).json({ error: "File not found" });
+
+    const f = files[0];
+    res.setHeader("Content-Type", f.contentType || "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+    const dl = bucket.openDownloadStream(fileId);
+    dl.on("error", (e) => next(e));
+    dl.pipe(res);
+  } catch (e) {
+    next(e);
+  }
+});
 
 /* ------------------------------- LIST ------------------------------- */
 // GET /logbook?vehicleId=&q=&tag=&from=&to=&minKm=&maxKm=&limit=
-router.get('/', requireAuth, async (req, res) => {
+router.get("/logbook", async (req, res) => {
   try {
     const { vehicleId, q, tag, from, to, minKm, maxKm, limit } = req.query;
 
-    const find = {
-      ...buildOrgFilter(req.user?.orgId),
-    };
+    const find = { ...buildOrgFilter(req) };
 
     if (vehicleId) {
       const oid = asObjectId(vehicleId);
-      if (!oid) return res.status(400).json({ error: 'invalid vehicleId' });
+      if (!oid) return res.status(400).json({ error: "invalid vehicleId" });
       find.vehicleId = oid;
     }
 
     if (q) {
-      const rx = new RegExp(String(q), 'i');
-      // note: tags is often an array; Mongoose will handle {$in:[q]} fine
+      const rx = new RegExp(String(q), "i");
       find.$or = [{ title: rx }, { notes: rx }, { tags: q }];
     }
 
@@ -64,81 +171,70 @@ router.get('/', requireAuth, async (req, res) => {
     if (from || to) {
       find.ts = {
         ...(from ? { $gte: new Date(from) } : {}),
-        ...(to   ? { $lte: new Date(to)   } : {}),
+        ...(to ? { $lte: new Date(to) } : {}),
       };
     }
 
     if (minKm || maxKm) {
       find.distance = {};
-      if (minKm != null && minKm !== '') find.distance.$gte = Number(minKm);
-      if (maxKm != null && maxKm !== '') find.distance.$lte = Number(maxKm);
+      if (minKm != null && minKm !== "") find.distance.$gte = Number(minKm);
+      if (maxKm != null && maxKm !== "") find.distance.$lte = Number(maxKm);
     }
 
-    const lim = Math.min(parseInt(limit || '200', 10) || 200, 500);
-    const rows = await VehicleLog.find(find)
-      .sort({ ts: -1, createdAt: -1 })
-      .limit(lim)
-      .lean();
+    const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
 
+    const rows = await VehicleLog.find(find).sort({ ts: -1, createdAt: -1 }).limit(lim).lean();
     res.json(rows);
   } catch (e) {
-    console.error('GET /logbook error:', e);
-    res.status(500).json({ error: 'Server error' });
+    console.error("GET /logbook error:", e);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ------------------------------ CREATE ------------------------------ */
 // POST /logbook
-router.post('/', requireAuth, async (req, res) => {
+router.post("/logbook", async (req, res) => {
   try {
-    const {
-      vehicleId, title, notes = '', tags = [],
-      ts, odometerStart, odometerEnd
-    } = req.body || {};
+    const { vehicleId, title, notes = "", tags = [], ts, odometerStart, odometerEnd } = req.body || {};
 
     const vid = asObjectId(vehicleId);
-    if (!vid) return res.status(400).json({ error: 'vehicleId required/invalid' });
-    if (!title) return res.status(400).json({ error: 'title required' });
+    if (!vid) return res.status(400).json({ error: "vehicleId required/invalid" });
+    if (!title) return res.status(400).json({ error: "title required" });
 
     const distance = computeDistance(odometerStart, odometerEnd);
 
-    // Base doc
     const doc = {
       vehicleId: vid,
       title: String(title).trim(),
-      notes: String(notes || ''),
+      notes: String(notes || ""),
       tags: Array.isArray(tags) ? tags.filter(Boolean) : [],
       ts: ts ? new Date(ts) : new Date(),
-      odometerStart: odometerStart != null && odometerStart !== '' ? Number(odometerStart) : undefined,
-      odometerEnd:   odometerEnd   != null && odometerEnd   !== '' ? Number(odometerEnd)   : undefined,
+      odometerStart: odometerStart != null && odometerStart !== "" ? Number(odometerStart) : undefined,
+      odometerEnd: odometerEnd != null && odometerEnd !== "" ? Number(odometerEnd) : undefined,
       distance,
-      createdBy: req.user?.sub || req.user?._id || 'unknown',
+      createdBy: req.user?.sub || req.user?._id || "unknown",
     };
 
-    // If schema has orgId, set it using the correct type
-    const orgPath = VehicleLog.schema.path('orgId');
-    if (orgPath) {
-      if (orgPath.instance === 'ObjectID' && isValidId(req.user?.orgId)) {
-        doc.orgId = new mongoose.Types.ObjectId(String(req.user.orgId));
-      } else if (orgPath.instance === 'String' && req.user?.orgId) {
-        doc.orgId = String(req.user.orgId);
-      }
-    }
+    // Apply orgId if schema supports it
+    const orgFilter = buildOrgFilter(req);
+    if (orgFilter.orgId != null) doc.orgId = orgFilter.orgId;
 
     const row = await VehicleLog.create(doc);
     res.status(201).json(row);
   } catch (e) {
-    console.error('POST /logbook error:', e);
-    res.status(500).json({ error: 'Server error' });
+    console.error("POST /logbook error:", e);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ------------------------------- UPDATE ------------------------------ */
 // PUT /logbook/:id
-router.put('/:id', requireAuth, async (req, res) => {
+router.put("/logbook/:id", async (req, res) => {
   try {
-    const row = await VehicleLog.findById(req.params.id);
-    if (!row) return res.status(404).json({ error: 'Not found' });
+    const orgFilter = buildOrgFilter(req);
+
+    const row = await VehicleLog.findOne({ _id: req.params.id, ...orgFilter });
+    if (!row) return res.status(404).json({ error: "Not found" });
 
     const { title, notes, tags, ts, odometerStart, odometerEnd } = req.body || {};
 
@@ -148,31 +244,81 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (ts != null) row.ts = ts ? new Date(ts) : row.ts;
 
     if (odometerStart !== undefined) {
-      row.odometerStart = odometerStart === '' || odometerStart == null ? undefined : Number(odometerStart);
+      row.odometerStart = odometerStart === "" || odometerStart == null ? undefined : Number(odometerStart);
     }
     if (odometerEnd !== undefined) {
-      row.odometerEnd = odometerEnd === '' || odometerEnd == null ? undefined : Number(odometerEnd);
+      row.odometerEnd = odometerEnd === "" || odometerEnd == null ? undefined : Number(odometerEnd);
     }
     row.distance = computeDistance(row.odometerStart, row.odometerEnd);
 
     await row.save();
     res.json(row);
   } catch (e) {
-    console.error('PUT /logbook/:id error:', e);
-    res.status(500).json({ error: 'Server error' });
+    console.error("PUT /logbook/:id error:", e);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 /* ------------------------------- DELETE ------------------------------ */
 // DELETE /logbook/:id
-router.delete('/:id', requireAuth, async (req, res) => {
+router.delete("/logbook/:id", async (req, res) => {
   try {
-    const del = await VehicleLog.findByIdAndDelete(req.params.id);
-    if (!del) return res.status(404).json({ error: 'Not found' });
+    const orgFilter = buildOrgFilter(req);
+
+    const del = await VehicleLog.findOneAndDelete({ _id: req.params.id, ...orgFilter });
+    if (!del) return res.status(404).json({ error: "Not found" });
     res.sendStatus(204);
   } catch (e) {
-    console.error('DELETE /logbook/:id error:', e);
-    res.status(500).json({ error: 'Server error' });
+    console.error("DELETE /logbook/:id error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* --------------------------- FILE UPLOAD API --------------------------- */
+/**
+ * POST /logbook/upload
+ * Uploads a file to GridFS and returns {fileId, url, ...}
+ */
+router.post("/logbook/upload", upload.single("file"), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file" });
+    const meta = await saveFileToGridFS(req, req.file);
+    res.json(meta);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * POST /logbook/:id/attach
+ * Uploads a file AND attaches to the logbook entry.
+ */
+router.post("/logbook/:id/attach", upload.single("file"), async (req, res, next) => {
+  try {
+    const orgFilter = buildOrgFilter(req);
+    const row = await VehicleLog.findOne({ _id: req.params.id, ...orgFilter });
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    if (!req.file) return res.status(400).json({ error: "No file" });
+
+    const meta = await saveFileToGridFS(req, req.file);
+
+    // attachments must exist on schema (it will, after the model drop-in)
+    row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
+    row.attachments.push({
+      fileId: meta.fileId,
+      url: meta.url,
+      filename: meta.filename,
+      mime: meta.mime,
+      size: meta.size,
+      uploadedBy: req.user?._id || undefined,
+      uploadedAt: new Date(),
+    });
+
+    await row.save();
+    res.json(row.toObject());
+  } catch (e) {
+    next(e);
   }
 });
 
