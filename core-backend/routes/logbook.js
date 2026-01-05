@@ -10,7 +10,7 @@ const VehicleLog = mongoose.models.VehicleLog || require("../models/VehicleLog")
 
 /* ----------------------------- helpers ------------------------------ */
 const isValidId = (v) => mongoose.Types.ObjectId.isValid(String(v));
-const asObjectId = (v) => (isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
+const asObjectId = (v) => (isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : null);
 
 function computeDistance(start, end) {
   if (start == null || end == null) return undefined;
@@ -20,7 +20,7 @@ function computeDistance(start, end) {
   return Math.max(0, e - s);
 }
 
-// Prefer org from middleware (req.org), fallback to headers resolved by your auth middleware
+// Prefer org from middleware (req.org), fallback to resolved auth context
 function getOrgId(req) {
   return req.org?._id || req.orgId || req.user?.orgId || undefined;
 }
@@ -43,286 +43,114 @@ function buildOrgFilter(req) {
   return {};
 }
 
-function stripUndef(obj) {
-  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+function cleanTags(tags) {
+  if (Array.isArray(tags)) return tags.filter(Boolean).map(String);
+  if (typeof tags === "string" && tags.trim()) return [tags.trim()];
+  return [];
 }
 
-/* ------------------------------ GridFS (optional) ------------------------------ */
-/**
- * Bucket name: "logbook"
- * Collections: logbook.files + logbook.chunks
- *
- * NOTE: This is only used by /upload and /:id/attach endpoints below.
- */
-function getBucket() {
-  const db = mongoose.connection?.db;
-  if (!db) throw new Error("MongoDB connection not ready (mongoose.connection.db missing).");
-  return new mongoose.mongo.GridFSBucket(db, { bucketName: "logbook" });
-}
+/* ----------------------------- core ops ----------------------------- */
+async function listLogs(req, res) {
+  const { vehicleId, q, tag, from, to, minKm, maxKm, limit } = req.query;
 
-function toObjectIdOrNull(id) {
-  try {
-    return new mongoose.Types.ObjectId(String(id));
-  } catch {
-    return null;
+  const find = { ...buildOrgFilter(req) };
+
+  // allow vehicleId via query OR via nested routes param
+  const vParam = req.params.vehicleId;
+  const vId = vehicleId || vParam;
+  if (vId) {
+    const oid = asObjectId(vId);
+    if (!oid) return res.status(400).json({ error: "invalid vehicleId" });
+    find.vehicleId = oid;
   }
-}
 
-// IMPORTANT: keep relative URL (frontend can prefix backend origin)
-function fileUrl(_req, fileId) {
-  return `/files/logbook/${fileId}`;
-}
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const ok =
-      /^image\//i.test(file.mimetype) ||
-      /^application\/pdf$/i.test(file.mimetype) ||
-      /^text\//i.test(file.mimetype) ||
-      /^application\/(msword|vnd\.openxmlformats-officedocument\..+)$/i.test(file.mimetype);
-    if (!ok) return cb(new Error("Unsupported file type."));
-    cb(null, true);
-  },
-});
-
-async function saveFileToGridFS(req, file) {
-  if (!file) throw new Error("No file provided");
-
-  const bucket = getBucket();
-  const safeName = String(file.originalname || "file").replace(/[^\w.-]+/g, "_");
-  const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
-
-  const uploadStream = bucket.openUploadStream(filename, {
-    contentType: file.mimetype,
-    metadata: stripUndef({
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size,
-      orgId: getOrgId(req) ? String(getOrgId(req)) : undefined,
-      uploadedBy: req.user?._id ? String(req.user._id) : undefined,
-    }),
-  });
-
-  uploadStream.end(file.buffer);
-
-  const done = await new Promise((resolve, reject) => {
-    uploadStream.on("finish", resolve);
-    uploadStream.on("error", reject);
-  });
-
-  const fileId = String(done?._id || uploadStream.id);
-
-  return {
-    fileId,
-    filename,
-    size: file.size,
-    mime: file.mimetype,
-    url: fileUrl(req, fileId),
-  };
-}
-
-/* ------------------------------- LIST ------------------------------- */
-/**
- * Because this router is mounted at:
- *   /logbook   and  /api/logbook
- * these handlers MUST be rooted at "/"
- *
- * GET /logbook?vehicleId=&q=&tag=&from=&to=&minKm=&maxKm=&limit=
- */
-router.get("/", async (req, res) => {
-  try {
-    const { vehicleId, q, tag, from, to, minKm, maxKm, limit } = req.query;
-
-    const find = { ...buildOrgFilter(req) };
-
-    if (vehicleId) {
-      const oid = asObjectId(vehicleId);
-      if (!oid) return res.status(400).json({ error: "invalid vehicleId" });
-      find.vehicleId = oid;
-    }
-
-    if (q) {
-      const rx = new RegExp(String(q), "i");
-      find.$or = [{ title: rx }, { notes: rx }, { tags: q }];
-    }
-
-    if (tag) find.tags = tag;
-
-    if (from || to) {
-      find.ts = {
-        ...(from ? { $gte: new Date(from) } : {}),
-        ...(to ? { $lte: new Date(to) } : {}),
-      };
-    }
-
-    if (minKm || maxKm) {
-      find.distance = {};
-      if (minKm != null && minKm !== "") find.distance.$gte = Number(minKm);
-      if (maxKm != null && maxKm !== "") find.distance.$lte = Number(maxKm);
-    }
-
-    const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
-
-    const rows = await VehicleLog.find(find)
-      .sort({ ts: -1, createdAt: -1 })
-      .limit(lim)
-      .lean();
-
-    res.json(rows);
-  } catch (e) {
-    console.error("GET /logbook error:", e);
-    res.status(500).json({ error: "Server error" });
+  if (q) {
+    const rx = new RegExp(String(q), "i");
+    find.$or = [{ title: rx }, { notes: rx }, { tags: q }];
   }
-});
 
-/* ------------------------------ CREATE ------------------------------ */
-/**
- * POST /logbook
- * (because router is mounted at /logbook)
- */
-router.post("/", async (req, res) => {
-  try {
-    const { vehicleId, title, notes = "", tags = [], ts, odometerStart, odometerEnd } = req.body || {};
+  if (tag) find.tags = tag;
 
-    const vid = asObjectId(vehicleId);
-    if (!vid) return res.status(400).json({ error: "vehicleId required/invalid" });
-    if (!title) return res.status(400).json({ error: "title required" });
-
-    const distance = computeDistance(odometerStart, odometerEnd);
-
-    const doc = {
-      vehicleId: vid,
-      title: String(title).trim(),
-      notes: String(notes || ""),
-      tags: Array.isArray(tags) ? tags.filter(Boolean) : [],
-      ts: ts ? new Date(ts) : new Date(),
-      odometerStart: odometerStart != null && odometerStart !== "" ? Number(odometerStart) : undefined,
-      odometerEnd: odometerEnd != null && odometerEnd !== "" ? Number(odometerEnd) : undefined,
-      distance,
-      createdBy: req.user?.sub || req.user?._id || "unknown",
+  if (from || to) {
+    find.ts = {
+      ...(from ? { $gte: new Date(from) } : {}),
+      ...(to ? { $lte: new Date(to) } : {}),
     };
-
-    // Apply orgId if schema supports it
-    const orgFilter = buildOrgFilter(req);
-    if (orgFilter.orgId != null) doc.orgId = orgFilter.orgId;
-
-    const row = await VehicleLog.create(doc);
-    res.status(201).json(row);
-  } catch (e) {
-    console.error("POST /logbook error:", e);
-    res.status(500).json({ error: "Server error" });
   }
-});
 
-/* ------------------------------- UPDATE ------------------------------ */
+  if (minKm || maxKm) {
+    find.distance = {};
+    if (minKm != null && minKm !== "") find.distance.$gte = Number(minKm);
+    if (maxKm != null && maxKm !== "") find.distance.$lte = Number(maxKm);
+  }
+
+  const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
+
+  const rows = await VehicleLog.find(find)
+    .sort({ ts: -1, createdAt: -1 })
+    .limit(lim)
+    .lean();
+
+  res.json(rows);
+}
+
+async function createLog(req, res) {
+  const body = req.body || {};
+  const vParam = req.params.vehicleId;
+
+  const vehicleId = body.vehicleId || vParam;
+  const vid = asObjectId(vehicleId);
+  if (!vid) return res.status(400).json({ error: "vehicleId required/invalid" });
+
+  const title = body.title;
+  if (!title) return res.status(400).json({ error: "title required" });
+
+  const odometerStart =
+    body.odometerStart != null && body.odometerStart !== "" ? Number(body.odometerStart) : undefined;
+  const odometerEnd =
+    body.odometerEnd != null && body.odometerEnd !== "" ? Number(body.odometerEnd) : undefined;
+
+  const doc = {
+    vehicleId: vid,
+    title: String(title).trim(),
+    notes: String(body.notes || ""),
+    tags: cleanTags(body.tags),
+    ts: body.ts ? new Date(body.ts) : new Date(),
+    odometerStart,
+    odometerEnd,
+    distance: computeDistance(odometerStart, odometerEnd),
+    createdBy: req.user?.sub || req.user?._id || "unknown",
+  };
+
+  const orgFilter = buildOrgFilter(req);
+  if (orgFilter.orgId != null) doc.orgId = orgFilter.orgId;
+
+  const row = await VehicleLog.create(doc);
+  res.status(201).json(row);
+}
+
+/* ----------------------------- ROUTES ------------------------------ */
 /**
- * PUT /logbook/:id
- * (because router is mounted at /logbook)
+ * IMPORTANT:
+ * This file defines FULL paths ("/logbook", "/vehicles/:id/logbook", etc).
+ * Therefore it should be mounted at "/" and "/api" in index.js (see below).
  */
-router.put("/:id", async (req, res) => {
-  try {
-    const orgFilter = buildOrgFilter(req);
 
-    const row = await VehicleLog.findOne({ _id: req.params.id, ...orgFilter });
-    if (!row) return res.status(404).json({ error: "Not found" });
+// LIST aliases
+router.get("/logbook", (req, res, next) => listLogs(req, res).catch(next));
+router.get("/logbooks", (req, res, next) => listLogs(req, res).catch(next));
 
-    const { title, notes, tags, ts, odometerStart, odometerEnd } = req.body || {};
+// Your frontend is calling this:
+router.get("/vehicles/:vehicleId/entries", (req, res, next) => listLogs(req, res).catch(next));
 
-    if (title != null) row.title = String(title).trim();
-    if (notes != null) row.notes = String(notes);
-    if (Array.isArray(tags)) row.tags = tags.filter(Boolean);
-    if (ts != null) row.ts = ts ? new Date(ts) : row.ts;
+// Additional useful aliases
+router.get("/vehicles/:vehicleId/logbook", (req, res, next) => listLogs(req, res).catch(next));
+router.get("/vehicles/:vehicleId/logbook-entries", (req, res, next) => listLogs(req, res).catch(next));
 
-    if (odometerStart !== undefined) {
-      row.odometerStart = odometerStart === "" || odometerStart == null ? undefined : Number(odometerStart);
-    }
-    if (odometerEnd !== undefined) {
-      row.odometerEnd = odometerEnd === "" || odometerEnd == null ? undefined : Number(odometerEnd);
-    }
-    row.distance = computeDistance(row.odometerStart, row.odometerEnd);
-
-    await row.save();
-    res.json(row);
-  } catch (e) {
-    console.error("PUT /logbook/:id error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* ------------------------------- DELETE ------------------------------ */
-/**
- * DELETE /logbook/:id
- */
-router.delete("/:id", async (req, res) => {
-  try {
-    const orgFilter = buildOrgFilter(req);
-
-    const del = await VehicleLog.findOneAndDelete({ _id: req.params.id, ...orgFilter });
-    if (!del) return res.status(404).json({ error: "Not found" });
-    res.sendStatus(204);
-  } catch (e) {
-    console.error("DELETE /logbook/:id error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* --------------------------- FILE UPLOAD API (optional) --------------------------- */
-/**
- * POST /logbook/upload  (because mounted at /logbook)
- */
-router.post("/upload", upload.single("file"), async (req, res, next) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "No file" });
-    const meta = await saveFileToGridFS(req, req.file);
-    res.json(meta);
-  } catch (e) {
-    next(e);
-  }
-});
-
-/**
- * POST /logbook/:id/attach  (because mounted at /logbook)
- */
-router.post("/:id/attach", upload.single("file"), async (req, res, next) => {
-  try {
-    const orgFilter = buildOrgFilter(req);
-    const row = await VehicleLog.findOne({ _id: req.params.id, ...orgFilter });
-    if (!row) return res.status(404).json({ error: "Not found" });
-
-    if (!req.file) return res.status(400).json({ error: "No file" });
-
-    const meta = await saveFileToGridFS(req, req.file);
-
-    // only attach if schema supports it
-    const hasAttachments = !!VehicleLog.schema.path("attachments");
-    if (hasAttachments) {
-      row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
-      row.attachments.push({
-        fileId: meta.fileId,
-        url: meta.url,
-        filename: meta.filename,
-        mime: meta.mime,
-        size: meta.size,
-        uploadedBy: req.user?._id || undefined,
-        uploadedAt: new Date(),
-      });
-      await row.save();
-    }
-
-    res.json({ ok: true, file: meta, logbook: hasAttachments ? row.toObject() : undefined });
-  } catch (e) {
-    next(e);
-  }
-});
-
-/* ------------------------- FILE SERVING NOTE -------------------------
-   The URL we return is /files/logbook/:fileId, but this router is mounted at /logbook,
-   so it would NOT be reachable as /files/logbook/:fileId unless you mount a separate
-   public file-serving route elsewhere.
-
-   For now, log entry CREATE/LIST/UPDATE/DELETE will work.
---------------------------------------------------------------------- */
+// CREATE aliases (the ones you showed in your network log)
+router.post("/logbook", (req, res, next) => createLog(req, res).catch(next));
+router.post("/logbooks", (req, res, next) => createLog(req, res).catch(next));
+router.post("/vehicles/:vehicleId/logbook", (req, res, next) => createLog(req, res).catch(next));
+router.post("/vehicles/:vehicleId/logbook-entries", (req, res, next) => createLog(req, res).catch(next));
 
 module.exports = router;

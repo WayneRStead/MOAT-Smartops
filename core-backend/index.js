@@ -538,8 +538,6 @@ if (vehiclesRouter) {
   );
 }
 if (logbookRouter) {
-  // Mount at "/" and "/api" so logbook.js can define BOTH:
-  //   /logbook/... endpoints and /files/logbook/... file streaming endpoints
   app.use(
     "/",
     requireAuth,
@@ -547,7 +545,6 @@ if (logbookRouter) {
     requireOrg,
     enforceTrial,
     touchOrgActivity,
-    computeAccessibleUserIds,
     logbookRouter
   );
   app.use(
@@ -557,7 +554,6 @@ if (logbookRouter) {
     requireOrg,
     enforceTrial,
     touchOrgActivity,
-    computeAccessibleUserIds,
     logbookRouter
   );
 }
