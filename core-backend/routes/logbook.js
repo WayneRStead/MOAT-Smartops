@@ -125,6 +125,11 @@ async function saveFileToGridFS(req, file) {
 /**
  * GET /files/logbook/:fileId
  * Streams from GridFS.
+ *
+ * This router is mounted at "/" and "/api" (in index.js),
+ * so this works at both:
+ * - /files/logbook/:fileId
+ * - /api/files/logbook/:fileId
  */
 router.get("/files/logbook/:fileId", async (req, res, next) => {
   try {
@@ -149,7 +154,7 @@ router.get("/files/logbook/:fileId", async (req, res, next) => {
 
 /* ------------------------------- LIST ------------------------------- */
 // GET /logbook?vehicleId=&q=&tag=&from=&to=&minKm=&maxKm=&limit=
-router.get("/logbook", async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const { vehicleId, q, tag, from, to, minKm, maxKm, limit } = req.query;
 
@@ -193,7 +198,7 @@ router.get("/logbook", async (req, res) => {
 
 /* ------------------------------ CREATE ------------------------------ */
 // POST /logbook
-router.post("/logbook", async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const { vehicleId, title, notes = "", tags = [], ts, odometerStart, odometerEnd } = req.body || {};
 
@@ -229,7 +234,7 @@ router.post("/logbook", async (req, res) => {
 
 /* ------------------------------- UPDATE ------------------------------ */
 // PUT /logbook/:id
-router.put("/logbook/:id", async (req, res) => {
+router.put("/:id", async (req, res) => {
   try {
     const orgFilter = buildOrgFilter(req);
 
@@ -261,7 +266,7 @@ router.put("/logbook/:id", async (req, res) => {
 
 /* ------------------------------- DELETE ------------------------------ */
 // DELETE /logbook/:id
-router.delete("/logbook/:id", async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     const orgFilter = buildOrgFilter(req);
 
@@ -279,7 +284,7 @@ router.delete("/logbook/:id", async (req, res) => {
  * POST /logbook/upload
  * Uploads a file to GridFS and returns {fileId, url, ...}
  */
-router.post("/logbook/upload", upload.single("file"), async (req, res, next) => {
+router.post("/upload", upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file" });
     const meta = await saveFileToGridFS(req, req.file);
@@ -291,9 +296,9 @@ router.post("/logbook/upload", upload.single("file"), async (req, res, next) => 
 
 /**
  * POST /logbook/:id/attach
- * Uploads a file AND attaches to the logbook entry.
+ * Uploads a file AND attaches to the logbook entry if schema supports attachments.
  */
-router.post("/logbook/:id/attach", upload.single("file"), async (req, res, next) => {
+router.post("/:id/attach", upload.single("file"), async (req, res, next) => {
   try {
     const orgFilter = buildOrgFilter(req);
     const row = await VehicleLog.findOne({ _id: req.params.id, ...orgFilter });
@@ -303,7 +308,12 @@ router.post("/logbook/:id/attach", upload.single("file"), async (req, res, next)
 
     const meta = await saveFileToGridFS(req, req.file);
 
-    // attachments must exist on schema (it will, after the model drop-in)
+    const hasAttachments = !!VehicleLog.schema.path("attachments");
+    if (!hasAttachments) {
+      // Still return uploaded file info even if log schema doesn't support attaching
+      return res.json({ ok: true, file: meta, note: "VehicleLog schema has no attachments field; file uploaded only." });
+    }
+
     row.attachments = Array.isArray(row.attachments) ? row.attachments : [];
     row.attachments.push({
       fileId: meta.fileId,
@@ -311,7 +321,7 @@ router.post("/logbook/:id/attach", upload.single("file"), async (req, res, next)
       filename: meta.filename,
       mime: meta.mime,
       size: meta.size,
-      uploadedBy: req.user?._id || undefined,
+      uploadedBy: req.user?._id ? String(req.user._id) : undefined,
       uploadedAt: new Date(),
     });
 
