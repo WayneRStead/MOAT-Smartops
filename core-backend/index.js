@@ -538,8 +538,28 @@ if (vehiclesRouter) {
   );
 }
 if (logbookRouter) {
-  app.use("/", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
-  app.use("/api", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
+  // Mount at "/" and "/api" so logbook.js can define BOTH:
+  //   /logbook/... endpoints and /files/logbook/... file streaming endpoints
+  app.use(
+    "/",
+    requireAuth,
+    resolveOrgContext,
+    requireOrg,
+    enforceTrial,
+    touchOrgActivity,
+    computeAccessibleUserIds,
+    logbookRouter
+  );
+  app.use(
+    "/api",
+    requireAuth,
+    resolveOrgContext,
+    requireOrg,
+    enforceTrial,
+    touchOrgActivity,
+    computeAccessibleUserIds,
+    logbookRouter
+  );
 }
 if (vendorsRouter) {
   app.use("/vendors", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, vendorsRouter);
