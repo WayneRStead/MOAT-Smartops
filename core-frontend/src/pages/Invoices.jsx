@@ -72,7 +72,6 @@ function statusFromRow(row) {
   return raw || "submitted";
 }
 function Badge({ code }) {
-  // submitted = amber, outstanding = red, paid = green, void = grey
   const map = {
     submitted: "bg-amber-100 text-amber-800",
     outstanding: "bg-red-100 text-red-800",
@@ -85,6 +84,35 @@ function Badge({ code }) {
 
 /* Reasonable currency options */
 const CURRENCIES = ["USD","EUR","GBP","AUD","NZD","ZAR","CAD","JPY","CNY","INR"];
+
+/* ------------------------------ role helpers ------------------------------ */
+/**
+ * Keep frontend role logic aligned with backend middleware/auth.js
+ */
+const CANON_ROLES = ["user","group-leader","project-manager","manager","admin","superadmin"];
+
+function normalizeRole(r) {
+  if (!r) return "";
+  let s = String(r).trim().toLowerCase();
+  s = s.replace(/\s+/g, "-");        // "Project Manager" -> "project-manager"
+  if (s === "worker" || s === "member") s = "user";
+  if (s === "groupleader") s = "group-leader";
+  if (s === "pm") s = "project-manager";
+  if (s === "super-admin") s = "superadmin";
+  return CANON_ROLES.includes(s) ? s : "";
+}
+
+const ROLE_RANK = {
+  "user": 1,
+  "group-leader": 2,
+  "project-manager": 3,
+  "manager": 4,
+  "admin": 5,
+  "superadmin": 6,
+};
+function rankOf(role) {
+  return ROLE_RANK[normalizeRole(role)] || 0;
+}
 
 /* --------------------------- MAIN COMPONENT -------------------------- */
 export default function Invoices() {
@@ -149,22 +177,44 @@ export default function Invoices() {
     try {
       const { data } = await api.get("/auth/me");
       const u = data?.user || data || {};
-      const primary = (u.role || u.orgRole || u.globalRole || u.accountRole || "").toString();
-      const rolesArr = Array.isArray(u.roles) ? u.roles : [];
-      const norm = new Set([primary, ...rolesArr].map((r) => String(r || "").toLowerCase()).filter(Boolean));
-      return { ...u, _normRoles: norm };
-    } catch { return null; }
+
+      // Gather any plausible role fields your backend might return
+      const rawPrimary =
+        u.role || u.orgRole || u.globalRole || u.accountRole || u.primaryRole || "";
+
+      const rawRolesArr = Array.isArray(u.roles) ? u.roles
+        : Array.isArray(u.orgRoles) ? u.orgRoles
+        : Array.isArray(u.permissions) ? u.permissions
+        : [];
+
+      const normRoles = new Set(
+        [rawPrimary, ...rawRolesArr]
+          .map((r) => normalizeRole(r))
+          .filter(Boolean)
+      );
+
+      // If backend returns only one role but it's not canonical, keep original too (best effort)
+      if (!normRoles.size && rawPrimary) {
+        normRoles.add(String(rawPrimary).toLowerCase());
+      }
+
+      return { ...u, _normRoles: normRoles };
+    } catch {
+      return null;
+    }
   }
+
+  // Manager+ can manage invoices (and optionally project-manager if you want it)
   const canManage = useMemo(() => {
     if (!me) return false;
-    const rset = me._normRoles || new Set(
-      [
-        String(me.role || me.orgRole || me.globalRole || "").toLowerCase(),
-        ...(Array.isArray(me.roles) ? me.roles : []).map((r) => String(r).toLowerCase()),
-      ].filter(Boolean)
-    );
-    const allowed = ["manager", "admin", "superadmin", "owner"];
-    return allowed.some((r) => rset.has(r));
+
+    const roles = me._normRoles instanceof Set ? me._normRoles : new Set();
+    const maxRank = Math.max(0, ...Array.from(roles).map(rankOf));
+
+    // ✅ If you want ONLY manager/admin/superadmin: keep as >= 4
+    // ✅ If you also want project-manager to manage invoices: change threshold to >= 3
+    // You said "manager to super admin", so we keep manager+:
+    return maxRank >= ROLE_RANK["manager"];
   }, [me]);
 
   /* ------------------------------ loaders ------------------------------ */
@@ -422,13 +472,11 @@ export default function Invoices() {
         .fileFrame{ width:100%; height:70vh; border:1px solid #e5e7eb; border-radius:12px; }
       `}</style>
 
-      {/* Header */}
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-semibold">Invoices</h1>
         <div className="text-sm text-gray-600 mt-1">{loading ? "Loading…" : `Total: ${rows.length} • Showing: ${filtered.length}`}</div>
       </div>
 
-      {/* Single-row toolbar */}
       <div className="mt-3 toolbar">
         <label className="text-sm inline-flex items-center gap-2">
           <input type="checkbox" checked={showDeleted} onChange={(e)=>setShowDeleted(e.target.checked)} />
@@ -642,7 +690,6 @@ export default function Invoices() {
                 />
               </label>
 
-              {/* File upload */}
               {!editId ? (
                 <label className="text-sm md:col-span-2">Upload file (PDF/image)
                   <input className="input" type="file" accept="application/pdf,image/*"
@@ -667,7 +714,6 @@ export default function Invoices() {
               </div>
             </form>
 
-            {/* Derived preview line */}
             <div className="mt-2 text-sm text-gray-600">
               {(() => {
                 const s = editId ? editForm.submittedAt : form.submittedAt;
