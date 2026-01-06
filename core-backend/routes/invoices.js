@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireRole } = require('../middleware/auth');
 
 // Prefer already-compiled models to avoid OverwriteModelError
 const Invoice = mongoose.models.Invoice || require('../models/Invoice');
@@ -39,7 +39,7 @@ function addDays(dateLike, days) {
 }
 
 function normalizeDueAt(body) {
-  // Prefer explicit dueAt; otherwise compute from submittedAt/issuedAt + termsDays/terms
+  // Prefer explicit dueAt; otherwise compute from submittedAt/issuedAt + termsDays/terms/netDays
   const dueExplicit = body.dueAt ? new Date(body.dueAt) : null;
   if (dueExplicit && !isNaN(+dueExplicit)) return dueExplicit;
 
@@ -65,48 +65,6 @@ async function maybeUpsertVendor({ reqUser, name, email, phone, upsertFlag }) {
   return v._id;
 }
 
-/* --------------------------- role guarding --------------------------- */
-/**
- * Invoice rule:
- * - create/edit/upload: manager, admin, superadmin
- * - delete: admin, superadmin
- *
- * Supports:
- * - req.user.role as string
- * - req.user.roles as array
- * - case-insensitive
- * - treats "org_admin" / "super-admin" etc. as admin (contains "admin")
- */
-function userHasAnyRole(user, allowed = []) {
-  const want = new Set((allowed || []).map(r => String(r).toLowerCase()));
-
-  const r1 = String(user?.role || '').toLowerCase().trim();
-  if (r1) {
-    if (want.has(r1)) return true;
-    // allow admin variants if "admin" is allowed
-    if (want.has('admin') && r1.includes('admin')) return true;
-    if (want.has('superadmin') && r1.includes('super')) return true;
-  }
-
-  const rs = Array.isArray(user?.roles) ? user.roles : [];
-  for (const r of rs) {
-    const rr = String(r || '').toLowerCase().trim();
-    if (!rr) continue;
-    if (want.has(rr)) return true;
-    if (want.has('admin') && rr.includes('admin')) return true;
-    if (want.has('superadmin') && rr.includes('super')) return true;
-  }
-
-  return false;
-}
-
-function requireAnyRole(...allowed) {
-  return function (req, res, next) {
-    if (userHasAnyRole(req.user, allowed)) return next();
-    return res.status(403).json({ error: 'Forbidden' });
-  };
-}
-
 /* ----------------------------- file upload ---------------------------- */
 // Multer storage with per-org subfolder and deterministic filename
 const storage = multer.diskStorage({
@@ -127,14 +85,6 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* -------------------------------- LIST ------------------------------- */
-/**
- * GET /invoices
- * Query:
- *   - q: text search (number, vendorName, notes)
- *   - status: submitted|outstanding|paid|void
- *   - from, to: date range (issuedAt/submittedAt/createdAt)
- *   - limit: default 200 (max 1000)
- */
 router.get('/', requireAuth, async (req, res, next) => {
   try {
     const { q, status, from, to, limit } = req.query;
@@ -181,18 +131,10 @@ router.get('/:id', requireAuth, async (req, res, next) => {
 });
 
 /* ------------------------------- CREATE ------------------------------ */
-/**
- * Body can include:
- * number, projectId, vendorId?, vendorName?,
- * amount, currency, submittedAt/issuedAt, paidAt/paymentDate,
- * termsDays/terms/netDays, dueAt?, notes, status?
- *
- * Use ?upsertVendor=1 to auto-create vendor if only vendorName provided.
- */
 router.post(
   '/',
   requireAuth,
-  requireAnyRole('manager', 'admin', 'superadmin'),
+  requireRole('project-manager', 'manager', 'admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const scope = orgScope(req.user?.orgId);
@@ -227,8 +169,14 @@ router.post(
         if (docData[k] != null) docData[k] = Number(docData[k]);
       });
 
-      // ensure required dates if frontend sends strings
       if (docData.submittedAt) docData.submittedAt = new Date(docData.submittedAt);
+      if (docData.issuedAt) docData.issuedAt = new Date(docData.issuedAt);
+      if (docData.paidAt) docData.paidAt = new Date(docData.paidAt);
+      if (docData.dueAt) docData.dueAt = new Date(docData.dueAt);
+
+      // audit (optional fields in model)
+      if (docData.createdBy == null) docData.createdBy = req.user?.sub || req.user?._id || req.user?.email || null;
+      docData.updatedBy = req.user?.sub || req.user?._id || req.user?.email || null;
 
       const doc = await Invoice.create(docData);
       res.status(201).json(doc);
@@ -240,7 +188,7 @@ router.post(
 router.put(
   '/:id',
   requireAuth,
-  requireAnyRole('manager', 'admin', 'superadmin'),
+  requireRole('project-mananger', 'manager', 'admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const scope = orgScope(req.user?.orgId);
@@ -278,6 +226,11 @@ router.put(
       });
 
       if (set.submittedAt) set.submittedAt = new Date(set.submittedAt);
+      if (set.issuedAt) set.issuedAt = new Date(set.issuedAt);
+      if (set.paidAt) set.paidAt = new Date(set.paidAt);
+      if (set.dueAt) set.dueAt = new Date(set.dueAt);
+
+      set.updatedBy = req.user?.sub || req.user?._id || req.user?.email || null;
 
       const doc = await Invoice.findOneAndUpdate(
         { _id: req.params.id, ...scope },
@@ -295,7 +248,7 @@ router.put(
 router.delete(
   '/:id',
   requireAuth,
-  requireAnyRole('admin', 'superadmin'),
+  requireRole('admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const r = await Invoice.findOneAndDelete({ _id: req.params.id, ...orgScope(req.user?.orgId) });
@@ -321,15 +274,13 @@ router.delete(
  * POST /invoices/:id/file
  * form-data: file=<binary>
  *
- * Persists to fields that actually exist in models/Invoice.js:
+ * Writes to fields that exist in your Invoice model:
  *   fileUrl, fileName, fileSize, fileType
- *
- * Returns { ok, url, filename, invoice }
  */
 router.post(
   '/:id/file',
   requireAuth,
-  requireAnyRole('manager', 'admin', 'superadmin'),
+  requireRole('project-manager', 'manager', 'admin', 'superadmin'),
   upload.single('file'),
   async (req, res, next) => {
     try {
@@ -337,12 +288,9 @@ router.post(
 
       const org = safeOrgId(req);
       const filename = req.file.filename;
-
-      // Public URL (served by /files static mount in index.js)
       const publicUrl = `/files/invoices/${org}/${filename}`;
 
       const scope = orgScope(req.user?.orgId);
-
       const update = {
         $set: {
           fileUrl: publicUrl,
