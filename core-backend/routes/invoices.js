@@ -44,7 +44,7 @@ function normalizeDueAt(body) {
   if (dueExplicit && !isNaN(+dueExplicit)) return dueExplicit;
 
   const submitted = body.submittedAt || body.issuedAt;
-  const terms = Number(body.termsDays ?? body.terms ?? 0);
+  const terms = Number(body.termsDays ?? body.terms ?? body.netDays ?? 0);
   const d = addDays(submitted, terms);
   return d || null;
 }
@@ -69,22 +69,32 @@ async function maybeUpsertVendor({ reqUser, name, email, phone, upsertFlag }) {
 /**
  * Invoice rule:
  * - create/edit/upload: manager, admin, superadmin
- * - delete: admin, superadmin (kept as-is)
+ * - delete: admin, superadmin
  *
  * Supports:
  * - req.user.role as string
  * - req.user.roles as array
+ * - case-insensitive
+ * - treats "org_admin" / "super-admin" etc. as admin (contains "admin")
  */
 function userHasAnyRole(user, allowed = []) {
   const want = new Set((allowed || []).map(r => String(r).toLowerCase()));
 
-  const r1 = String(user?.role || '').toLowerCase();
-  if (r1 && want.has(r1)) return true;
+  const r1 = String(user?.role || '').toLowerCase().trim();
+  if (r1) {
+    if (want.has(r1)) return true;
+    // allow admin variants if "admin" is allowed
+    if (want.has('admin') && r1.includes('admin')) return true;
+    if (want.has('superadmin') && r1.includes('super')) return true;
+  }
 
   const rs = Array.isArray(user?.roles) ? user.roles : [];
   for (const r of rs) {
-    const rr = String(r || '').toLowerCase();
-    if (rr && want.has(rr)) return true;
+    const rr = String(r || '').toLowerCase().trim();
+    if (!rr) continue;
+    if (want.has(rr)) return true;
+    if (want.has('admin') && rr.includes('admin')) return true;
+    if (want.has('superadmin') && rr.includes('super')) return true;
   }
 
   return false;
@@ -175,7 +185,7 @@ router.get('/:id', requireAuth, async (req, res, next) => {
  * Body can include:
  * number, projectId, vendorId?, vendorName?,
  * amount, currency, submittedAt/issuedAt, paidAt/paymentDate,
- * termsDays/terms, dueAt?, notes, status?
+ * termsDays/terms/netDays, dueAt?, notes, status?
  *
  * Use ?upsertVendor=1 to auto-create vendor if only vendorName provided.
  */
@@ -213,12 +223,12 @@ router.post(
       };
 
       // normalize numerics
-      ['amount','subtotal','tax','total','termsDays','terms'].forEach(k => {
+      ['amount','netDays','termsDays','terms'].forEach(k => {
         if (docData[k] != null) docData[k] = Number(docData[k]);
       });
 
-      // ensure arrays
-      if (!Array.isArray(docData.files)) docData.files = [];
+      // ensure required dates if frontend sends strings
+      if (docData.submittedAt) docData.submittedAt = new Date(docData.submittedAt);
 
       const doc = await Invoice.create(docData);
       res.status(201).json(doc);
@@ -263,15 +273,18 @@ router.put(
       }
 
       // numerics
-      ['amount','subtotal','tax','total','termsDays','terms'].forEach(k => {
+      ['amount','netDays','termsDays','terms'].forEach(k => {
         if (set[k] != null) set[k] = Number(set[k]);
       });
+
+      if (set.submittedAt) set.submittedAt = new Date(set.submittedAt);
 
       const doc = await Invoice.findOneAndUpdate(
         { _id: req.params.id, ...scope },
         set,
         { new: true, runValidators: true }
-      );
+      ).lean();
+
       if (!doc) return res.status(404).json({ error: 'Not found' });
       res.json(doc);
     } catch (e) { next(e); }
@@ -279,7 +292,6 @@ router.put(
 );
 
 /* ------------------------------- DELETE ------------------------------ */
-// Currently a hard delete. If you want soft delete, add a {deleted:true} flag instead.
 router.delete(
   '/:id',
   requireAuth,
@@ -288,6 +300,17 @@ router.delete(
     try {
       const r = await Invoice.findOneAndDelete({ _id: req.params.id, ...orgScope(req.user?.orgId) });
       if (!r) return res.status(404).json({ error: 'Not found' });
+
+      // best-effort: remove invoice file from disk if present
+      try {
+        const org = safeOrgId(req);
+        const fileName = r.fileName ? String(r.fileName) : null;
+        if (fileName) {
+          const p = path.join(__dirname, '..', 'uploads', 'invoices', org, fileName);
+          try { fs.unlinkSync(p); } catch {}
+        }
+      } catch {}
+
       res.json({ ok: true });
     } catch (e) { next(e); }
   }
@@ -297,7 +320,10 @@ router.delete(
 /**
  * POST /invoices/:id/file
  * form-data: file=<binary>
- * Adds to invoice.files[] and sets file/fileUrl for convenience.
+ *
+ * Persists to fields that actually exist in models/Invoice.js:
+ *   fileUrl, fileName, fileSize, fileType
+ *
  * Returns { ok, url, filename, invoice }
  */
 router.post(
@@ -311,13 +337,20 @@ router.post(
 
       const org = safeOrgId(req);
       const filename = req.file.filename;
+
       // Public URL (served by /files static mount in index.js)
       const publicUrl = `/files/invoices/${org}/${filename}`;
 
       const scope = orgScope(req.user?.orgId);
+
       const update = {
-        $set: { file: { url: publicUrl, filename }, fileUrl: publicUrl },
-        $push: { files: { filename, url: publicUrl, uploadedAt: new Date() } },
+        $set: {
+          fileUrl: publicUrl,
+          fileName: filename,
+          fileSize: req.file.size || null,
+          fileType: req.file.mimetype || null,
+          updatedBy: req.user?.sub || req.user?._id || req.user?.email || null,
+        },
       };
 
       const doc = await Invoice.findOneAndUpdate(
