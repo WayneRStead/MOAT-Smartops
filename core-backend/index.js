@@ -250,6 +250,10 @@ async function serveDocumentFile(req, res, next) {
 app.get("/files/documents/:fileId", serveDocumentFile);
 app.get("/api/files/documents/:fileId", serveDocumentFile);
 
+// Alias paths (frontend expects /documents/files/:fileId)
+app.get("/documents/files/:fileId", serveDocumentFile);
+app.get("/api/documents/files/:fileId", serveDocumentFile);
+
 /* ---------------------------- Static /files ---------------------------- */
 const uploadsRoot = path.join(__dirname, "uploads");
 [
