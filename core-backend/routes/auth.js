@@ -28,7 +28,6 @@ const sendPasswordResetEmail =
         console.warn(`  To: ${to}`);
         console.warn(`  Org: ${orgName || ''}`);
         console.warn(`  Reset URL: ${resetUrl}`);
-        // No throw — we still want the endpoint to succeed from a UX perspective
       };
 
 const router = express.Router();
@@ -130,6 +129,12 @@ router.post('/login', async (req, res) => {
       roles: m.roles || [],
     }));
 
+    // include roles in response too (helps frontends)
+    const responseRoles =
+      (Array.isArray(currentRoles) && currentRoles.length)
+        ? currentRoles.map(canonRole)
+        : [canonRole(user.role || 'user')];
+
     return res.json({
       token,
       user: {
@@ -137,6 +142,9 @@ router.post('/login', async (req, res) => {
         name: user.name,
         email: user.email,
         globalRole: user.globalRole || null,
+        orgId: currentOrgId ? String(currentOrgId) : null,
+        roles: responseRoles,
+        role: responseRoles[0] || 'user',
       },
       orgs,
       currentOrgId: currentOrgId ? String(currentOrgId) : null,
@@ -151,6 +159,10 @@ router.post('/login', async (req, res) => {
  *  ME
  *  GET /auth/me
  *  Returns: { user, orgs, currentOrgId }
+ *
+ *  IMPORTANT:
+ *  - Frontend permission checks rely on user.role/user.roles being present.
+ *  - req.user is already built by middleware/auth.js and may include DB-merged role.
  * =======================================================================
  */
 router.get('/me', requireAuth, async (req, res) => {
@@ -171,12 +183,28 @@ router.get('/me', requireAuth, async (req, res) => {
       roles: m.roles || [],
     }));
 
+    // ✅ THIS IS THE FIX:
+    // Always include role + roles exactly as middleware computed them.
+    // These are what your UI should trust for gating.
+    const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    const role = req.user?.role || (roles[0] || 'user');
+
     return res.json({
       user: {
         _id: user._id,
         name: user.name,
         email: user.email,
-        globalRole: user.globalRole || null,
+
+        // include org context & roles for UI permissions
+        orgId: req.user.orgId ? String(req.user.orgId) : null,
+        roles,
+        role,
+
+        // keep existing field for super/global cases
+        globalRole: req.user.globalRole || user.globalRole || null,
+
+        // optional flags if present (won't break anything)
+        isGlobalSuperadmin: req.user.isGlobalSuperadmin === true,
       },
       orgs,
       currentOrgId: req.user.orgId ? String(req.user.orgId) : null,
@@ -217,7 +245,8 @@ router.post('/switch-org', requireAuth, async (req, res) => {
     return res.json({
       token,
       currentOrgId: String(orgId),
-      roles: link.roles || [],
+      roles: (link.roles || []).map(canonRole),
+      role: ((link.roles || []).map(canonRole)[0]) || 'user',
     });
   } catch (err) {
     console.error('[auth/switch-org]', err);
@@ -288,7 +317,6 @@ router.post('/forgot-password', async (req, res) => {
       await sendPasswordResetEmail({ to: user.email, resetUrl, orgName });
     } catch (mailErr) {
       console.warn('[auth/forgot-password] sendPasswordResetEmail failed:', mailErr.message);
-      // No rethrow — we already logged the URL above
     }
 
     return res.json({
@@ -340,7 +368,6 @@ router.post('/reset-password', async (req, res) => {
     // Check that the user still exists and isn't deleted
     const user = await User.findById(userId).lean();
     if (!user || user.isDeleted) {
-      // Don’t reveal account details, just treat as invalid token
       return res.status(400).json({ error: 'Invalid or expired reset token.' });
     }
 
@@ -354,7 +381,6 @@ router.post('/reset-password', async (req, res) => {
           passwordHash: hash,
           passwordResetAt: new Date(),
         },
-        // Optional: clear legacy fields if they exist
         $unset: {
           password: "",
           hash: "",
