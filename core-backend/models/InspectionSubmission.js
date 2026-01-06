@@ -194,7 +194,36 @@ const InspectionSubmissionSchema = new Schema(
   { timestamps: true }
 );
 
-// Helpful indexes
+/* =====================================================================
+   ✅ CRITICAL INDEXES (tenant-first) — fixes "Sort exceeded memory limit"
+   Your list route filters by orgId and sorts by createdAt:-1.
+   Without these, Mongo sorts big result sets in RAM and hits 32MB.
+   ===================================================================== */
+
+// Main listing index: org-scoped, newest first
+InspectionSubmissionSchema.index({ orgId: 1, createdAt: -1 });
+
+// Common list filters (still org-scoped newest-first)
+InspectionSubmissionSchema.index({ orgId: 1, isDeleted: 1, createdAt: -1 });
+
+InspectionSubmissionSchema.index({ orgId: 1, 'links.projectId': 1, createdAt: -1 });
+InspectionSubmissionSchema.index({ orgId: 1, 'links.taskId': 1, createdAt: -1 });
+InspectionSubmissionSchema.index({ orgId: 1, 'links.milestoneId': 1, createdAt: -1 });
+
+// Subject filtering
+InspectionSubmissionSchema.index({ orgId: 1, 'subjectAtRun.type': 1, createdAt: -1 });
+InspectionSubmissionSchema.index({ orgId: 1, 'subjectAtRun.type': 1, 'subjectAtRun.id': 1, createdAt: -1 });
+
+// Performance/KPI filtering
+InspectionSubmissionSchema.index({ orgId: 1, assessedUserId: 1, createdAt: -1 });
+
+// Optional: quick per-form lists
+InspectionSubmissionSchema.index({ orgId: 1, formId: 1, createdAt: -1 });
+
+/* =====================================================================
+   Existing indexes (kept, but tenant-aware ones above do the heavy lifting)
+   You can remove these later if you want to reduce index bloat.
+   ===================================================================== */
 InspectionSubmissionSchema.index({ formTitle: 1, createdAt: -1 });
 InspectionSubmissionSchema.index({ 'links.projectId': 1, createdAt: -1 });
 InspectionSubmissionSchema.index({ 'links.taskId': 1, createdAt: -1 });
@@ -226,7 +255,6 @@ InspectionSubmissionSchema.pre('validate', function (next) {
       if (typeof this.subjectAtRun.label !== 'string') this.subjectAtRun.label = '';
       // If performance, mirror to assessedUserId when possible
       if (this.subjectAtRun.type === 'performance' && !this.assessedUserId && this.subjectAtRun.id) {
-        // attempt cast to ObjectId; if invalid, it will be validated in route
         if (mongoose.Types.ObjectId.isValid(String(this.subjectAtRun.id))) {
           this.assessedUserId = new mongoose.Types.ObjectId(String(this.subjectAtRun.id));
         }
@@ -241,11 +269,14 @@ InspectionSubmissionSchema.pre('validate', function (next) {
     if (!this.runBy._id && this.runBy.userId) this.runBy._id = this.runBy.userId;
 
     // location sanity: coordinates must be [lng, lat] finite numbers or undefined
-    if (this.location && Array.isArray(this.location.coordinates)) {
-      const [lng, lat] = this.location.coordinates;
-      const ok = Number.isFinite(lng) && Number.isFinite(lat);
-      if (!ok) {
+    if (this.location) {
+      // If location exists but has no valid coordinates, drop it
+      if (!Array.isArray(this.location.coordinates) || this.location.coordinates.length !== 2) {
         this.location = undefined;
+      } else {
+        const [lng, lat] = this.location.coordinates;
+        const ok = Number.isFinite(lng) && Number.isFinite(lat);
+        if (!ok) this.location = undefined;
       }
     }
 
