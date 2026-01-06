@@ -202,6 +202,54 @@ async function serveVehicleTripFile(req, res, next) {
 app.get("/files/vehicle-trips/:filename", serveVehicleTripFile);
 app.get("/api/files/vehicle-trips/:filename", serveVehicleTripFile);
 
+/* -------------------- GridFS serving for Vault/Documents -------------------- */
+/**
+ * This is ONLY for documents once we store them in GridFS (ephemeral disk on Render).
+ * It serves URLs like: /files/documents/<fileId>
+ * Bucket must be: documents.files + documents.chunks
+ */
+
+function getDocumentsBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "documents" });
+}
+
+function toObjectIdOrNull(id) {
+  try {
+    return new mongoose.Types.ObjectId(String(id));
+  } catch {
+    return null;
+  }
+}
+
+async function serveDocumentFile(req, res, next) {
+  try {
+    const fileId = toObjectIdOrNull(req.params.fileId);
+    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
+
+    const bucket = getDocumentsBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
+    if (!files || files.length === 0) return res.status(404).json({ error: "File not found" });
+
+    const f = files[0];
+    if (f?.contentType) res.setHeader("Content-Type", f.contentType);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+    const stream = bucket.openDownloadStream(fileId);
+    stream.on("error", (err) => next(err));
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// IMPORTANT: mount BEFORE express.static("/files")
+app.get("/files/documents/:fileId", serveDocumentFile);
+app.get("/api/files/documents/:fileId", serveDocumentFile);
+
 /* ---------------------------- Static /files ---------------------------- */
 const uploadsRoot = path.join(__dirname, "uploads");
 [
