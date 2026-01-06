@@ -192,7 +192,12 @@ function aliasUrl(u) {
 const LS_FORMS = "mock:inspections:forms";
 const LS_SUBMS = "mock:inspections:subms";
 
-const isFormsPath = (p) => /\/(inspections\/forms|inspection-forms)(\/?|\/.+)$/i.test(p || "");
+const isFormsPath = (p) => {
+  const s = String(p || "");
+  // DO NOT mock the "run" endpoint — we want the real backend error
+  if (/\/inspections\/forms\/[^/]+\/run\/?$/i.test(s)) return false;
+  return /\/(inspections\/forms|inspection-forms)(\/?|\/.+)$/i.test(s);
+};
 const isSubsPath = (p) => /\/inspections\/submissions(\/?|\/.+)$/i.test(p || "");
 
 function lsLoad(key, fallback = []) {
@@ -395,7 +400,12 @@ async function inspectionsMockAdapter(config) {
 function shouldMockAfterError(respOrStatus, url) {
   const status = typeof respOrStatus === "number" ? respOrStatus : respOrStatus?.status;
   if (!(status === 404 || status === 500)) return false;
+
   const { path } = splitUrl(url || "", BASE);
+
+  // never mock /run — show the real server problem
+  if (/\/inspections\/forms\/[^/]+\/run\/?$/i.test(String(path || ""))) return false;
+
   return isFormsPath(path) || isSubsPath(path);
 }
 
