@@ -428,6 +428,22 @@ function resolveLocation(req) {
   return { location, locationMeta };
 }
 
+/**
+ * ✅ IMPORTANT FIX:
+ * Mongo 2dsphere indexes require GeoJSON Points to contain coordinates.
+ * If you ever save { type:'Point' } without coordinates, Mongo will throw.
+ *
+ * This converts our flat {lat,lng} into GeoJSON {type:'Point',coordinates:[lng,lat]}.
+ * Returns undefined when invalid/missing.
+ */
+function toGeoPoint(locationFlat) {
+  if (!locationFlat) return undefined;
+  const lat = Number(locationFlat.lat);
+  const lng = Number(locationFlat.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return { type: 'Point', coordinates: [lng, lat] };
+}
+
 async function validateAssessedUserForPerformance(req, subjectAtRun) {
   // Only required for performance
   if ((subjectAtRun?.type || 'none') !== 'performance') return { ok: true, assessedUserId: undefined, label: '' };
@@ -535,7 +551,8 @@ router.post('/forms/:id/run', async (req,res,next)=>{
     const scoringSummary = computeScoringSummary(form, normalizedItems);
 
     // Location (flat lat/lng + meta)
-    const { location, locationMeta } = resolveLocation(req);
+    const { location: locationFlat, locationMeta } = resolveLocation(req);
+    const locationGeo = toGeoPoint(locationFlat);
 
     const submission = new InspectionSubmission({
       formId: form._id,
@@ -553,10 +570,14 @@ router.post('/forms/:id/run', async (req,res,next)=>{
         ? { ...subjectAtRun, label: perf.label }
         : subjectAtRun,
       assessedUserId: subjectAtRun.type === 'performance' ? perf.assessedUserId : undefined,
-      location,
+
+      // ✅ Fix: store GeoJSON only when valid; prevents {type:'Point'} without coords
+      location: locationGeo,
       locationMeta,
-      // also mirror to locationAtRun for frontend convenience if schema allows
-      locationAtRun: location,
+
+      // Keep flat location for frontend convenience (if schema supports it)
+      locationAtRun: locationFlat,
+
       items: normalizedItems,
       overallResult: overall,
       scoringSummary,
@@ -569,11 +590,19 @@ router.post('/forms/:id/run', async (req,res,next)=>{
       },
     });
 
+    // Extra safety: if schema defaulted {type:'Point'} but no coordinates, remove it.
+    if (submission.location && submission.location.type === 'Point' && !Array.isArray(submission.location.coordinates)) {
+      submission.location = undefined;
+    }
+
     if(!ensureOrgOnDoc(InspectionSubmission, submission, req))
       return res.status(400).json({ error:'orgId is required on InspectionSubmission; missing/invalid in token' });
 
     await submission.save();
-    res.status(201).json(submission.toObject({ versionKey:false }));
+
+    const saved = submission.toObject({ versionKey:false });
+    // Normalize response so clients always get flat {lat,lng} if location exists
+    res.status(201).json(normalizeLocationOut(aliasManagerComments(saved)));
   }catch(err){ next(err); }
 });
 
