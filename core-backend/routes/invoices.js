@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth } = require('../middleware/auth');
 
 // Prefer already-compiled models to avoid OverwriteModelError
 const Invoice = mongoose.models.Invoice || require('../models/Invoice');
@@ -63,6 +63,38 @@ async function maybeUpsertVendor({ reqUser, name, email, phone, upsertFlag }) {
   if (v) return v._id;
   v = await Vendor.create({ name, email, phone, ...scope });
   return v._id;
+}
+
+/* --------------------------- role guarding --------------------------- */
+/**
+ * Invoice rule:
+ * - create/edit/upload: manager, admin, superadmin
+ * - delete: admin, superadmin (kept as-is)
+ *
+ * Supports:
+ * - req.user.role as string
+ * - req.user.roles as array
+ */
+function userHasAnyRole(user, allowed = []) {
+  const want = new Set((allowed || []).map(r => String(r).toLowerCase()));
+
+  const r1 = String(user?.role || '').toLowerCase();
+  if (r1 && want.has(r1)) return true;
+
+  const rs = Array.isArray(user?.roles) ? user.roles : [];
+  for (const r of rs) {
+    const rr = String(r || '').toLowerCase();
+    if (rr && want.has(rr)) return true;
+  }
+
+  return false;
+}
+
+function requireAnyRole(...allowed) {
+  return function (req, res, next) {
+    if (userHasAnyRole(req.user, allowed)) return next();
+    return res.status(403).json({ error: 'Forbidden' });
+  };
 }
 
 /* ----------------------------- file upload ---------------------------- */
@@ -150,7 +182,7 @@ router.get('/:id', requireAuth, async (req, res, next) => {
 router.post(
   '/',
   requireAuth,
-  requireRole('manager','admin','superadmin'),
+  requireAnyRole('manager', 'admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const scope = orgScope(req.user?.orgId);
@@ -198,7 +230,7 @@ router.post(
 router.put(
   '/:id',
   requireAuth,
-  requireRole('manager','admin','superadmin'),
+  requireAnyRole('manager', 'admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const scope = orgScope(req.user?.orgId);
@@ -251,7 +283,7 @@ router.put(
 router.delete(
   '/:id',
   requireAuth,
-  requireRole('admin','superadmin'),
+  requireAnyRole('admin', 'superadmin'),
   async (req, res, next) => {
     try {
       const r = await Invoice.findOneAndDelete({ _id: req.params.id, ...orgScope(req.user?.orgId) });
@@ -271,7 +303,7 @@ router.delete(
 router.post(
   '/:id/file',
   requireAuth,
-  requireRole('manager','admin','superadmin'),
+  requireAnyRole('manager', 'admin', 'superadmin'),
   upload.single('file'),
   async (req, res, next) => {
     try {
