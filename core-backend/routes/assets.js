@@ -60,7 +60,7 @@ function buildOrgMeta(req) {
 
 function fileUrlFromFileId(fileId) {
   // IMPORTANT: relative URL; works with either /assets or /api/assets mounts
-  return `/assets/files/${fileId}`;
+  return `/files/assets/${fileId}`;
 }
 
 /* ------------------------------ PUBLIC FILE SERVE ------------------------------ */

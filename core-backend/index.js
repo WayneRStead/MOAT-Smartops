@@ -254,6 +254,52 @@ app.get("/api/files/documents/:fileId", serveDocumentFile);
 app.get("/documents/files/:fileId", serveDocumentFile);
 app.get("/api/documents/files/:fileId", serveDocumentFile);
 
+/* -------------------- GridFS for asset attachments -------------------- */
+/**
+ * Streams from GridFS bucket: assets.files / assets.chunks
+ * Public route so <img src="/files/assets/:fileId"> works without Authorization header.
+ */
+function getAssetsBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "assets" });
+}
+
+function toObjectIdOrNull(id) {
+  try {
+    return new mongoose.Types.ObjectId(String(id));
+  } catch {
+    return null;
+  }
+}
+
+async function serveAssetFile(req, res, next) {
+  try {
+    const fileId = toObjectIdOrNull(req.params.fileId);
+    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
+
+    const bucket = getAssetsBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
+    if (!files || files.length === 0) return res.status(404).json({ error: "File not found" });
+
+    const f = files[0];
+    if (f?.contentType) res.setHeader("Content-Type", f.contentType);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+    const stream = bucket.openDownloadStream(fileId);
+    stream.on("error", (err) => next(err));
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// IMPORTANT: mount BEFORE express.static("/files")
+app.get("/files/assets/:fileId", serveAssetFile);
+app.get("/api/files/assets/:fileId", serveAssetFile);
+
 /* ---------------------------- Static /files ---------------------------- */
 const uploadsRoot = path.join(__dirname, "uploads");
 [
