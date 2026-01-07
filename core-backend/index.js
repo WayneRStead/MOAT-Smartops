@@ -140,6 +140,16 @@ app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
+/* ------------------------ Shared helpers (avoid duplicates) ------------------------ */
+function toObjectIdOrNull(id) {
+  try {
+    return new mongoose.Types.ObjectId(String(id));
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------------- Superadmin (optional) -------------------------- */
 // Superadmin cockpit (optional, global scope – no org activity touch here)
 if (superAdminRouter) {
   app.use("/admin/super", superAdminRouter);
@@ -208,19 +218,10 @@ app.get("/api/files/vehicle-trips/:filename", serveVehicleTripFile);
  * It serves URLs like: /files/documents/<fileId>
  * Bucket must be: documents.files + documents.chunks
  */
-
 function getDocumentsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
   return new GridFSBucket(db, { bucketName: "documents" });
-}
-
-function toObjectIdOrNull(id) {
-  try {
-    return new mongoose.Types.ObjectId(String(id));
-  } catch {
-    return null;
-  }
 }
 
 async function serveDocumentFile(req, res, next) {
@@ -265,14 +266,6 @@ function getAssetsBucket() {
   return new GridFSBucket(db, { bucketName: "assets" });
 }
 
-function toObjectIdOrNull(id) {
-  try {
-    return new mongoose.Types.ObjectId(String(id));
-  } catch {
-    return null;
-  }
-}
-
 async function serveAssetFile(req, res, next) {
   try {
     const fileId = toObjectIdOrNull(req.params.fileId);
@@ -300,6 +293,60 @@ async function serveAssetFile(req, res, next) {
 app.get("/files/assets/:fileId", serveAssetFile);
 app.get("/api/files/assets/:fileId", serveAssetFile);
 
+/* -------------------- GridFS for invoice files (NEW) -------------------- */
+/**
+ * Streams from GridFS bucket: invoices.files / invoices.chunks
+ * Frontend expects URLs like:
+ *   /files/invoices/<orgId>/<filename>
+ *
+ * We verify org by GridFS metadata.orgId that was set at upload time.
+ */
+function getInvoicesBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "invoices" });
+}
+
+async function serveInvoiceFile(req, res, next) {
+  try {
+    const org = String(req.params.org || "");
+    const filename = String(req.params.filename || "");
+    if (!org || !filename) return res.status(400).json({ error: "Missing org or filename" });
+
+    // 1) Legacy disk (if any old files exist)
+    const diskPath = path.join(__dirname, "uploads", "invoices", org, filename);
+    if (fs.existsSync(diskPath)) {
+      return res.sendFile(diskPath);
+    }
+
+    // 2) GridFS
+    const bucket = getInvoicesBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const files = await bucket
+      .find({ filename, "metadata.orgId": org })
+      .sort({ uploadDate: -1 })
+      .limit(1)
+      .toArray();
+
+    const f = files?.[0];
+    if (!f?._id) return res.status(404).json({ error: "File not found" });
+
+    if (f?.contentType) res.setHeader("Content-Type", f.contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day; adjust if you want longer
+
+    const stream = bucket.openDownloadStream(f._id);
+    stream.on("error", (err) => next(err));
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// IMPORTANT: mount BEFORE express.static("/files")
+app.get("/files/invoices/:org/:filename", serveInvoiceFile);
+app.get("/api/files/invoices/:org/:filename", serveInvoiceFile);
+
 /* ---------------------------- Static /files ---------------------------- */
 const uploadsRoot = path.join(__dirname, "uploads");
 [
@@ -315,6 +362,8 @@ const uploadsRoot = path.join(__dirname, "uploads");
   "coverage",
   "coverage/tasks",
   "vehicle-trips",
+  // (optional legacy folder for invoices if you still want it to exist)
+  "invoices",
 ].forEach((sub) => {
   try {
     fs.mkdirSync(path.join(uploadsRoot, sub), { recursive: true });
@@ -636,24 +685,8 @@ if (vehiclesRouter) {
   );
 }
 if (logbookRouter) {
-  app.use(
-    "/",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    logbookRouter
-  );
-  app.use(
-    "/api",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    logbookRouter
-  );
+  app.use("/", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
+  app.use("/api", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
 }
 if (vendorsRouter) {
   app.use("/vendors", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, vendorsRouter);

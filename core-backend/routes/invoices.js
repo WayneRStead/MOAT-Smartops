@@ -2,8 +2,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const path = require("path");
-const fs = require("fs");
 const multer = require("multer");
+const { Readable } = require("stream");
 const { requireAuth, resolveOrgContext, requireOrg } = require("../middleware/auth");
 
 // Prefer already-compiled models to avoid OverwriteModelError
@@ -30,16 +30,13 @@ function getOrgFromReq(req) {
 }
 
 // Since Invoice.orgId is Mixed, query should match either string or ObjectId forms.
-// This prevents “disappearing” due to type mismatches.
 function orgScopeFromReq(req) {
   const src = getOrgFromReq(req);
   if (!src) return {};
   const s = String(src);
 
   const clauses = [];
-  if (mongoose.Types.ObjectId.isValid(s)) {
-    clauses.push({ orgId: new mongoose.Types.ObjectId(s) });
-  }
+  if (mongoose.Types.ObjectId.isValid(s)) clauses.push({ orgId: new mongoose.Types.ObjectId(s) });
   clauses.push({ orgId: s });
 
   return clauses.length === 1 ? clauses[0] : { $or: clauses };
@@ -69,7 +66,6 @@ function addDays(dateLike, days) {
 }
 
 function normalizeDueAt(body) {
-  // Prefer explicit dueAt; otherwise compute from submittedAt/issuedAt + termsDays/terms/netDays
   const dueExplicit = body.dueAt ? new Date(body.dueAt) : null;
   if (dueExplicit && !isNaN(+dueExplicit)) return dueExplicit;
 
@@ -86,10 +82,9 @@ function computeStatusLikeFrontend({ paidAt, dueAt }) {
 }
 
 // upsert vendor by name if requested and model exists
-async function maybeUpsertVendor({ reqUser, req, name, email, phone, upsertFlag }) {
+async function maybeUpsertVendor({ req, name, email, phone, upsertFlag }) {
   if (!Vendor || !upsertFlag || !name) return null;
 
-  // vendor should be org-scoped the same way invoices are
   const scope = orgScopeFromReq(req);
   let v = await Vendor.findOne({ name, ...scope }).lean();
   if (v) return v._id;
@@ -98,7 +93,6 @@ async function maybeUpsertVendor({ reqUser, req, name, email, phone, upsertFlag 
     name,
     email,
     phone,
-    // store orgId if Vendor schema supports it; harmless otherwise (strict will drop)
     ...(function () {
       const src = getOrgFromReq(req);
       if (!src) return {};
@@ -111,19 +105,8 @@ async function maybeUpsertVendor({ reqUser, req, name, email, phone, upsertFlag 
 }
 
 /* --------------------------- role guarding --------------------------- */
-/**
- * Invoice rule:
- * - create/edit/upload: manager, admin, superadmin
- * - delete: admin, superadmin (soft delete)
- * - hard delete: admin, superadmin (only if already deleted)
- *
- * Supports:
- * - req.user.role as string
- * - req.user.roles as array
- */
 function userHasAnyRole(user, allowed = []) {
   const want = new Set((allowed || []).map((r) => String(r).toLowerCase()));
-
   const r1 = String(user?.role || "").toLowerCase();
   if (r1 && want.has(r1)) return true;
 
@@ -142,48 +125,44 @@ function requireAnyRole(...allowed) {
   };
 }
 
+/* ----------------------------- GridFS ----------------------------- */
+function getInvoicesBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) throw new Error("MongoDB not connected yet");
+  return new mongoose.mongo.GridFSBucket(db, { bucketName: "invoices" });
+}
+
+function sanitizeBaseName(original = "upload") {
+  const ext = path.extname(original || "").toLowerCase();
+  const base = path
+    .basename(original || "upload", ext)
+    .replace(/[^\w.\-]+/g, "_")
+    .slice(0, 120);
+  return { base: base || "upload", ext };
+}
+
+function makeStoredFilename(invoiceId, originalName) {
+  const { base, ext } = sanitizeBaseName(originalName);
+  const ts = Date.now();
+  return `${invoiceId}-${ts}-${base}${ext}`;
+}
+
 /* ----------------------------- file upload ---------------------------- */
-// Multer storage with per-org subfolder and deterministic filename
-const storage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const org = safeOrgIdForFolder(req);
-    const dir = path.join(__dirname, "..", "uploads", "invoices", org);
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const id = req.params.id || "unknown";
-    const ts = Date.now();
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const base = path
-      .basename(file.originalname || "upload", ext)
-      .replace(/[^\w.\-]+/g, "_");
-    cb(null, `${id}-${ts}-${base}${ext}`);
+// Multer MEMORY storage (because we stream into GridFS)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024, // 25MB (adjust if needed)
   },
 });
-const upload = multer({ storage });
 
 /* -------------------------------- LIST ------------------------------- */
-/**
- * GET /invoices
- * Query:
- *   - q: text search (number, vendorName, notes)
- *   - status: submitted|outstanding|paid|void
- *   - from, to: date range (issuedAt/submittedAt/createdAt)
- *   - limit: default 200 (max 1000)
- *   - includeDeleted=1 to include soft-deleted invoices
- */
 router.get("/", async (req, res, next) => {
   try {
     const { q, status, from, to, limit } = req.query;
-
     const includeDeleted = String(req.query.includeDeleted || "") === "1";
 
     const filter = { ...orgScopeFromReq(req) };
-
-    // Soft delete filter (works even if field absent in schema; if schema later adds it, this will work)
     if (!includeDeleted) filter.deleted = { $ne: true };
 
     if (status) filter.status = status;
@@ -197,7 +176,11 @@ router.get("/", async (req, res, next) => {
     if (from) range.$gte = new Date(from);
     if (to) range.$lte = new Date(to);
     if (Object.keys(range).length) {
-      filter.$or = (filter.$or || []).concat([{ submittedAt: range }, { issuedAt: range }, { createdAt: range }]);
+      filter.$or = (filter.$or || []).concat([
+        { submittedAt: range },
+        { issuedAt: range },
+        { createdAt: range },
+      ]);
     }
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 1000);
@@ -217,7 +200,6 @@ router.get("/", async (req, res, next) => {
 router.get("/:id", async (req, res, next) => {
   try {
     const includeDeleted = String(req.query.includeDeleted || "") === "1";
-
     const filter = { _id: req.params.id, ...orgScopeFromReq(req) };
     if (!includeDeleted) filter.deleted = { $ne: true };
 
@@ -237,7 +219,6 @@ router.post("/", requireAnyRole("manager", "admin", "superadmin"), async (req, r
     let vendorId = req.body.vendorId || null;
     if (!vendorId && (req.body.vendorName || req.body.vendor)) {
       vendorId = await maybeUpsertVendor({
-        reqUser: req.user,
         req,
         name: req.body.vendorName || req.body.vendor,
         email: req.body.vendorEmail,
@@ -251,12 +232,9 @@ router.post("/", requireAnyRole("manager", "admin", "superadmin"), async (req, r
 
     const docData = {
       ...req.body,
-
-      // Prevent a client from trying to inject deleted/orgId
       deleted: false,
       deletedAt: null,
       deletedBy: null,
-
       vendorId: vendorId || req.body.vendorId || null,
       vendorName: req.body.vendorName || req.body.vendor || null,
       dueAt,
@@ -267,7 +245,6 @@ router.post("/", requireAnyRole("manager", "admin", "superadmin"), async (req, r
     // Force orgId from request context (header), not from req.body
     setOrgOnCreate(docData, req);
 
-    // normalize numerics (safe even if schema ignores some fields)
     ["amount", "subtotal", "tax", "total", "termsDays", "terms", "netDays"].forEach((k) => {
       if (docData[k] != null) docData[k] = Number(docData[k]);
     });
@@ -286,20 +263,16 @@ router.put("/:id", requireAnyRole("manager", "admin", "superadmin"), async (req,
 
     const set = { ...req.body };
 
-    // ✅ CRITICAL: never allow orgId mutation via update payload
     delete set.orgId;
     delete set.org;
     delete set.orgObjectId;
 
-    // never let client “delete by update”
     delete set.deleted;
     delete set.deletedAt;
     delete set.deletedBy;
 
-    // optionally upsert vendor
     if (!set.vendorId && (set.vendorName || set.vendor)) {
       const vid = await maybeUpsertVendor({
-        reqUser: req.user,
         req,
         name: set.vendorName || set.vendor,
         email: set.vendorEmail,
@@ -309,19 +282,15 @@ router.put("/:id", requireAnyRole("manager", "admin", "superadmin"), async (req,
       if (vid) set.vendorId = vid;
     }
 
-    // recompute dueAt if inputs provided
     const maybeDue = normalizeDueAt(set);
     if (maybeDue) set.dueAt = maybeDue;
 
-    // standardize paidAt/paymentDate
     if (set.paymentDate && !set.paidAt) set.paidAt = set.paymentDate;
 
-    // status (only recompute if not explicitly supplied)
     if (set.status == null) {
       set.status = computeStatusLikeFrontend({ paidAt: set.paidAt, dueAt: set.dueAt });
     }
 
-    // numerics
     ["amount", "subtotal", "tax", "total", "termsDays", "terms", "netDays"].forEach((k) => {
       if (set[k] != null) set[k] = Number(set[k]);
     });
@@ -340,15 +309,6 @@ router.put("/:id", requireAnyRole("manager", "admin", "superadmin"), async (req,
 });
 
 /* ------------------------------- DELETE ------------------------------ */
-/**
- * Soft delete by default:
- * - If invoice is not deleted: mark deleted=true
- * - If invoice is already deleted: hard delete (and remove file if present)
- *
- * This matches your UI:
- * - showDeleted toggle expects soft deleted items exist
- * - hard delete button can call the same endpoint again
- */
 router.delete("/:id", requireAnyRole("admin", "superadmin"), async (req, res, next) => {
   try {
     const scope = { _id: req.params.id, ...orgScopeFromReq(req) };
@@ -356,17 +316,20 @@ router.delete("/:id", requireAnyRole("admin", "superadmin"), async (req, res, ne
     const existing = await Invoice.findOne(scope);
     if (!existing) return res.status(404).json({ error: "Not found" });
 
-    // If already soft-deleted -> hard delete
+    // If already soft-deleted -> hard delete (and delete GridFS file if present)
     if (existing.deleted === true) {
-      // attempt to remove file on disk if it exists and lives under uploads/invoices/<org>/
+      // delete gridfs file if we know it
       try {
-        const fileUrl = existing.fileUrl || "";
-        const m = String(fileUrl).match(/\/files\/invoices\/([^/]+)\/([^/]+)$/i);
-        if (m) {
-          const orgFolder = m[1];
-          const filename = m[2];
-          const p = path.join(__dirname, "..", "uploads", "invoices", orgFolder, filename);
-          try { fs.unlinkSync(p); } catch {}
+        const bucket = getInvoicesBucket();
+        const fid = existing.fileId || existing.fileGridFsId; // allow either name
+        if (fid && mongoose.Types.ObjectId.isValid(String(fid))) {
+          await bucket.delete(new mongoose.Types.ObjectId(String(fid)));
+        } else if (existing.fileName) {
+          // fallback: delete latest by filename+org metadata (best effort)
+          const org = safeOrgIdForFolder(req);
+          const cursor = bucket.find({ filename: existing._gridfsFilename || undefined, "metadata.orgId": org }).sort({ uploadDate: -1 }).limit(1);
+          const files = await cursor.toArray();
+          if (files[0]?._id) await bucket.delete(files[0]._id);
         }
       } catch {}
 
@@ -390,7 +353,7 @@ router.delete("/:id", requireAnyRole("admin", "superadmin"), async (req, res, ne
 /**
  * POST /invoices/:id/file
  * form-data: file=<binary>
- * Stores under /uploads/invoices/<orgId>/...
+ * Stores in GridFS bucket "invoices"
  * Returns { ok, url, filename, invoice }
  */
 router.post(
@@ -401,15 +364,57 @@ router.post(
     try {
       if (!req.file) return res.status(400).json({ error: "No file" });
 
+      // confirm invoice exists and is in org + not deleted
+      const inv = await Invoice.findOne({
+        _id: req.params.id,
+        ...orgScopeFromReq(req),
+        deleted: { $ne: true },
+      });
+      if (!inv) return res.status(404).json({ error: "Not found" });
+
       const org = safeOrgIdForFolder(req);
-      const filename = req.file.filename;
-      const publicUrl = `/files/invoices/${org}/${filename}`;
+      const bucket = getInvoicesBucket();
+
+      // If invoice already has a fileId, delete old GridFS file (prevents bloat)
+      try {
+        const oldId = inv.fileId || inv.fileGridFsId;
+        if (oldId && mongoose.Types.ObjectId.isValid(String(oldId))) {
+          await bucket.delete(new mongoose.Types.ObjectId(String(oldId)));
+        }
+      } catch {}
+
+      const storedFilename = makeStoredFilename(req.params.id, req.file.originalname);
+      const publicUrl = `/files/invoices/${org}/${storedFilename}`;
+
+      const metadata = {
+        orgId: org,
+        invoiceId: String(req.params.id),
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+      };
+
+      const uploadStream = bucket.openUploadStream(storedFilename, {
+        contentType: req.file.mimetype,
+        metadata,
+      });
+
+      // Stream buffer into GridFS
+      await new Promise((resolve, reject) => {
+        Readable.from(req.file.buffer)
+          .pipe(uploadStream)
+          .on("error", reject)
+          .on("finish", resolve);
+      });
+
+      const fileId = uploadStream.id;
 
       const set = {
         fileUrl: publicUrl,
-        fileName: req.file.originalname || filename,
+        fileName: req.file.originalname || storedFilename,
         fileSize: req.file.size,
         fileType: req.file.mimetype,
+        fileId: fileId,              // <- recommend adding to Invoice schema
+        _gridfsFilename: storedFilename, // internal convenience; optional
         updatedBy: req.user?.sub || req.user?._id || req.user?.email || null,
       };
 
@@ -421,11 +426,53 @@ router.post(
 
       if (!doc) return res.status(404).json({ error: "Not found" });
 
-      res.json({ ok: true, url: publicUrl, filename, invoice: doc });
+      res.json({ ok: true, url: publicUrl, filename: storedFilename, fileId: String(fileId), invoice: doc });
     } catch (e) {
       next(e);
     }
   }
 );
+
+/* ---------------------------- FILE SERVE ---------------------------- */
+/**
+ * GET /invoices/files/invoices/:org/:filename
+ *
+ * NOTE: This route exists ONLY to keep the backend self-contained if you mount it that way.
+ * If your server already has a global /files router, move this handler there instead.
+ *
+ * Recommended mounting:
+ *   app.get("/files/invoices/:org/:filename", ...)
+ *
+ * If you can't change index.js quickly, you can temporarily mount:
+ *   app.use("/invoices", invoicesRouter)
+ * and let frontend use /invoices/files/invoices/... (but your UI currently uses /files/...).
+ */
+router.get("/__gridfs__/invoices/:org/:filename", async (req, res, next) => {
+  try {
+    const org = String(req.params.org || "");
+    const filename = String(req.params.filename || "");
+
+    if (!org || !filename) return res.status(400).send("Bad request");
+
+    const bucket = getInvoicesBucket();
+
+    // Find the file by filename + org metadata
+    const files = await bucket
+      .find({ filename, "metadata.orgId": org })
+      .sort({ uploadDate: -1 })
+      .limit(1)
+      .toArray();
+
+    const f = files[0];
+    if (!f?._id) return res.sendStatus(404);
+
+    res.set("Cache-Control", "public, max-age=3600"); // adjust
+    if (f.contentType) res.set("Content-Type", f.contentType);
+
+    bucket.openDownloadStream(f._id).on("error", () => res.sendStatus(404)).pipe(res);
+  } catch (e) {
+    next(e);
+  }
+});
 
 module.exports = router;
