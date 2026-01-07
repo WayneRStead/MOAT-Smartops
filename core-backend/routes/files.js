@@ -20,17 +20,24 @@ router.get("/tasks/:fileId", async (req, res) => {
     const _id = new mongoose.Types.ObjectId(String(fileId));
     const bucket = getBucket();
 
-    // Find file metadata first (optional but useful for headers)
+    // Find file metadata first (useful for headers)
     const files = await bucket.find({ _id }).limit(1).toArray();
     if (!files.length) return res.status(404).json({ error: "file not found" });
 
     const file = files[0];
 
-    // Content type / filename headers
+    // Headers (must be set BEFORE streaming)
+    const ct = String(file.contentType || "application/octet-stream").toLowerCase();
     res.setHeader("Content-Type", file.contentType || "application/octet-stream");
 
-    // inline is good for images (shows in browser), attachment triggers download
-    // keep inline so photos display in UI
+    // Cache: images can be cached for 1 day; non-images shorter by default
+    if (ct.startsWith("image/")) {
+      res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day
+    } else {
+      res.setHeader("Cache-Control", "public, max-age=3600"); // 1 hour
+    }
+
+    // Inline so images display in UI
     const safeName = String(file.filename || "file").replace(/["\r\n]/g, "");
     res.setHeader("Content-Disposition", `inline; filename="${safeName}"`);
 
