@@ -54,7 +54,11 @@ function safeParseJwt(t) {
 
 function readToken() {
   try {
-    return localStorage.getItem("token") || sessionStorage.getItem("token") || "";
+    return (
+      localStorage.getItem("token") ||
+      sessionStorage.getItem("token") ||
+      ""
+    );
   } catch {
     return "";
   }
@@ -65,10 +69,54 @@ function normRole(r) {
   return String(r).trim().toLowerCase().replace(/\s+/g, "-");
 }
 
+/** Resolve backend origin for images/files (Vercel frontend needs absolute backend URL for /files/*). */
+function backendOrigin() {
+  try {
+    const b = (import.meta?.env?.VITE_API_BASE || "").trim();
+    if (b) return b.replace(/\/$/, "");
+  } catch {}
+  try {
+    const w = typeof window !== "undefined" ? window : {};
+    if (w.__API_BASE__) return String(w.__API_BASE__).replace(/\/$/, "");
+  } catch {}
+  return "";
+}
+
+/** Convert relative file path to absolute backend URL, add optional cache-bust */
+function toBackendUrl(url, bust) {
+  if (!url) return "";
+  const u = String(url).trim();
+  if (!u) return "";
+
+  // absolute already
+  if (/^https?:\/\//i.test(u)) {
+    return bust ? appendBust(u, bust) : u;
+  }
+
+  const base = backendOrigin();
+  // relative path
+  if (u.startsWith("/")) {
+    const out = base ? `${base}${u}` : u;
+    return bust ? appendBust(out, bust) : out;
+  }
+
+  // legacy relative like "org/xyz.png" -> "/files/<...>"
+  const out = base ? `${base}/files/${u}` : `/files/${u}`;
+  return bust ? appendBust(out, bust) : out;
+}
+
+function appendBust(u, bust) {
+  const v = String(bust || "").trim();
+  if (!v) return u;
+  return u.includes("?") ? `${u}&v=${encodeURIComponent(v)}` : `${u}?v=${encodeURIComponent(v)}`;
+}
+
 export default function Navbar() {
   const { org } = useTheme();
   const [token, setToken] = useState(() => readToken());
-  const [open, setOpen] = useState(() => (localStorage.getItem("sidebar-open") ?? "1") === "1");
+  const [open, setOpen] = useState(
+    () => (localStorage.getItem("sidebar-open") ?? "1") === "1"
+  );
   const [meGlobalRole, setMeGlobalRole] = useState(null);
   const [meIsGlobalSuper, setMeIsGlobalSuper] = useState(false);
 
@@ -126,7 +174,10 @@ export default function Navbar() {
 
   // Fallback to token in case api/me hasn't run yet (or old env)
   const tokenGlobalRole = normRole(payload?.globalRole);
-  const isGlobalSuper = meIsGlobalSuper || tokenGlobalRole === "superadmin" || payload?.isGlobalSuperadmin === true;
+  const isGlobalSuper =
+    meIsGlobalSuper ||
+    tokenGlobalRole === "superadmin" ||
+    payload?.isGlobalSuperadmin === true;
 
   // Legible active state
   const item = ({ isActive }) => ({
@@ -162,20 +213,6 @@ export default function Navbar() {
     setToken(null);
     navigate("/login");
   }
-
-  // ✅ Logo resolver that supports new stable URL + legacy values
-  const resolveLogo = (u) => {
-    const s = String(u || "").trim();
-    if (!s) return "";
-    if (s.startsWith("http://") || s.startsWith("https://")) return s;
-    if (s.startsWith("/")) return s;
-
-    // tolerate common legacy shapes
-    if (s.startsWith("files/")) return `/${s}`;
-    if (s.startsWith("uploads/")) return `/${s}`;
-    if (s.startsWith("org/")) return `/files/${s}`; // -> /files/org/...
-    return `/files/${s}`;
-  };
 
   const enabled = useMemo(() => {
     if (Array.isArray(org?.modules)) return new Set(org.modules);
@@ -216,6 +253,12 @@ export default function Navbar() {
       {children}
     </span>
   );
+
+  // ✅ IMPORTANT: force logo to backend origin + cache-bust on org updatedAt
+  const orgLogoSrc = useMemo(() => {
+    const bust = org?.updatedAt || org?.logoUpdatedAt || ""; // use what exists
+    return org?.logoUrl ? toBackendUrl(org.logoUrl, bust) : "";
+  }, [org?.logoUrl, org?.updatedAt, org?.logoUpdatedAt]);
 
   return (
     <aside
@@ -453,7 +496,9 @@ export default function Navbar() {
               borderRadius: 8,
               fontWeight: 700,
               userSelect: "none",
-              background: isAdminActive ? "rgba(255,255,255,0.08)" : "transparent",
+              background: isAdminActive
+                ? "rgba(255,255,255,0.08)"
+                : "transparent",
               display: "flex",
               alignItems: "center",
               gap: 12,
@@ -549,7 +594,7 @@ export default function Navbar() {
 
       {/* FOOTER: auth + ORG LOGO */}
       <div style={{ marginTop: "auto", padding: 12, display: "grid", gap: 10 }}>
-        {org?.logoUrl && (
+        {orgLogoSrc && (
           <div
             title="Organization"
             style={{
@@ -564,7 +609,7 @@ export default function Navbar() {
             }}
           >
             <img
-              src={resolveLogo(org.logoUrl)}
+              src={orgLogoSrc}
               alt="Organization logo"
               style={{
                 maxWidth: "100%",

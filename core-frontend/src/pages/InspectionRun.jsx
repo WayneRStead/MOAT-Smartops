@@ -27,16 +27,31 @@ function maxUserRank(u) {
   return Math.max(...all.map((r) => ROLE_RANK[r] ?? 0));
 }
 
-// ✅ tolerate legacy logo values + new stable /files/org/:org/logo
-function resolveLogoUrl(u) {
-  const s = String(u || "").trim();
-  if (!s) return "";
-  if (s.startsWith("http://") || s.startsWith("https://")) return s;
-  if (s.startsWith("/")) return s;
-  if (s.startsWith("files/")) return `/${s}`;
-  if (s.startsWith("uploads/")) return `/${s}`;
-  if (s.startsWith("org/")) return `/files/${s}`;
-  return `/files/${s}`;
+/** backend origin for image/file urls */
+function backendOrigin() {
+  try {
+    const b = (import.meta?.env?.VITE_API_BASE || "").trim();
+    if (b) return b.replace(/\/$/, "");
+  } catch {}
+  return "";
+}
+function appendBust(u, bust) {
+  const v = String(bust || "").trim();
+  if (!v) return u;
+  return u.includes("?") ? `${u}&v=${encodeURIComponent(v)}` : `${u}?v=${encodeURIComponent(v)}`;
+}
+function toBackendUrl(url, bust) {
+  if (!url) return "";
+  const u = String(url).trim();
+  if (!u) return "";
+  if (/^https?:\/\//i.test(u)) return bust ? appendBust(u, bust) : u;
+  const base = backendOrigin();
+  if (u.startsWith("/")) {
+    const out = base ? `${base}${u}` : u;
+    return bust ? appendBust(out, bust) : out;
+  }
+  const out = base ? `${base}/files/${u}` : `/files/${u}`;
+  return bust ? appendBust(out, bust) : out;
 }
 
 export default function InspectionRun() {
@@ -156,13 +171,11 @@ export default function InspectionRun() {
       }
     })();
 
-    // ✅ org branding: prefer canonical /org endpoint first
-    (async () => {
-      const { name, logo } = await resolveOrgBranding();
+    // org branding, best-effort
+    resolveOrgBranding().then(({ name, logo, bust }) => {
       if (name) setOrgName(name);
-      const fixed = resolveLogoUrl(logo);
-      if (fixed) setOrgLogoUrl(fixed);
-    })();
+      if (logo) setOrgLogoUrl(toBackendUrl(logo, bust || Date.now()));
+    });
 
     // kick off initial geolocation capture
     captureGeo(setGeo, setGeoErr);
@@ -176,9 +189,7 @@ export default function InspectionRun() {
       try {
         const { data } = await api.get("/projects", { params: { limit: 500 } });
         setProjects(Array.isArray(data) ? data : []);
-      } catch {
-        setProjects([]);
-      }
+      } catch { setProjects([]); }
     })();
   }, [form]);
 
@@ -187,11 +198,7 @@ export default function InspectionRun() {
   const [milestones, setMilestones] = useState([]);
 
   useEffect(() => {
-    if (!links.projectId) {
-      setTasks([]);
-      setMilestones([]);
-      return;
-    }
+    if (!links.projectId) { setTasks([]); setMilestones([]); return; }
     (async () => {
       try {
         const { data } = await api.get("/tasks", { params: { projectId: links.projectId, limit: 1000 } });
@@ -200,46 +207,32 @@ export default function InspectionRun() {
         try {
           const { data } = await api.get(`/projects/${links.projectId}/tasks`);
           setTasks(Array.isArray(data) ? data : []);
-        } catch {
-          setTasks([]);
-        }
+        } catch { setTasks([]); }
       }
     })();
   }, [links.projectId]);
 
   useEffect(() => {
-    if (!links.taskId) {
-      setMilestones([]);
-      return;
-    }
+    if (!links.taskId) { setMilestones([]); return; }
     (async () => {
       try {
         const { data } = await api.get(`/tasks/${links.taskId}/milestones`);
         setMilestones(Array.isArray(data) ? data : []);
-      } catch {
-        setMilestones([]);
-      }
+      } catch { setMilestones([]); }
     })();
   }, [links.taskId]);
 
   // ------- subject options (vehicle/asset/performance) filtered by current links/scope -------
   useEffect(() => {
     const st = subjectType;
-    if (!form || st === "none") {
-      setSubjectOptions([]);
-      return;
-    }
+    if (!form || st === "none") { setSubjectOptions([]); return; }
 
-    const activeLinks =
-      form?.scope?.type === "scoped"
-        ? { projectId: form.scope.projectId, taskId: form.scope.taskId, milestoneId: form.scope.milestoneId }
-        : links;
+    const activeLinks = form?.scope?.type === "scoped"
+      ? { projectId: form.scope.projectId, taskId: form.scope.taskId, milestoneId: form.scope.milestoneId }
+      : links;
 
     // do not load options if locked
-    if (subjectLocked.id) {
-      setSubjectOptions([]);
-      return;
-    }
+    if (subjectLocked.id) { setSubjectOptions([]); return; }
 
     (async () => {
       const opts = await loadSubjectOptions(st, activeLinks);
@@ -249,44 +242,42 @@ export default function InspectionRun() {
   }, [form, subjectType, subjectLocked.id, links.projectId, links.taskId, links.milestoneId]);
 
   // ---------- helpers ----------
-  const setRow = (i, patch) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const setRow = (i, patch) => setRows(prev => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const chooseResult = (i, result) => setRow(i, { result });
 
   const anyFail = useMemo(() => rows.some((r) => r.result === "fail"), [rows]);
 
-  function labelOf(x) {
-    return x?.name || x?.title || x?.label || x?.reg || x?.code || "";
-  }
-  function niceCase(s) {
-    const t = String(s || "").toLowerCase();
+  function labelOf(x){ return x?.name || x?.title || x?.label || x?.reg || x?.code || ""; }
+  function niceCase(s){
+    const t = String(s||"").toLowerCase();
     if (t === "signoff") return "Sign-off";
     if (t === "standard") return "Standard";
-    return t.replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+    return t.replace(/[-_]/g, " ").replace(/\b\w/g, m => m.toUpperCase());
   }
   // Human-readable scoring rule
-  function ruleLabel(sc) {
-    const mode = String(sc?.mode || "any-fail");
-    if (mode === "percent") {
+  function ruleLabel(sc){
+    const mode = String(sc?.mode || 'any-fail');
+    if (mode === 'percent'){
       const pct = Math.max(0, Math.min(100, parseInt(sc?.minPassPercent ?? 100, 10)));
       return `≥ ${pct}% Pass (critical fail auto-fail)`;
     }
-    if (mode === "tolerance") {
+    if (mode === 'tolerance'){
       const n = Math.max(0, parseInt(sc?.maxNonCriticalFails ?? 0, 10));
-      const plural = n === 1 ? "" : "s";
+      const plural = n === 1 ? '' : 's';
       return `Up to ${n} non-critical FAIL${plural} allowed (critical auto-fail)`;
     }
-    return "Any FAIL ⇒ overall FAIL (critical auto-fail)";
+    return 'Any FAIL ⇒ overall FAIL (critical auto-fail)';
   }
 
   // Metrics + Achieved label (percent + tolerance context)
   const metrics = useMemo(() => {
-    const applicable = rows.filter((r) => {
-      const v = (r.result || "").toLowerCase();
-      return v !== "na" && v !== "";
+    const applicable = rows.filter(r => {
+      const v = (r.result || '').toLowerCase();
+      return v !== 'na' && v !== "" ;
     });
     const totalApplicable = applicable.length;
-    const passCount = applicable.filter((r) => r.result === "pass").length;
-    const nonCriticalFailCount = applicable.filter((r) => r.result === "fail" && !r.criticalOnFail).length;
+    const passCount = applicable.filter(r => r.result === 'pass').length;
+    const nonCriticalFailCount = applicable.filter(r => r.result === 'fail' && !r.criticalOnFail).length;
     const percent = totalApplicable ? (passCount / totalApplicable) * 100 : 100;
     return { totalApplicable, passCount, nonCriticalFailCount, percent };
   }, [rows]);
@@ -294,41 +285,42 @@ export default function InspectionRun() {
   const achievedLabel = useMemo(() => {
     const sc = form?.scoring || {};
     const pct = (Math.round(metrics.percent * 10) / 10).toFixed(1);
-    if (String(sc.mode || "any-fail") === "tolerance") {
+    if (String(sc.mode || 'any-fail') === 'tolerance') {
       const max = Number.isFinite(+sc.maxNonCriticalFails) ? +sc.maxNonCriticalFails : 0;
       return `${pct}% • Non-critical fails ${metrics.nonCriticalFailCount}/${max}`;
     }
     return `${pct}%`;
   }, [form?.scoring, metrics.percent, metrics.nonCriticalFailCount]);
 
-  async function backfillNames({ projectId, taskId, milestoneId }) {
+  async function backfillNames({ projectId, taskId, milestoneId }){
     try {
       if (projectId && !names.project) {
         const { data } = await api.get(`/projects/${projectId}`);
-        setNames((n) => ({ ...n, project: labelOf(data) || String(projectId) }));
+        setNames((n)=>({ ...n, project: labelOf(data) || String(projectId) }));
       }
     } catch {}
     try {
       if (taskId && !names.task) {
         const { data } = await api.get(`/tasks/${taskId}`);
-        setNames((n) => ({ ...n, task: labelOf(data) || String(taskId) }));
+        setNames((n)=>({ ...n, task: labelOf(data) || String(taskId) }));
       }
     } catch {}
     try {
       if (taskId && milestoneId && !names.milestone) {
         const { data } = await api.get(`/tasks/${taskId}/milestones`);
-        const m = (Array.isArray(data) ? data : []).find((x) => String(x._id || x.id) === String(milestoneId));
-        setNames((n) => ({ ...n, milestone: labelOf(m) || String(milestoneId) }));
+        const m = (Array.isArray(data)?data:[]).find(x => String(x._id||x.id) === String(milestoneId));
+        setNames((n)=>({ ...n, milestone: labelOf(m) || String(milestoneId) }));
       }
     } catch {}
   }
 
   // Per-item requirement issues (for inline warnings + global banner)
   const issues = useMemo(() => {
-    return rows.map((r) => {
+    return rows.map(r => {
       const msgs = [];
       if (r.result === "fail") {
-        const hasAny = !!(r.evidence?.photoUrl || r.evidence?.scanRef || (r.evidence?.note && r.evidence.note.trim()));
+        const hasAny =
+          !!(r.evidence?.photoUrl || r.evidence?.scanRef || (r.evidence?.note && r.evidence.note.trim()));
         if (r.requireEvidenceOnFail && !hasAny) msgs.push("Evidence required");
         if (r.requireCorrectiveOnFail && !String(r.correctiveAction || "").trim()) msgs.push("Corrective action required");
       }
@@ -336,28 +328,30 @@ export default function InspectionRun() {
     });
   }, [rows]);
 
-  const hasIssues = useMemo(() => issues.some((arr) => arr.length > 0), [issues]);
+  const hasIssues = useMemo(() => issues.some(arr => arr.length > 0), [issues]);
   const issueCount = useMemo(() => issues.reduce((n, arr) => n + (arr.length ? 1 : 0), 0), [issues]);
 
-  const needsSubject = subjectType !== "none" && !subjectLocked.id && !String(subjectId || "").trim();
+  const needsSubject =
+    subjectType !== "none" &&
+    !subjectLocked.id &&
+    !String(subjectId || "").trim();
 
-  function canSubmit() {
-    if (!form) return false;
-    if (!confirmed) return false;
-    if (!String(signName || "").trim()) return false;
-    if (hasIssues) return false;
-    if (needsSubject) return false;
+  function canSubmit(){
+    if(!form) return false;
+    if(!confirmed) return false;
+    if(!String(signName||"").trim()) return false;
+    if(hasIssues) return false;
+    if(needsSubject) return false;
     return true;
   }
 
-  async function onSubmit() {
-    if (!canSubmit()) return;
-    setSaving(true);
-    setErr("");
-    try {
+  async function onSubmit(){
+    if(!canSubmit()) return;
+    setSaving(true); setErr("");
+    try{
       // Build a location object once and spread to multiple fields for compatibility
       const loc =
-        geo.lat != null && geo.lng != null
+        (geo.lat != null && geo.lng != null)
           ? { lat: geo.lat, lng: geo.lng, accuracy: geo.accuracy ?? null, at: geo.at || new Date().toISOString() }
           : undefined;
 
@@ -367,22 +361,21 @@ export default function InspectionRun() {
         subjectAtRun: {
           type: subjectType,
           id: subjectLocked.id ?? (subjectId || undefined),
-          label: subjectLocked.id
-            ? subjectLocked.label || ""
-            : subjectLabel || findLabelById(subjectOptions, subjectId) || "",
-          ...(loc ? { location: loc } : {}), // copy coords onto subject
+          label: subjectLocked.id ? (subjectLocked.label || "") :
+                 (subjectLabel || findLabelById(subjectOptions, subjectId) || ""),
+          ...(loc ? { location: loc } : {}),          // copy coords onto subject
         },
         // Geo capture (put into multiple commonly-used fields)
-        ...(loc ? { location: loc } : {}), // existing/primary
-        ...(loc ? { locationAtRun: loc } : {}), // legacy/alt field
-        items: rows.map((r) => ({
+        ...(loc ? { location: loc } : {}),            // existing/primary
+        ...(loc ? { locationAtRun: loc } : {}),       // legacy/alt field
+        items: rows.map(r => ({
           itemId: r.itemId,
           result: r.result || "na",
           evidence: r.evidence,
-          correctiveAction: r.result === "fail" ? r.correctiveAction || "" : "",
-          criticalTriggered: r.result === "fail" && !!r.criticalOnFail,
+          correctiveAction: r.result === "fail" ? (r.correctiveAction || "") : "",
+          criticalTriggered: r.result === "fail" && !!r.criticalOnFail
         })),
-        followUpDate: anyFail ? (followUpDate ? new Date(followUpDate).toISOString() : null) : null,
+        followUpDate: (anyFail ? (followUpDate ? new Date(followUpDate).toISOString() : null) : null),
         signoff: {
           confirmed: true,
           name: signName,
@@ -393,30 +386,34 @@ export default function InspectionRun() {
 
       const sub = await runForm(realId, payload);
       nav(`/inspections/${sub._id}`);
-    } catch (e) {
+    }catch(e){
       setErr(e?.response?.data?.error || e?.message || "Submit failed");
-    } finally {
+    }finally{
       setSaving(false);
     }
   }
 
-  if (err)
-    return (
-      <div className="mx-auto max-w-[1200px] w-full px-3 sm:px-4 lg:px-6 py-4">
-        <div className="p-4 text-red-600">{err}</div>
-      </div>
-    );
-  if (!form)
-    return (
-      <div className="mx-auto max-w-[1200px] w-full px-3 sm:px-4 lg:px-6 py-4">
-        <div className="p-4">Loading…</div>
-      </div>
-    );
+  if (err) return (
+    <div className="mx-auto max-w-[1200px] w-full px-3 sm:px-4 lg:px-6 py-4">
+      <div className="p-4 text-red-600">{err}</div>
+    </div>
+  );
+  if (!form) return (
+    <div className="mx-auto max-w-[1200px] w-full px-3 sm:px-4 lg:px-6 py-4">
+      <div className="p-4">Loading…</div>
+    </div>
+  );
 
   const isScoped = form?.scope?.type === "scoped";
   const TITLE = "Inspection Submission";
   const subjectNice =
-    subjectType === "none" ? "General" : subjectType === "vehicle" ? "Vehicle" : subjectType === "asset" ? "Asset" : "Performance (User)";
+    subjectType === "none"
+      ? "General"
+      : subjectType === "vehicle"
+      ? "Vehicle"
+      : subjectType === "asset"
+      ? "Asset"
+      : "Performance (User)";
 
   return (
     <div className="w-full">
@@ -454,22 +451,16 @@ export default function InspectionRun() {
             <h1 className="text-xl font-semibold">{TITLE}</h1>
           </div>
           <div className="flex items-center gap-2">
-            <button className="btn no-print" onClick={() => window.print()}>
-              Print / Export PDF
-            </button>
+            <button className="btn no-print" onClick={()=>window.print()}>Print / Export PDF</button>
           </div>
         </div>
 
         {/* Meta card */}
         <div className="card">
           <div className="row">
-            <div>
-              <b>Form</b>: {form.title || "Form"}
-            </div>
+            <div><b>Form</b>: {form.title || "Form"}</div>
             <div className="right">
-              <small>
-                <b>Form Type:</b> {niceCase(form.formType || "standard")}
-              </small>
+              <small><b>Form Type:</b> {niceCase(form.formType || "standard")}</small>
             </div>
           </div>
 
@@ -482,24 +473,17 @@ export default function InspectionRun() {
                   {geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}
                   {geo.accuracy != null ? ` • ±${Math.round(geo.accuracy)}m` : ""}
                 </span>
-                <button className="btn btn-ghost btn-xs" onClick={() => captureGeo(setGeo, setGeoErr)}>
-                  Re-capture
-                </button>
+                <button className="btn btn-ghost btn-xs" onClick={() => captureGeo(setGeo, setGeoErr)}>Re-capture</button>
                 <a
                   className="text-sm underline"
                   href={`https://www.google.com/maps?q=${geo.lat},${geo.lng}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open in Maps
-                </a>
+                  target="_blank" rel="noreferrer"
+                >Open in Maps</a>
               </>
             ) : (
               <>
                 <span className="text-sm text-gray-500">not captured</span>
-                <button className="btn btn-ghost btn-xs" onClick={() => captureGeo(setGeo, setGeoErr)}>
-                  Capture
-                </button>
+                <button className="btn btn-ghost btn-xs" onClick={() => captureGeo(setGeo, setGeoErr)}>Capture</button>
               </>
             )}
             {geoErr && <span className="text-xs text-red-600">({geoErr})</span>}
@@ -508,15 +492,9 @@ export default function InspectionRun() {
           <div className="grid-3 mt-2">
             {isScoped ? (
               <>
-                <div>
-                  <b>Project</b>: {names.project || form.scope?.projectName || String(links.projectId || "—")}
-                </div>
-                <div>
-                  <b>Task</b>: {names.task || form.scope?.taskName || String(links.taskId || "—")}
-                </div>
-                <div>
-                  <b>Milestone</b>: {names.milestone || form.scope?.milestoneName || String(links.milestoneId || "—")}
-                </div>
+                <div><b>Project</b>: {names.project || form.scope?.projectName || String(links.projectId || "—")}</div>
+                <div><b>Task</b>: {names.task || form.scope?.taskName || String(links.taskId || "—")}</div>
+                <div><b>Milestone</b>: {names.milestone || form.scope?.milestoneName || String(links.milestoneId || "—")}</div>
               </>
             ) : (
               <>
@@ -525,13 +503,11 @@ export default function InspectionRun() {
                   <select
                     className="select select-bordered w-full mt-1"
                     value={links.projectId}
-                    onChange={(e) => setLinks({ projectId: e.target.value, taskId: "", milestoneId: "" })}
+                    onChange={(e)=> setLinks({ projectId: e.target.value, taskId:"", milestoneId:"" })}
                   >
                     <option value="">— select project (optional) —</option>
-                    {projects.map((p) => (
-                      <option key={p._id || p.id} value={p._id || p.id}>
-                        {labelOf(p)}
-                      </option>
+                    {projects.map(p=>(
+                      <option key={p._id||p.id} value={p._id||p.id}>{labelOf(p)}</option>
                     ))}
                   </select>
                 </label>
@@ -540,14 +516,12 @@ export default function InspectionRun() {
                   <select
                     className="select select-bordered w-full mt-1"
                     value={links.taskId}
-                    onChange={(e) => setLinks({ ...links, taskId: e.target.value, milestoneId: "" })}
+                    onChange={(e)=> setLinks({ ...links, taskId:e.target.value, milestoneId:"" })}
                     disabled={!links.projectId}
                   >
                     <option value="">— any task —</option>
-                    {tasks.map((t) => (
-                      <option key={t._id || t.id} value={t._id || t.id}>
-                        {labelOf(t)}
-                      </option>
+                    {tasks.map(t=>(
+                      <option key={t._id||t.id} value={t._id||t.id}>{labelOf(t)}</option>
                     ))}
                   </select>
                 </label>
@@ -556,14 +530,12 @@ export default function InspectionRun() {
                   <select
                     className="select select-bordered w-full mt-1"
                     value={links.milestoneId}
-                    onChange={(e) => setLinks({ ...links, milestoneId: e.target.value })}
+                    onChange={(e)=> setLinks({ ...links, milestoneId:e.target.value })}
                     disabled={!links.taskId}
                   >
                     <option value="">— any milestone —</option>
-                    {milestones.map((m) => (
-                      <option key={m._id || m.id} value={m._id || m.id}>
-                        {labelOf(m)}
-                      </option>
+                    {milestones.map(m=>(
+                      <option key={m._id||m.id} value={m._id||m.id}>{labelOf(m)}</option>
                     ))}
                   </select>
                 </label>
