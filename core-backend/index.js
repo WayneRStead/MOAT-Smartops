@@ -77,6 +77,11 @@ const { computeAccessibleUserIds } =
 
 const app = express();
 
+// ✅ Files (GridFS streaming routes)
+const filesRoutes = require("./routes/files");
+app.use("/files", filesRoutes);
+app.use("/api/files", filesRoutes);
+
 /* ---------------------------- App Middleware --------------------------- */
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
