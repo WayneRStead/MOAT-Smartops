@@ -227,15 +227,43 @@ function normalizeTask(t) {
 function normMilestone(ms) {
   const id = String(ms._id || ms.id || "");
   const title = ms.title || ms.name || "";
+
   const startAt =
     ms.startPlanned || ms.startAt || ms.startDate || ms.scheduledAt || ms.beginAt || ms.start || null;
+
   const dueAt =
     ms.endPlanned || ms.dueAt || ms.endAt || ms.endDate || ms.targetAt || ms.targetDate || ms.date || null;
+
   const status = canonStatus(ms.status || (ms.completed ? "finished" : "pending"));
   const isRoadblock = !!(ms.isRoadblock ?? ms.roadblock ?? ms.is_blocker ?? false);
-  const dependsOn = ms.dependsOn || ms.roadblockDependency || null;
+
+  // Normalize dependency into a SINGLE ID string
+  const rawDep = ms.dependsOn ?? ms.roadblockDependency ?? ms.requires ?? ms.dependencies ?? null;
+
+  let dependsOnId = "";
+  if (Array.isArray(rawDep)) {
+    const first = rawDep[0];
+    dependsOnId = first ? String(first._id || first.id || first) : "";
+  } else if (rawDep && typeof rawDep === "object") {
+    dependsOnId = String(rawDep._id || rawDep.id || "");
+  } else if (rawDep) {
+    dependsOnId = String(rawDep);
+  }
+
   const actualEndAt = ms.endActual ?? ms.actualEndAt ?? ms.completedAt ?? null;
-  return { ...ms, _id: id, id, title, startAt, dueAt, status, isRoadblock, dependsOn, actualEndAt };
+
+  return {
+    ...ms,
+    _id: id,
+    id,
+    title,
+    startAt,
+    dueAt,
+    status,
+    isRoadblock,
+    dependsOnId,     // <-- use THIS in the UI
+    actualEndAt,
+  };
 }
 
 /* -------------- API helpers --------------- */
@@ -632,8 +660,16 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  const getAssigneeIdFromTask = (t) =>
-    t?.assignee ?? (Array.isArray(t?.assignedTo) && t.assignedTo[0]) ?? (Array.isArray(t?.assignedUserIds) && t.assignedUserIds[0]) ?? null;
+    const getAssigneeIdFromTask = (t) => {
+    const a =
+      t?.assignee ??
+      (Array.isArray(t?.assignedTo) && t.assignedTo[0]) ??
+      (Array.isArray(t?.assignedUserIds) && t.assignedUserIds[0]) ??
+      null;
+
+    // always return an ID string (not an object)
+    return a ? String(a._id || a.id || a) : "";
+  };
 
   async function saveAssigneeOnce(nextAssigneeIdRaw) {
     const nextAssigneeId = String(nextAssigneeIdRaw || "");
@@ -647,11 +683,15 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       await optimisticSave(
         {
+          // cover multiple backend shapes
           assignee: nextAssigneeId || null,
           assigneeId: nextAssigneeId || null,
           assignedUserIds: nextAssigneeId ? [nextAssigneeId] : [],
           assignedTo: nextAssigneeId ? [nextAssigneeId] : [],
+          assignedToId: nextAssigneeId || null,
+          userId: nextAssigneeId || null,
         },
+
         () =>
           setTask((t) => ({
             ...(t || {}),
@@ -1320,14 +1360,28 @@ if (navigator.geolocation) {
                 <GroupSelect
                   value={groupId || null}
                   onChange={(gid) => {
-                    const gidStr = gid ? String(gid) : "";
-                    setGroupId(gidStr);
-                    const patch = { groupId: gid || null, assignedGroupIds: gid ? [gid] : [] };
+                    const gidId = gid ? String(gid._id || gid.id || gid) : "";
+                    setGroupId(gidId);
+
+                    const patch = {
+                      groupId: gidId || null,
+                      assignedGroupIds: gidId ? [gidId] : [],
+                      // extra compatibility fields (harmless if backend ignores)
+                      group: gidId || null,
+                      groupIds: gidId ? [gidId] : [],
+                    };
+
                     optimisticSave(
                       patch,
-                      () => setTask((t) => ({ ...(t || {}), groupId: gid || null, assignedGroupIds: gid ? [gid] : [] }))
+                      () =>
+                        setTask((t) => ({
+                          ...(t || {}),
+                          groupId: gidId || null,
+                          assignedGroupIds: gidId ? [gidId] : [],
+                        }))
                     );
                   }}
+
                   placeholder="(optional) assign a group"
                 />
               </div>
@@ -1707,10 +1761,23 @@ if (navigator.geolocation) {
                         </label>
                       </td>
                       <td className="border-t p-2" style={{minWidth:240}}>
-                        <select className="border p-2 rounded w-full" defaultValue={ms.dependsOn ? String(ms.dependsOn) : ""} onChange={(e)=>{ const v=e.target.value||""; const next=v? v : null; const prev = ms.dependsOn ? String(ms.dependsOn) : ""; if (String(next||"")!==prev) saveWrap({ dependsOn: next }); }}>
-                          <option value="">— none —</option>
-                          {rbOptions.map(opt => <option key={opt._id || opt.id} value={opt._id || opt.id}>{opt.title || "Untitled"} (roadblock)</option>)}
-                        </select>
+<select
+  className="border p-2 rounded w-full"
+  value={ms.dependsOnId || ""}
+  onChange={(e) => {
+    const v = e.target.value || "";
+    const next = v ? v : null;
+    const prev = ms.dependsOnId ? String(ms.dependsOnId) : "";
+    if (String(next || "") !== prev) saveWrap({ dependsOn: next });
+  }}
+>
+  <option value="">— none —</option>
+  {rbOptions.map((opt) => (
+    <option key={opt._id || opt.id} value={opt._id || opt.id}>
+      {opt.title || "Untitled"} (roadblock)
+    </option>
+  ))}
+</select>
                       </td>
                       <td className="border-t p-2 text-right whitespace-nowrap" style={{minWidth:120}}>
                         <button className="px-2 py-1 border rounded" onClick={async ()=>{
