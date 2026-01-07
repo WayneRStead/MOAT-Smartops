@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../ThemeContext";
 import { ALL_WIDGETS, normalizeWidgets } from "../widgets/registry";
-import { api } from "../lib/api";
+import { api, fileUrl } from "../lib/api";
 
 /* ---------------- Single source of truth for known modules ---------------- */
 const ALL_MODULES = [
@@ -191,15 +191,7 @@ export default function AdminOrg() {
   const [modules, setModules] = useState(initialModulesFrom(org?.modules));
 
   // canonical widget ids
-  const defaultWidgets = [
-    "health.master",
-    "roles",
-    "namesList",
-    "clockings.today",
-    "projects.all",
-    "tasks.all",
-    "groups",
-  ];
+  const defaultWidgets = ["health.master", "roles", "namesList", "clockings.today", "projects.all", "tasks.all", "groups"];
   const initialWidgets = (() => {
     const serverRaw = Array.isArray(org?.dashboardWidgets) ? org.dashboardWidgets : [];
     const fromServer = normalizeWidgets(serverRaw.map(toCanon));
@@ -213,6 +205,8 @@ export default function AdminOrg() {
   const [presets, setPresets] = useState(Array.isArray(org?.taskPresets) ? org.taskPresets : []);
   const [logoFile, setLogoFile] = useState(null);
   const [logoPreview, setLogoPreview] = useState("");
+  const [logoBroken, setLogoBroken] = useState(false);
+
   const savingRef = useRef(false);
   const { announce, node: liveRegion } = useLiveAnnouncer();
 
@@ -331,14 +325,7 @@ export default function AdminOrg() {
   function addPreset() {
     setPresets((prev) => [
       ...prev,
-      {
-        label: "New",
-        title: "New task",
-        tags: [],
-        priority: "medium",
-        defaultStatus: "todo",
-        estimatedMins: 0,
-      },
+      { label: "New", title: "New task", tags: [], priority: "medium", defaultStatus: "todo", estimatedMins: 0 },
     ]);
   }
   function updatePreset(i, patch) {
@@ -363,7 +350,6 @@ export default function AdminOrg() {
       const widgetsToSave = widgets.map((id) => CANON_TO_SERVER[id] || id);
 
       const payload = {
-        // only send name if non-empty; otherwise omit to avoid erasing
         ...(name && name.trim() ? { name: name.trim() } : {}),
         themeMode,
         accentColor,
@@ -372,10 +358,8 @@ export default function AdminOrg() {
         taskPresets: presets,
       };
 
-      // IMPORTANT: use the helper we defined above
       const updated = await apiUpdateOrg(payload);
 
-      // Keep UI consistent with server echo
       setOrg(updated);
       setModules(normalizeModules(updated?.modules));
 
@@ -418,6 +402,7 @@ export default function AdminOrg() {
       setOrg(updated);
       setLogoFile(null);
       setLogoPreview("");
+      setLogoBroken(false);
       setInfo("Logo uploaded.");
       setTimeout(() => setInfo(""), 1200);
     } catch (e) {
@@ -429,13 +414,11 @@ export default function AdminOrg() {
     }
   }
 
-  // Resolve logo URL
+  // ✅ Resolve logo URL via backend origin (Render), not relative to Vercel
   const currentLogo = useMemo(() => {
     const u = org?.logoUrl;
     if (!u) return "";
-    if (u.startsWith("http")) return u;
-    if (u.startsWith("/")) return u;
-    return `/files/${u}`;
+    return fileUrl(u); // handles absolute + /files/... paths consistently
   }, [org?.logoUrl]);
 
   if (loading) return <div className="p-4">Loading…</div>;
@@ -527,17 +510,18 @@ export default function AdminOrg() {
                     alt="Preview"
                     style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
                   />
-                ) : currentLogo ? (
+                ) : currentLogo && !logoBroken ? (
                   <img
                     src={currentLogo}
                     alt="Current logo"
                     style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
-                    onError={(e) => (e.currentTarget.style.display = "none")}
+                    onError={() => setLogoBroken(true)}
                   />
                 ) : (
                   <span className="text-xs subtle">No logo</span>
                 )}
               </div>
+
               <input
                 type="file"
                 accept="image/*"
@@ -545,9 +529,11 @@ export default function AdminOrg() {
                   const f = e.target.files?.[0] || null;
                   setLogoFile(f);
                   setLogoPreview(f ? URL.createObjectURL(f) : "");
+                  setLogoBroken(false);
                 }}
                 title="Choose logo file"
               />
+
               <button
                 className="btn btn-sm"
                 onClick={uploadLogo}
@@ -558,6 +544,7 @@ export default function AdminOrg() {
                 Upload
               </button>
             </div>
+
             <div className="text-xs subtle mt-2">Tip: Transparent PNG works well for light/dark themes.</div>
           </div>
 
