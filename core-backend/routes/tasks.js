@@ -1,4 +1,6 @@
 // core-backend/routes/tasks.js — visibility-enabled (org-scoped & backward-compatible)
+// ✅ DROP-IN replacement: switches task attachments from disk -> Mongo GridFS (keeps all other behavior)
+
 const express = require("express");
 const mongoose = require("mongoose");
 const path = require("path");
@@ -8,7 +10,10 @@ const AdmZip = require("adm-zip");
 const { requireAuth } = require("../middleware/auth");
 const Task = require("../models/Task");
 const Project = require("../models/Project"); // inherit project fences
-const TaskMilestone = require("../models/TaskMilestone"); // <-- validate milestoneId on logs
+const TaskMilestone = require("../models/TaskMilestone"); // validate milestoneId on logs
+
+// ✅ GridFS helper (you created core-backend/lib/gridfs.js)
+const { getBucket } = require("../lib/gridfs");
 
 const router = express.Router();
 
@@ -302,8 +307,8 @@ function extractKMLFromKMZ(buffer) {
   try {
     const zip = new AdmZip(buffer);
     const entries = zip.getEntries();
-    const thePreferred = entries.find(e => /(^|\/)doc\.kml$/i.test(e.entryName));
-    const kmlEntry = thePreferred || entries.find(e => /\.kml$/i.test(e.entryName));
+    const thePreferred = entries.find((e) => /(^|\/)doc\.kml$/i.test(e.entryName));
+    const kmlEntry = thePreferred || entries.find((e) => /\.kml$/i.test(e.entryName));
     if (!kmlEntry) return null;
     return kmlEntry.getData().toString("utf8");
   } catch {
@@ -316,6 +321,7 @@ const memUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 12 * 1024 * 1024 },
 });
+
 function parseGeoJSONToFences(buf, defaultRadius = 50) {
   const fences = [];
   let gj;
@@ -341,7 +347,7 @@ function parseGeoJSONToFences(buf, defaultRadius = 50) {
     }
   }
   if (gj.type === "FeatureCollection" && Array.isArray(gj.features)) {
-    gj.features.forEach(f => addGeom(f?.geometry));
+    gj.features.forEach((f) => addGeom(f?.geometry));
   } else if (gj.type === "Feature") {
     addGeom(gj.geometry);
   } else {
@@ -349,6 +355,7 @@ function parseGeoJSONToFences(buf, defaultRadius = 50) {
   }
   return fences;
 }
+
 function parseKMLToFences(text, defaultRadius = 50) {
   const fences = [];
   const lower = text.toLowerCase();
@@ -799,7 +806,7 @@ router.post("/:id/action", requireAuth, async (req, res) => {
 });
 
 /* ---------------------- MANUAL LOG CRUD ---------------------- */
-const ALLOWED_LOG_ACTIONS = new Set(["start","pause","resume","complete","photo","fence"]);
+const ALLOWED_LOG_ACTIONS = new Set(["start", "pause", "resume", "complete", "photo", "fence"]);
 
 router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   try {
@@ -870,7 +877,7 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
 
     ensureLogIds(t);
 
-    const row = (t.actualDurationLog || []).find(e => String(e._id) === String(logId));
+    const row = (t.actualDurationLog || []).find((e) => String(e._id) === String(logId));
     if (!row) return res.status(404).json({ error: "log row not found" });
 
     if (action != null) {
@@ -933,7 +940,7 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
     ensureLogIds(t);
 
     const before = t.actualDurationLog.length;
-    t.actualDurationLog = (t.actualDurationLog || []).filter(e => String(e._id) !== String(logId));
+    t.actualDurationLog = (t.actualDurationLog || []).filter((e) => String(e._id) !== String(logId));
 
     if (t.actualDurationLog.length === before) {
       return res.status(404).json({ error: "log row not found" });
@@ -954,21 +961,64 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
 });
 
 /* ---------------------- ATTACHMENTS ---------------------- */
-// Ensure uploads dir exists: core-backend/uploads/tasks
+/**
+ * IMPORTANT:
+ * We keep cleanFilename and the uploads folder setup (for backward-compat with existing URL serving),
+ * but NEW uploads go to Mongo GridFS (NOT disk) so they persist on Render.
+ */
+
+// (legacy) Ensure uploads dir exists: core-backend/uploads/tasks
 const uploadsRoot = path.join(__dirname, "..", "uploads");
 const taskDir = path.join(uploadsRoot, "tasks");
-fs.mkdirSync(taskDir, { recursive: true });
+try { fs.mkdirSync(taskDir, { recursive: true }); } catch {}
 
 function cleanFilename(name) {
   return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
 }
-const disk = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, taskDir),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}_${cleanFilename(file.originalname)}`),
-});
-const uploadDisk = multer({ storage: disk, limits: { fileSize: 20 * 1024 * 1024 } });
 
-router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (req, res) => {
+// ✅ NEW: memory upload for attachments (store bytes in GridFS)
+const uploadMem = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
+function isSupportedAttachment(file) {
+  const mime = (file?.mimetype || "").toLowerCase();
+  const ext = ((file?.originalname || "").split(".").pop() || "").toLowerCase();
+
+  const isImage = mime.startsWith("image/");
+  const isKMZ = ext === "kmz" || mime.includes("kmz") || mime === "application/zip";
+  const isKML =
+    ext === "kml" ||
+    mime.includes("kml") ||
+    mime === "application/xml" ||
+    mime === "text/xml" ||
+    mime === "application/vnd.google-earth.kml+xml";
+  const isGJ = ext === "geojson" || mime.includes("geo+json") || mime === "application/json";
+
+  return { ok: !!(isImage || isKMZ || isKML || isGJ), isImage, isFence: !!(isKMZ || isKML || isGJ) };
+}
+
+async function putToGridFS({ buffer, filename, mimetype, metadata }) {
+  const bucket = getBucket();
+  const safeName = `${Date.now()}_${cleanFilename(filename)}`;
+
+  const up = bucket.openUploadStream(safeName, {
+    contentType: mimetype || "application/octet-stream",
+    metadata: metadata || {},
+  });
+
+  up.end(buffer);
+
+  const fileId = await new Promise((resolve, reject) => {
+    up.on("finish", () => resolve(up.id));
+    up.on("error", reject);
+  });
+
+  return fileId; // ObjectId
+}
+
+router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (req, res) => {
   try {
     const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
@@ -979,25 +1029,35 @@ router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (r
     const file = req.file;
     if (!file) return res.status(400).json({ error: "file required" });
 
-    const mime = (file.mimetype || "").toLowerCase();
-    const ext = (file.originalname.split(".").pop() || "").toLowerCase();
-
-    // Accept images and geospatial files (KMZ/KML/GeoJSON)
-    const isImage = mime.startsWith("image/");
-    const isKMZ = ext === "kmz" || mime.includes("kmz") || mime === "application/zip";
-    const isKML = ext === "kml" || mime.includes("kml") || mime === "application/xml" || mime === "text/xml" || mime === "application/vnd.google-earth.kml+xml";
-    const isGJ  = ext === "geojson" || mime.includes("geo+json") || mime === "application/json";
-
-    if (!(isImage || isKMZ || isKML || isGJ)) {
+    const { ok, isImage } = isSupportedAttachment(file);
+    if (!ok) {
       return res.status(400).json({ error: "unsupported file type (images, .kmz, .kml, .geojson)" });
     }
 
-    const relUrl = `/files/tasks/${path.basename(file.path)}`;
     const note = String(req.body?.note || "");
     const lat = req.body?.lat, lng = req.body?.lng;
     const nLat = Number(lat), nLng = Number(lng);
 
-    const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    const userId =
+      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+
+    // ✅ Write file bytes to Mongo GridFS
+    const fileId = await putToGridFS({
+      buffer: file.buffer,
+      filename: file.originalname,
+      mimetype: file.mimetype,
+      metadata: {
+        kind: "task-attachment",
+        taskId: String(t._id),
+        orgId: req.user?.orgId ? String(req.user.orgId) : "",
+        uploadedBy: req.user?.name || req.user?.email || "",
+        note,
+      },
+    });
+
+    // ✅ URL now points to Mongo-backed file serving route:
+    // You MUST have a route that serves GET /files/tasks/:fileId (GridFS download).
+    const relUrl = `/files/tasks/${fileId}`;
 
     t.attachments = t.attachments || [];
     t.attachments.push({
@@ -1008,6 +1068,10 @@ router.post("/:id/attachments", requireAuth, uploadDisk.single("file"), async (r
       uploadedBy: req.user?.name || req.user?.email || String(req.user?._id || ""),
       uploadedAt: new Date(),
       note,
+
+      // helpful for cleanup + debugging
+      storage: "gridfs",
+      fileId,
     });
 
     // Log: "photo" for images, "fence" for geospatial files
@@ -1044,12 +1108,24 @@ router.delete("/:id/attachments/:attId", requireAuth, allowRoles("manager", "adm
     const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
+    // find removed before filtering (so we can delete GridFS bytes)
+    const removed = (t.attachments || []).find((a) => String(a._id) === String(req.params.attId));
+
     const before = (t.attachments || []).length;
     t.attachments = (t.attachments || []).filter((a) => String(a._id) !== String(req.params.attId));
     if (t.attachments.length === before) {
       return res.status(404).json({ error: "attachment not found" });
     }
+
     await t.save();
+
+    // ✅ best-effort delete from GridFS if this attachment was stored there
+    try {
+      const fid = removed?.fileId;
+      if (fid && mongoose.Types.ObjectId.isValid(String(fid))) {
+        getBucket().delete(new mongoose.Types.ObjectId(String(fid)), () => {});
+      }
+    } catch {}
 
     const fresh = await Task.findById(t._id).lean();
     res.json(normalizeOut(fresh));
@@ -1122,7 +1198,7 @@ router.put("/:id/geofences", requireAuth, allowRoles("manager", "admin", "supera
     await t.save();
     res.json(normalizeOut(await Task.findById(t._id).lean()));
   } catch (e) {
-       console.error("PUT /tasks/:id/geofences error:", e);
+    console.error("PUT /tasks/:id/geofences error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -1195,7 +1271,7 @@ router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
       }
     }
 
-    const out = fences.map(f => (f.type === "polygon" && f.ring)
+    const out = fences.map((f) => (f.type === "polygon" && f.ring)
       ? { type: "polygon", polygon: f.ring }
       : f);
 
