@@ -1,7 +1,6 @@
 // src/ThemeContext.jsx
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-// ⚠️ Make sure this path matches your project structure:
-import { getOrg } from "./lib/api"; // was "./api" in your paste
+import { getOrg } from "./lib/api";
 
 const ThemeCtx = createContext({ org: null, setOrg: () => {} });
 
@@ -31,6 +30,49 @@ function getOrgIdFromStorage() {
   }
 }
 
+/** Normalize org payload so UI can always read `org.logoUrl`, `org.modules`, etc. */
+function normalizeOrgPayload(data) {
+  // Common API shapes:
+  // 1) { org: {...} }
+  // 2) { organization: {...} }
+  // 3) { data: { org: {...} } } (rare)
+  // 4) { ...orgFields }
+  const root = data && typeof data === "object" ? data : {};
+  const candidate =
+    (root.org && typeof root.org === "object" ? root.org : null) ||
+    (root.organization && typeof root.organization === "object" ? root.organization : null) ||
+    root;
+
+  const org = candidate && typeof candidate === "object" ? { ...candidate } : {};
+
+  // Ensure we expose a consistent `logoUrl` for Navbar/Footer usage
+  if (!org.logoUrl) {
+    org.logoUrl =
+      org.logo ||
+      org.branding?.logoUrl ||
+      org.branding?.logo ||
+      org.assets?.logo ||
+      org.images?.logo ||
+      org.settings?.logoUrl ||
+      root.logoUrl ||
+      "";
+  }
+
+  // Ensure we expose a consistent `name`
+  if (!org.name) {
+    org.name =
+      org.orgName ||
+      org.company ||
+      org.displayName ||
+      org.profile?.name ||
+      org.settings?.name ||
+      root.name ||
+      "";
+  }
+
+  return org;
+}
+
 export function ThemeProvider({ children }) {
   const [org, setOrg] = useState(null);
 
@@ -40,7 +82,7 @@ export function ThemeProvider({ children }) {
 
     async function load() {
       const token = getToken();
-      const orgId = getOrgIdFromStorage();
+      const _orgId = getOrgIdFromStorage(); // keep read for future logic / interceptors
 
       // If not signed in, set empty org to keep UI alive
       if (!token) {
@@ -53,10 +95,10 @@ export function ThemeProvider({ children }) {
          * We try to fetch the org even if orgId is missing, because:
          * - Your axios interceptor can derive orgId from token payload
          * - Or the server may default to the user's primary org
-         * This avoids the "defaults" screen after a fresh login.
          */
         const data = await getOrg();
-        if (alive) setOrg(data || {});
+        const normalized = normalizeOrgPayload(data);
+        if (alive) setOrg(normalized || {});
       } catch (_e) {
         // If it failed and there was no orgId, keep the UI alive with {}
         if (alive) setOrg({});
@@ -68,7 +110,6 @@ export function ThemeProvider({ children }) {
     // Re-evaluate when any of these change (e.g., login, org switch)
     const onStorage = (ev) => {
       if (!ev || !ev.key) return;
-      // ✅ Listen for currentOrgId too
       if (["token", "currentOrgId", "orgId", "tenantId"].includes(ev.key)) {
         load();
       }
@@ -83,7 +124,7 @@ export function ThemeProvider({ children }) {
 
   // Derive theme & accent with legacy fallbacks
   const themeMode = useMemo(() => {
-    if (org?.themeMode) return org.themeMode;   // "light" | "dark" | "system"
+    if (org?.themeMode) return org.themeMode; // "light" | "dark" | "system"
     if (org?.theme?.mode) return org.theme.mode;
     return "system";
   }, [org]);
@@ -96,7 +137,9 @@ export function ThemeProvider({ children }) {
   const mqlRef = useRef(null);
   useEffect(() => {
     const root = document.documentElement;
-    try { root.style.setProperty("--accent", accent); } catch {}
+    try {
+      root.style.setProperty("--accent", accent);
+    } catch {}
 
     // clean previous listener
     try {
@@ -113,7 +156,9 @@ export function ThemeProvider({ children }) {
 
     // "system"
     const mql = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-    const apply = () => { root.dataset.theme = mql && mql.matches ? "dark" : "light"; };
+    const apply = () => {
+      root.dataset.theme = mql && mql.matches ? "dark" : "light";
+    };
     apply();
 
     if (mql?.addEventListener) {
@@ -132,11 +177,7 @@ export function ThemeProvider({ children }) {
     };
   }, [themeMode, accent]);
 
-  return (
-    <ThemeCtx.Provider value={{ org, setOrg }}>
-      {children}
-    </ThemeCtx.Provider>
-  );
+  return <ThemeCtx.Provider value={{ org, setOrg }}>{children}</ThemeCtx.Provider>;
 }
 
 export const useTheme = () => useContext(ThemeCtx);
