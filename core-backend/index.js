@@ -255,6 +255,59 @@ app.get("/api/files/documents/:fileId", serveDocumentFile);
 app.get("/documents/files/:fileId", serveDocumentFile);
 app.get("/api/documents/files/:fileId", serveDocumentFile);
 
+/* -------------------- GridFS for org logos (NEW) -------------------- */
+/**
+ * Streams from GridFS bucket: org.files / org.chunks
+ * Stable URL:
+ *   /files/org/<orgId>/logo
+ */
+function getOrgBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "org" });
+}
+
+async function serveOrgLogo(req, res, next) {
+  try {
+    const org = String(req.params.org || "");
+    if (!org) return res.status(400).json({ error: "Missing org" });
+
+    const bucket = getOrgBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const files = await bucket
+      .find({ "metadata.orgId": org, "metadata.kind": "logo" })
+      .sort({ uploadDate: -1 })
+      .limit(1)
+      .toArray();
+
+    const f = files?.[0];
+    if (!f?._id) return res.status(404).json({ error: "Logo not found" });
+
+    // Simple caching + 304 support
+    const etag = f.md5 ? `"${f.md5}"` : null;
+    if (etag) {
+      res.setHeader("ETag", etag);
+      const inm = req.headers["if-none-match"];
+      if (inm && inm === etag) return res.status(304).end();
+    }
+
+    if (f?.contentType) res.setHeader("Content-Type", f.contentType);
+    // Short cache because org can change logo
+    res.setHeader("Cache-Control", "public, max-age=300");
+
+    const stream = bucket.openDownloadStream(f._id);
+    stream.on("error", (err) => next(err));
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// IMPORTANT: mount BEFORE express.static("/files")
+app.get("/files/org/:org/logo", serveOrgLogo);
+app.get("/api/files/org/:org/logo", serveOrgLogo);
+
 /* -------------------- GridFS for asset attachments -------------------- */
 /**
  * Streams from GridFS bucket: assets.files / assets.chunks

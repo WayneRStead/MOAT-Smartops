@@ -41,58 +41,14 @@ const router = express.Router();
  */
 router.use(requireAuth, resolveOrgContext, requireOrg);
 
-/* ------------------------------ GridFS helpers ------------------------------ */
+/* ------------------------------ helpers ------------------------------ */
 
-function getOrgBucket() {
-  const db = mongoose.connection?.db;
-  if (!db) return null;
-  // Bucket name "org" => collections: org.files + org.chunks
-  return new GridFSBucket(db, { bucketName: "org" });
-}
-
-function toObjectIdOrNull(v) {
-  try {
-    return new mongoose.Types.ObjectId(String(v));
-  } catch {
-    return null;
-  }
-}
-
-function schemaHas(pathName) {
-  try {
-    return !!Org?.schema?.path?.(pathName);
-  } catch {
-    return false;
-  }
-}
-
-function setIfSchemaHas(doc, key, val) {
-  if (!doc) return;
-  if (schemaHas(key)) doc[key] = val;
-}
-
-/* ------------------------------ uploads ------------------------------ */
-/**
- * ✅ No disk uploads (Render is ephemeral)
- * Use memory storage then stream into GridFS.
- */
 function cleanFilename(name) {
   return String(name || "")
     .replace(/[^\w.\-]+/g, "_")
     .slice(0, 120);
 }
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-});
-
-const uploadEither = upload.fields([
-  { name: "file", maxCount: 1 },
-  { name: "logo", maxCount: 1 },
-]);
-
-/* ------------------------------ helpers ------------------------------ */
 function addDays(date, days) {
   const ms = Number(days) * 24 * 60 * 60 * 1000;
   return new Date(date.getTime() + ms);
@@ -131,18 +87,8 @@ async function getOrCreateOrgFor(orgId) {
 function presentOrg(org) {
   const o = org?.toObject ? org.toObject() : org;
   const themeMode = o.themeMode || o?.theme?.mode || "system";
-  const accentColor =
-    o.accentColor || o?.theme?.color || process.env.ORG_THEME_COLOR || "#2E86DE";
-
-  // Ensure logoUrl is consistent if we have a fileId stored
-  let logoUrl = o.logoUrl || null;
-  const fileId = o.logoFileId || o.logoFileID || o.logoGridFsId; // just in case you used a variant earlier
-  if (fileId) {
-    const oid = toObjectIdOrNull(fileId);
-    if (oid) logoUrl = `/files/org/${oid.toString()}`;
-  }
-
-  return { ...o, themeMode, accentColor, logoUrl };
+  const accentColor = o.accentColor || o?.theme?.color || process.env.ORG_THEME_COLOR || "#2E86DE";
+  return { ...o, themeMode, accentColor };
 }
 
 // Helper: compute trial metadata
@@ -164,6 +110,45 @@ function computeTrialMeta(org) {
   return { isTrial, trialEndsAt, trialDaysRemaining };
 }
 
+/* --------------------------- GridFS: org logos -------------------------- */
+/**
+ * Bucket: org.files / org.chunks
+ * We store metadata:
+ *  - orgId (string)
+ *  - kind: "logo"
+ */
+function getOrgBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "org" });
+}
+
+async function deleteExistingOrgLogos(bucket, orgId) {
+  const old = await bucket
+    .find({ "metadata.orgId": String(orgId), "metadata.kind": "logo" })
+    .toArray();
+
+  for (const f of old) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await bucket.delete(f._id);
+    } catch {}
+  }
+}
+
+/* ------------------------------ uploads ------------------------------ */
+/**
+ * ✅ Use memory storage (NOT disk) so Render/Vercel hosting works reliably.
+ */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+const uploadEither = upload.fields([
+  { name: "file", maxCount: 1 },
+  { name: "logo", maxCount: 1 },
+]);
+
 /* -------------------------------- GET -------------------------------- */
 const GET_PATHS = ["/", "/org", "/organization", "/orgs/me"];
 router.get(GET_PATHS, async (req, res, next) => {
@@ -179,8 +164,7 @@ router.get(GET_PATHS, async (req, res, next) => {
 const PUT_PATHS = ["/", "/org"];
 router.put(PUT_PATHS, async (req, res, next) => {
   try {
-    const { name, themeMode, accentColor, modules, dashboardWidgets, settings, logoUrl } =
-      req.body || {};
+    const { name, themeMode, accentColor, modules, dashboardWidgets, settings, logoUrl } = req.body || {};
     const org = await getOrCreateOrgFor(req.orgId);
 
     // Basic fields
@@ -188,11 +172,8 @@ router.put(PUT_PATHS, async (req, res, next) => {
       const n = name.trim();
       if (n) org.name = n; // only set if non-empty
     }
-
     if (themeMode) org.themeMode = themeMode;
     if (accentColor) org.accentColor = accentColor;
-
-    // Allow setting logoUrl manually if you want, but we won’t trust it for storage
     if (logoUrl) org.logoUrl = logoUrl;
 
     // keep legacy theme in sync (if present on schema)
@@ -240,72 +221,62 @@ router.put(PUT_PATHS, async (req, res, next) => {
 /* ------------------------------- /logo -------------------------------- */
 /**
  * POST /org/logo
- * form-data: file=<binary> OR logo=<binary>
+ * form-data: logo=<image>
  *
- * ✅ Stores in GridFS bucket: org.files/org.chunks
- * ✅ Persists logoUrl as /files/org/:fileId (Option A)
+ * Stores in GridFS bucket "org" and sets:
+ *   org.logoUrl = /files/org/<orgId>/logo
  */
 const LOGO_PATHS = ["/logo", "/org/logo"];
 router.post(LOGO_PATHS, (req, res, next) => {
   uploadEither(req, res, async (err) => {
     if (err) return next(err);
+
     try {
-      const file = (req.files?.file && req.files.file[0]) || (req.files?.logo && req.files.logo[0]);
+      const file =
+        (req.files?.file && req.files.file[0]) ||
+        (req.files?.logo && req.files.logo[0]);
+
       if (!file) return res.status(400).json({ error: "file required" });
+      if (!file.buffer || !file.buffer.length) return res.status(400).json({ error: "Empty upload" });
 
       const bucket = getOrgBucket();
       if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
 
       const org = await getOrCreateOrgFor(req.orgId);
+      const orgIdStr = String(org._id);
 
-      // If there’s an existing GridFS logo, delete it (avoid orphaned files)
-      try {
-        const prev = org.logoFileId || org.logoFileID || org.logoGridFsId;
-        const prevId = toObjectIdOrNull(prev);
-        if (prevId) {
-          await bucket.delete(prevId);
-        }
-      } catch {
-        // ignore if missing/not found
-      }
+      // Optional: keep storage tidy — remove previous logos for this org
+      await deleteExistingOrgLogos(bucket, orgIdStr);
 
-      const cleaned = cleanFilename(file.originalname || "logo");
-      const storedName = `${String(org._id)}_${Date.now()}_${cleaned}`;
+      const ext = path.extname(file.originalname || "").toLowerCase();
+      const safeBase = cleanFilename(path.basename(file.originalname || "logo", ext));
+      const filename = `${orgIdStr}-logo-${Date.now()}-${safeBase}${ext || ""}`;
 
-      // Upload buffer into GridFS
-      const uploadStream = bucket.openUploadStream(storedName, {
+      // Upload to GridFS
+      const uploadStream = bucket.openUploadStream(filename, {
         contentType: file.mimetype || "application/octet-stream",
         metadata: {
-          orgId: String(org._id),
-          originalName: file.originalname || cleaned,
-          purpose: "org-logo",
+          orgId: orgIdStr,
+          kind: "logo",
+          originalName: file.originalname || filename,
         },
       });
 
-      await new Promise((resolve, reject) => {
-        uploadStream.on("finish", resolve);
-        uploadStream.on("error", reject);
-        uploadStream.end(file.buffer);
+      uploadStream.on("error", (e2) => next(e2));
+      uploadStream.on("finish", async () => {
+        // Stable URL (Option A)
+        org.logoUrl = `/files/org/${orgIdStr}/logo`;
+
+        // keep theme in sync if needed
+        org.theme = org.theme || {};
+        if (org.accentColor && !org.theme.color) org.theme.color = org.accentColor;
+        if (org.themeMode && !org.theme.mode) org.theme.mode = org.themeMode;
+
+        await org.save();
+        res.json(presentOrg(org));
       });
 
-      const fileId = uploadStream.id; // ObjectId
-      const relUrl = `/files/org/${fileId.toString()}`;
-
-      // Persist (only if schema supports these fields; otherwise at least keep logoUrl)
-      org.logoUrl = relUrl;
-      setIfSchemaHas(org, "logoFileId", fileId);
-      setIfSchemaHas(org, "logoFileName", file.originalname || storedName);
-      setIfSchemaHas(org, "logoFileType", file.mimetype || "");
-      setIfSchemaHas(org, "logoFileSize", file.size || null);
-      setIfSchemaHas(org, "logoUpdatedAt", new Date());
-
-      // keep theme in sync if needed
-      org.theme = org.theme || {};
-      if (org.accentColor && !org.theme.color) org.theme.color = org.accentColor;
-      if (org.themeMode && !org.theme.mode) org.theme.mode = org.themeMode;
-
-      await org.save();
-      res.json(presentOrg(org));
+      uploadStream.end(file.buffer);
     } catch (e) {
       next(e);
     }
@@ -314,8 +285,7 @@ router.post(LOGO_PATHS, (req, res, next) => {
 
 /* -------------------------- ORG BILLING API --------------------------- */
 /**
- * GET /org/billing
- * Return current org billing view (plan, seats, effective pricing, trial meta).
+ * Everything below here is unchanged from your file (billing endpoints).
  */
 router.get("/billing", async (req, res) => {
   try {
@@ -358,10 +328,6 @@ router.get("/billing", async (req, res) => {
   }
 });
 
-/**
- * PUT /org/billing
- * body: { planCode?, seats? }
- */
 router.put("/billing", async (req, res) => {
   try {
     if (!getEffectivePricing) {
@@ -376,7 +342,9 @@ router.put("/billing", async (req, res) => {
       planCodeNormalized = planCode.trim().toLowerCase();
       org.planCode = planCodeNormalized;
 
-      if (!org.plan) org.plan = org.planCode;
+      if (!org.plan) {
+        org.plan = org.planCode;
+      }
 
       if (planCodeNormalized !== "trial") {
         if (org.status === "trialing" || org.status === "suspended") {
@@ -409,9 +377,7 @@ router.put("/billing", async (req, res) => {
 
     const effective = await getEffectivePricing(org);
     const currency = effective.currency || org.currency || DEFAULT_CURRENCY || "ZAR";
-
     const seatCount = typeof org.seats === "number" && org.seats >= 0 ? org.seats : 0;
-
     const trialMeta = computeTrialMeta(org);
 
     res.json({
@@ -439,9 +405,6 @@ router.put("/billing", async (req, res) => {
   }
 });
 
-/**
- * GET /org/billing/plans
- */
 router.get("/billing/plans", async (_req, res) => {
   try {
     if (!getPlanPricing || !PLAN_CODES || !PLAN_CODES.length) {
@@ -452,9 +415,7 @@ router.get("/billing/plans", async (_req, res) => {
     for (const code of PLAN_CODES) {
       // eslint-disable-next-line no-await-in-loop
       const effective = (await getPlanPricing(code)) || {};
-
       const currency = effective.currency || DEFAULT_CURRENCY || "ZAR";
-
       const label =
         effective.label ||
         String(code)
@@ -479,9 +440,6 @@ router.get("/billing/plans", async (_req, res) => {
   }
 });
 
-/**
- * GET /org/billing/preview
- */
 router.get("/billing/preview", async (req, res) => {
   try {
     if (!getEffectivePricing || !previewCost) {
@@ -499,11 +457,7 @@ router.get("/billing/preview", async (req, res) => {
 
     const org = await getOrCreateOrgFor(req.orgId);
 
-    const usageDoc = await BillingUsage.findOne({
-      orgId: org._id,
-      month,
-    }).lean();
-
+    const usageDoc = await BillingUsage.findOne({ orgId: org._id, month }).lean();
     const meters = usageDoc?.meters || {};
     const effective = await getEffectivePricing(org);
     const currency = effective.currency || org.currency || DEFAULT_CURRENCY || "ZAR";
