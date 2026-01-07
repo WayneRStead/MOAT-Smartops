@@ -92,6 +92,18 @@ function mapsHrefFrom(loc){
   return `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
 }
 
+/* ===== Logo URL normalizer (supports new + legacy shapes) ===== */
+function resolveLogoUrl(u){
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  if (s.startsWith("/")) return s;
+  if (s.startsWith("files/")) return `/${s}`;
+  if (s.startsWith("uploads/")) return `/${s}`;
+  if (s.startsWith("org/")) return `/files/${s}`; // -> /files/org/<orgId>/logo
+  return `/files/${s}`;
+}
+
 export default function InspectionSubmissionView(){
   const { subId, id } = useParams();
   const realId = subId || id;
@@ -125,7 +137,8 @@ export default function InspectionSubmissionView(){
   useEffect(()=>{
     resolveOrgBranding().then(({ name, logo }) => {
       if (name) setOrgName(name);
-      if (logo) setOrgLogoUrl(logo);
+      const fixed = resolveLogoUrl(logo);
+      if (fixed) setOrgLogoUrl(fixed);
     });
   },[]);
 
@@ -622,6 +635,13 @@ function niceCase(s){
 
 /** Try to resolve org branding from window, token, or API (best-effort, safe failures). */
 async function resolveOrgBranding(){
+  // ✅ Prefer canonical endpoint first (returns stable logoUrl)
+  try{
+    const { data } = await api.get("/org", { params: { _ts: Date.now() } });
+    const { name, logo } = extractOrgFields(data || {});
+    if (name || logo) return { name, logo };
+  }catch{}
+
   const w = (typeof window !== "undefined" ? window : {});
   const winCandidates = [
     w.__ORG__, w.__CURRENT_ORG__, w.__ORG_INFO__,
@@ -637,7 +657,7 @@ async function resolveOrgBranding(){
     const tok = localStorage.getItem("token");
     if (tok && tok.split(".").length === 3) {
       const payload = JSON.parse(atob(tok.split(".")[1] || ""));
-      const { name, logo } = extractOrgFields(payload?.org || payload?.organization || {});
+      const { name, logo } = extractOrgFields(payload?.org || payload?.organization || payload || {});
       if (name || logo) return { name, logo };
       if (payload?.orgName && typeof payload.orgName === "string") {
         return { name: payload.orgName, logo: "" };
@@ -645,7 +665,7 @@ async function resolveOrgBranding(){
     }
   }catch{}
 
-  const endpoints = ["/org", "/admin/org", "/settings/org", "/organization", "/org/current"];
+  const endpoints = ["/admin/org", "/settings/org", "/organization", "/org/current"];
   for (const ep of endpoints){
     try{
       const { data } = await api.get(ep, { params: { _ts: Date.now() } });
@@ -658,14 +678,23 @@ async function resolveOrgBranding(){
 }
 
 function extractOrgFields(obj){
-  if (!obj || typeof obj !== "object") return { name:"", logo:"" };
+  // ✅ handle nested shapes: { org: {...} } or { organization: {...} }
+  const o =
+    obj && typeof obj === "object" && obj.org && typeof obj.org === "object"
+      ? obj.org
+      : obj && typeof obj === "object" && obj.organization && typeof obj.organization === "object"
+      ? obj.organization
+      : obj;
+
+  if (!o || typeof o !== "object") return { name:"", logo:"" };
+
   const name = pickFirst(
-    obj.name, obj.orgName, obj.company, obj.displayName,
-    obj.settings?.name, obj.profile?.name
+    o.name, o.orgName, o.company, o.displayName,
+    o.settings?.name, o.profile?.name
   );
   const logo = pickFirst(
-    obj.logoUrl, obj.logo, obj.branding?.logoUrl, obj.branding?.logo,
-    obj.assets?.logo, obj.images?.logo, obj.settings?.logoUrl
+    o.logoUrl, o.logo, o.branding?.logoUrl, o.branding?.logo,
+    o.assets?.logo, o.images?.logo, o.settings?.logoUrl
   );
   return { name: stringOrEmpty(name), logo: stringOrEmpty(logo) };
 }

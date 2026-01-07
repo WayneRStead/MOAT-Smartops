@@ -54,11 +54,7 @@ function safeParseJwt(t) {
 
 function readToken() {
   try {
-    return (
-      localStorage.getItem("token") ||
-      sessionStorage.getItem("token") ||
-      ""
-    );
+    return localStorage.getItem("token") || sessionStorage.getItem("token") || "";
   } catch {
     return "";
   }
@@ -72,9 +68,7 @@ function normRole(r) {
 export default function Navbar() {
   const { org } = useTheme();
   const [token, setToken] = useState(() => readToken());
-  const [open, setOpen] = useState(
-    () => (localStorage.getItem("sidebar-open") ?? "1") === "1"
-  );
+  const [open, setOpen] = useState(() => (localStorage.getItem("sidebar-open") ?? "1") === "1");
   const [meGlobalRole, setMeGlobalRole] = useState(null);
   const [meIsGlobalSuper, setMeIsGlobalSuper] = useState(false);
 
@@ -132,10 +126,7 @@ export default function Navbar() {
 
   // Fallback to token in case api/me hasn't run yet (or old env)
   const tokenGlobalRole = normRole(payload?.globalRole);
-  const isGlobalSuper =
-    meIsGlobalSuper ||
-    tokenGlobalRole === "superadmin" ||
-    payload?.isGlobalSuperadmin === true;
+  const isGlobalSuper = meIsGlobalSuper || tokenGlobalRole === "superadmin" || payload?.isGlobalSuperadmin === true;
 
   // Legible active state
   const item = ({ isActive }) => ({
@@ -172,11 +163,18 @@ export default function Navbar() {
     navigate("/login");
   }
 
+  // ✅ Logo resolver that supports new stable URL + legacy values
   const resolveLogo = (u) => {
-    if (!u) return "";
-    if (u.startsWith("http")) return u;
-    if (u.startsWith("/")) return u;
-    return `/files/${u}`;
+    const s = String(u || "").trim();
+    if (!s) return "";
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    if (s.startsWith("/")) return s;
+
+    // tolerate common legacy shapes
+    if (s.startsWith("files/")) return `/${s}`;
+    if (s.startsWith("uploads/")) return `/${s}`;
+    if (s.startsWith("org/")) return `/files/${s}`; // -> /files/org/...
+    return `/files/${s}`;
   };
 
   const enabled = useMemo(() => {
@@ -455,9 +453,7 @@ export default function Navbar() {
               borderRadius: 8,
               fontWeight: 700,
               userSelect: "none",
-              background: isAdminActive
-                ? "rgba(255,255,255,0.08)"
-                : "transparent",
+              background: isAdminActive ? "rgba(255,255,255,0.08)" : "transparent",
               display: "flex",
               alignItems: "center",
               gap: 12,
