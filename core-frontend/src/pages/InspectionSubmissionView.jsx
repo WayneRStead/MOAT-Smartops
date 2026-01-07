@@ -6,17 +6,25 @@ import {
   getSubmission,
   addSubmissionComment,
   getForm,
+  // submission admin actions
   softDeleteSubmission,
   hardDeleteSubmission,
   restoreSubmission,
 } from "../lib/inspectionApi";
 
 /* ===== Robust role handling (window + JWT + synonyms) ===== */
-const CANON_ROLES = ["user", "group-leader", "project-manager", "manager", "admin", "superadmin"];
+const CANON_ROLES = [
+  "user",
+  "group-leader",
+  "project-manager",
+  "manager",
+  "admin",
+  "superadmin",
+];
 function normalizeRole(r) {
   if (!r) return "";
   let s = String(r).trim().toLowerCase();
-  s = s.replace(/[_\s]+/g, "-");
+  s = s.replace(/[_\s]+/g, "-"); // "Project Manager" -> "project-manager"
   if (s === "groupleader") s = "group-leader";
   if (s === "pm") s = "project-manager";
   if (s === "super-admin") s = "superadmin";
@@ -28,7 +36,9 @@ function uniq(arr) {
   return Array.from(new Set(arr));
 }
 function getCurrentUserSafe() {
+  // 1) Window
   let u = window.__CURRENT_USER__ || {};
+  // 2) JWT fallback if window user looks empty
   if (!u || (!u._id && !u.id && !u.userId && !u.email && !u.name)) {
     try {
       const tok = localStorage.getItem("token");
@@ -48,18 +58,26 @@ function getCurrentUserSafe() {
       }
     } catch {}
   }
+  // 3) Normalize roles
   const rawRoles = []
     .concat(u?.role ? [u.role] : [])
     .concat(Array.isArray(u?.roles) ? u.roles : [])
     .concat(u?.isAdmin ? ["admin"] : []);
-  const roles = uniq(rawRoles.flatMap((v) => String(v).split(",")).map(normalizeRole).filter(Boolean));
+  const roles = uniq(
+    rawRoles
+      .flatMap((v) => String(v).split(","))
+      .map(normalizeRole)
+      .filter(Boolean)
+  );
   return { ...(u || {}), roles };
 }
 function isElevated(u) {
-  return (u?.roles || []).some((r) => ["project-manager", "manager", "admin", "superadmin"].includes(r));
+  return (u?.roles || []).some((r) =>
+    ["project-manager", "manager", "admin", "superadmin"].includes(r)
+  );
 }
 
-/* ===== Location helpers ===== */
+/* ===== Location helpers (robust across shapes) ===== */
 function extractLocation(sub) {
   const candidates = [
     sub?.location,
@@ -75,7 +93,11 @@ function extractLocation(sub) {
     const lng = Number(loc.lng ?? loc.lon ?? loc.longitude);
     const accuracy = Number(loc.accuracy ?? loc.acc);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      return { lat, lng, accuracy: Number.isFinite(accuracy) ? accuracy : undefined };
+      return {
+        lat,
+        lng,
+        accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+      };
     }
   }
   return null;
@@ -90,22 +112,53 @@ function mapsHrefFrom(loc) {
   return `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
 }
 
-/* ===== Logo URL normalizer (do NOT force backend origin) ===== */
-function appendBust(u, bust) {
-  const s = String(u || "").trim();
-  if (!s) return "";
-  const v = String(bust || "").trim();
-  if (!v) return s;
-  return s.includes("?") ? `${s}&v=${encodeURIComponent(v)}` : `${s}?v=${encodeURIComponent(v)}`;
+/* ===== Backend-aware URL normalizer (fixes Vercel vs Render /files/*) ===== */
+function backendOrigin() {
+  try {
+    const b = (import.meta?.env?.VITE_API_BASE || "").trim();
+    if (b) return b.replace(/\/$/, "");
+  } catch {}
+  try {
+    const w = typeof window !== "undefined" ? window : {};
+    if (w.__API_BASE__) return String(w.__API_BASE__).replace(/\/$/, "");
+  } catch {}
+  return "";
 }
-function resolveLogoUrl(u) {
+function appendBust(u, bust) {
+  const v = String(bust || "").trim();
+  if (!v) return u;
+  return u.includes("?")
+    ? `${u}&v=${encodeURIComponent(v)}`
+    : `${u}?v=${encodeURIComponent(v)}`;
+}
+function toBackendUrl(url, bust) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+
+  // Absolute already
+  if (/^https?:\/\//i.test(s)) return bust ? appendBust(s, bust) : s;
+
+  // Relative: MUST be routed to backend origin, not frontend origin
+  const base = backendOrigin();
+  if (s.startsWith("/")) {
+    const out = base ? `${base}${s}` : s;
+    return bust ? appendBust(out, bust) : out;
+  }
+
+  // Legacy: treat as file path
+  const out = base ? `${base}/files/${s}` : `/files/${s}`;
+  return bust ? appendBust(out, bust) : out;
+}
+
+/* ===== Legacy logo path helper (turns org/.. into /files/org/..) ===== */
+function resolveLogoPath(u) {
   const s = String(u || "").trim();
   if (!s) return "";
   if (s.startsWith("http://") || s.startsWith("https://")) return s;
   if (s.startsWith("/")) return s;
   if (s.startsWith("files/")) return `/${s}`;
   if (s.startsWith("uploads/")) return `/${s}`;
-  if (s.startsWith("org/")) return `/files/${s}`; // org/<id>/logo -> /files/org/<id>/logo
+  if (s.startsWith("org/")) return `/files/${s}`; // -> /files/org/<orgId>/logo
   return `/files/${s}`;
 }
 
@@ -120,18 +173,22 @@ export default function InspectionSubmissionView() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // backfill names (project/task/milestone)
   const [names, setNames] = useState({ project: "", task: "", milestone: "" });
 
+  // manager comment draft
   const [mgrNote, setMgrNote] = useState("");
   const [savingComment, setSavingComment] = useState(false);
   const [commentErr, setCommentErr] = useState("");
 
+  // org branding (logo + name)
   const [orgName, setOrgName] = useState("");
   const [orgLogoUrl, setOrgLogoUrl] = useState("");
 
+  // current user + permissions
   const me = getCurrentUserSafe();
   const canComment = isElevated(me);
-  const canAdminSub = canComment;
+  const canAdminSub = canComment; // same gate for delete/restore
 
   useEffect(() => {
     load();
@@ -143,10 +200,10 @@ export default function InspectionSubmissionView() {
     resolveOrgBranding().then(({ name, logo, bust }) => {
       if (cancelled) return;
       if (name) setOrgName(name);
-
       if (logo) {
-        const src = appendBust(resolveLogoUrl(logo), bust || Date.now());
-        setOrgLogoUrl(src);
+        // Ensure logo is loaded from backend origin (Render) not frontend (Vercel)
+        const normalized = toBackendUrl(resolveLogoPath(logo), bust || Date.now());
+        setOrgLogoUrl(normalized);
       }
     });
     return () => {
@@ -195,7 +252,10 @@ export default function InspectionSubmissionView() {
         const m = (Array.isArray(data) ? data : []).find(
           (x) => String(x._id || x.id) === String(milestoneId)
         );
-        setNames((n) => ({ ...n, milestone: labelOf(m) || String(milestoneId) }));
+        setNames((n) => ({
+          ...n,
+          milestone: labelOf(m) || String(milestoneId),
+        }));
       }
     } catch {}
   }
@@ -221,6 +281,7 @@ export default function InspectionSubmissionView() {
     }
   }
 
+  // delete / restore actions
   async function onSoftDelete() {
     if (!sub?._id) return;
     if (!confirm("Soft delete this submission?")) return;
@@ -253,12 +314,18 @@ export default function InspectionSubmissionView() {
 
   const chip = useMemo(() => {
     const r = String(sub?.overallResult || "").toLowerCase();
-    return r === "fail" ? "chip chip-fail" : r === "pass" ? "chip chip-pass" : "chip chip-na";
+    return r === "fail"
+      ? "chip chip-fail"
+      : r === "pass"
+      ? "chip chip-pass"
+      : "chip chip-na";
   }, [sub]);
 
+  // Unified comments (managerComments preferred; legacy comments fallback)
   const comments = useMemo(() => {
     if (!sub) return [];
-    if (Array.isArray(sub.managerComments) && sub.managerComments.length) return sub.managerComments;
+    if (Array.isArray(sub.managerComments) && sub.managerComments.length)
+      return sub.managerComments;
     if (Array.isArray(sub.comments)) {
       return sub.comments.map((c) => ({
         comment: c.comment,
@@ -269,6 +336,7 @@ export default function InspectionSubmissionView() {
     return [];
   }, [sub]);
 
+  // Friendly scoring rule label
   const ruleLabel = (sc) => {
     if (!sc) return "";
     const mode = String(sc.mode || "any-fail");
@@ -283,6 +351,7 @@ export default function InspectionSubmissionView() {
     return "Any FAIL ⇒ overall FAIL (critical auto-fail)";
   };
 
+  // Achieved score label
   const achievedLabel = useMemo(() => {
     if (!sub) return "";
     if (sub.scoringSummary?.percentScore != null) {
@@ -295,11 +364,14 @@ export default function InspectionSubmissionView() {
       }
       return `${pct}%`;
     }
+    // fallback compute
     const items = Array.isArray(sub.items) ? sub.items : [];
     const applicable = items.filter((r) => (r.result || "").toLowerCase() !== "na");
     const totalApplicable = applicable.length;
     const passCount = applicable.filter((r) => r.result === "pass").length;
-    const nonCriticalFailCount = applicable.filter((r) => r.result === "fail" && !r.criticalTriggered).length;
+    const nonCriticalFailCount = applicable.filter(
+      (r) => r.result === "fail" && !r.criticalTriggered
+    ).length;
     const percent = totalApplicable ? (passCount / totalApplicable) * 100 : 100;
     const pct = (Math.round(percent * 10) / 10).toFixed(1);
     if (formMeta?.scoring?.mode === "tolerance") {
@@ -326,14 +398,22 @@ export default function InspectionSubmissionView() {
 
   const subjectType = String(sub?.subjectAtRun?.type || "none");
   const subjectNice =
-    subjectType === "none" ? "General" : subjectType === "vehicle" ? "Vehicle" : subjectType === "asset" ? "Asset" : "Performance";
+    subjectType === "none"
+      ? "General"
+      : subjectType === "vehicle"
+      ? "Vehicle"
+      : subjectType === "asset"
+      ? "Asset"
+      : "Performance";
   const subjectLabel = sub?.subjectAtRun?.label;
 
+  // Location (if available)
   const loc = extractLocation(sub);
   const locTxt = formatLocation(loc);
 
   return (
     <div className="max-w-7xl mx-auto p-4 print-container">
+      {/* Local styles — screen unchanged; print-only adjusts layout */}
       <style>{`
         :root{--border:#e5e7eb;--muted:#6b7280}
         .card{border:1px solid var(--border); border-radius:12px; padding:12px; background:#fff}
@@ -355,14 +435,25 @@ export default function InspectionSubmissionView() {
         .btn-primary{border-color:#111827;background:#111827;color:#fff;border-radius:8px;padding:.5rem .75rem}
         .pill{display:inline-flex;align-items:center;font-size:12px;border:1px solid var(--border);padding:2px 6px;border-radius:9999px;color:#374151;background:#f9fafb}
 
+        /* PRINT-ONLY */
         @media print {
           @page { margin: 10mm; }
           html, body { font-size: 11.5px; }
+
+          /* Hide screen-only bits */
           .no-print{ display: none !important; }
+
+          /* Use full width on paper: override Tailwind layout utilities */
           .max-w-7xl { max-width: none !important; }
           .mx-auto { margin-left: 0 !important; margin-right: 0 !important; }
           .p-4 { padding: 0 !important; }
-          main, .main, .app-content, .content, #root > * { grid-column: 1 / -1 !important; }
+
+          /* If the app shell is a 2-col grid, span all columns for print */
+          main, .main, .app-content, .content, #root > * {
+            grid-column: 1 / -1 !important;
+          }
+
+          /* Kill any leftover left offset from the shell */
           html, body, main, .main, .app-content, .content, #root > * {
             margin-left: 0 !important;
             padding-left: 0 !important;
@@ -372,43 +463,58 @@ export default function InspectionSubmissionView() {
             width: 100% !important;
             max-width: none !important;
           }
+
+          /* Keep cards tidy for page breaks */
           .card{ padding: 10px !important; page-break-inside: avoid; break-inside: avoid; }
           .mt-3{ margin-top: 6px !important; }
           h1, h2 { margin: 6px 0 !important; }
           .row { gap: 8px !important; }
           .items-evidence img { max-height: 84px !important; }
+
+          /* Print header on, screen header off (duplicate guard) */
           .print-header{ display: block; margin-bottom: 10px; }
           .hide-outcome-on-print{ display: none !important; }
+
+          /* Ensure the container has no internal padding */
           .print-container{ padding: 0 !important; }
         }
       `}</style>
 
+      {/* Title row (hide whole bar on print to avoid duplicate) */}
       <div className="row no-print">
         <div className="flex items-center gap-3">
-          <Link to="/inspections" className="btn" title="Back to list">← Back</Link>
+          <Link to="/inspections" className="btn" title="Back to list">
+            ← Back
+          </Link>
           {orgLogoUrl ? (
             <img
               src={orgLogoUrl}
               alt={orgName ? `${orgName} logo` : "Logo"}
               style={{ height: 28, width: "auto" }}
-              onError={(e) => {
-                // Don’t hide permanently; just log once and clear src
-                try { console.warn("[InspectionSubmissionView] logo failed:", orgLogoUrl); } catch {}
-                e.currentTarget.src = "";
-              }}
             />
           ) : null}
           <h1 className="text-2xl font-semibold">{TITLE}</h1>
         </div>
         <div className="flex items-center gap-2">
-          {loc && <span className="pill" title={locTxt}>📍 {locTxt}</span>}
-          <button className="btn" onClick={() => exportKmz(realId, sub, names)}>Export KMZ</button>
+          {loc && (
+            <span className="pill" title={locTxt}>
+              📍 {locTxt}
+            </span>
+          )}
+          <button className="btn" onClick={() => exportKmz(realId, sub, names)}>
+            Export KMZ
+          </button>
           <span className="muted text-sm">{formTypeNice}</span>
-          <div className={chip} title="Outcome">{(sub.overallResult || "—").toUpperCase()}</div>
-          <button className="btn" onClick={() => window.print()}>Print / PDF</button>
+          <div className={chip} title="Outcome">
+            {(sub.overallResult || "—").toUpperCase()}
+          </div>
+          <button className="btn" onClick={() => window.print()}>
+            Print / PDF
+          </button>
         </div>
       </div>
 
+      {/* Print header */}
       <div className="print-header">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -439,25 +545,46 @@ export default function InspectionSubmissionView() {
             </div>
           </div>
           <div className="text-right">
-            <div><b>Submitted:</b> {sub.createdAt ? new Date(sub.createdAt).toLocaleString() : "—"}</div>
+            <div>
+              <b>Submitted:</b>{" "}
+              {sub.createdAt ? new Date(sub.createdAt).toLocaleString() : "—"}
+            </div>
           </div>
         </div>
 
+        {/* Scope */}
         <div className="grid-3 mt-3">
-          <div><b>Project</b>: {names.project || links.projectId || "—"}</div>
-          <div><b>Task</b>: {names.task || links.taskId || "—"}</div>
-          <div><b>Milestone</b>: {names.milestone || links.milestoneId || "—"}</div>
+          <div>
+            <b>Project</b>: {headerProject}
+          </div>
+          <div>
+            <b>Task</b>: {headerTask}
+          </div>
+          <div>
+            <b>Milestone</b>: {headerMilestone}
+          </div>
         </div>
 
+        {/* Subject + Label */}
         <div className="mt-3 subject-row">
-          <div><b>Subject</b>: {subjectNice}</div>
-          <div><b>Label</b>: {subjectType !== "none" ? (subjectLabel || "—") : "—"}</div>
+          <div>
+            <b>Subject</b>: {subjectNice}
+          </div>
+          <div>
+            <b>Label</b>: {subjectType !== "none" ? subjectLabel || "—" : "—"}
+          </div>
         </div>
 
+        {/* Location block (if available) */}
         {loc && (
           <div className="mt-3">
-            <b>Location</b>: <span className="pill" title={locTxt}>📍 {locTxt}</span>{" "}
-            <a className="muted" href={mapsHrefFrom(loc)} target="_blank" rel="noreferrer">Open in Maps</a>
+            <b>Location</b>:{" "}
+            <span className="pill" title={locTxt}>
+              📍 {locTxt}
+            </span>{" "}
+            <a className="muted" href={mapsHrefFrom(loc)} target="_blank" rel="noreferrer">
+              Open in Maps
+            </a>
           </div>
         )}
 
@@ -467,31 +594,48 @@ export default function InspectionSubmissionView() {
           </div>
         ) : null}
 
+        {/* Scoring rule + Achieved */}
         {formMeta?.scoring ? (
           <div className="mt-3 row">
-            <div><b>Rule</b>: {scoringRule}</div>
-            <div className="right"><b>Achieved</b>: {achievedLabel}</div>
+            <div>
+              <b>Rule</b>: {scoringRule}
+            </div>
+            <div className="right">
+              <b>Achieved</b>: {achievedLabel}
+            </div>
           </div>
         ) : null}
 
         <div className="mt-3 row">
-          <div><b>Inspector</b>: {sub.runBy?.name || "—"}</div>
+          <div>
+            <b>Inspector</b>: {sub.runBy?.name || "—"}
+          </div>
           <div className="right hide-outcome-on-print">
-            <b>Outcome</b>: <span className={chip}>{(sub.overallResult || "—").toUpperCase()}</span>
+            <b>Outcome</b>:{" "}
+            <span className={chip}>{(sub.overallResult || "—").toUpperCase()}</span>
           </div>
         </div>
 
+        {/* Admin actions: delete/restore (screen only) */}
         {canAdminSub && (
           <div className="mt-3 row no-print">
             <div className="muted">Admin</div>
             <div className="right flex gap-2">
               {!sub.isDeleted && (
                 <>
-                  <button className="btn" onClick={onSoftDelete}>Soft Delete</button>
-                  <button className="btn btn-error" onClick={onHardDelete}>Hard Delete</button>
+                  <button className="btn" onClick={onSoftDelete}>
+                    Soft Delete
+                  </button>
+                  <button className="btn btn-error" onClick={onHardDelete}>
+                    Hard Delete
+                  </button>
                 </>
               )}
-              {sub.isDeleted && <button className="btn btn-primary" onClick={onRestore}>Restore</button>}
+              {sub.isDeleted && (
+                <button className="btn btn-primary" onClick={onRestore}>
+                  Restore
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -502,12 +646,18 @@ export default function InspectionSubmissionView() {
         <h2 className="text-lg font-semibold">Items</h2>
         <div className="mt-2">
           {(sub.items || []).map((it, idx) => (
-            <div key={it.itemId || idx} style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+            <div
+              key={it.itemId || idx}
+              style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}
+            >
               <div className="row">
-                <div className="font-medium">{idx + 1}. {it.label}</div>
+                <div className="font-medium">
+                  {idx + 1}. {it.label}
+                </div>
                 <div className={badgeFor(it.result)}>{(it.result || "NA").toUpperCase()}</div>
               </div>
 
+              {/* Evidence */}
               <div className="grid-3 items-evidence mt-2">
                 <div className="ev-photo">
                   <div className="muted">Photo</div>
@@ -515,9 +665,17 @@ export default function InspectionSubmissionView() {
                     <img
                       src={it.evidence.photoUrl}
                       alt="evidence"
-                      style={{ maxHeight: 96, width: "auto", objectFit: "contain", borderRadius: 8, border: "1px solid var(--border)" }}
+                      style={{
+                        maxHeight: 96,
+                        width: "auto",
+                        objectFit: "contain",
+                        borderRadius: 8,
+                        border: "1px solid var(--border)",
+                      }}
                     />
-                  ) : <div>—</div>}
+                  ) : (
+                    <div>—</div>
+                  )}
                 </div>
                 <div className="ev-scan">
                   <div className="muted">Scan Ref</div>
@@ -559,9 +717,17 @@ export default function InspectionSubmissionView() {
               <img
                 src={sub.signoff.signatureDataUrl}
                 alt="signature"
-                style={{ maxHeight: 96, width: "auto", objectFit: "contain", borderRadius: 8, border: "1px solid var(--border)" }}
+                style={{
+                  maxHeight: 96,
+                  width: "auto",
+                  objectFit: "contain",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                }}
               />
-            ) : <div>—</div>}
+            ) : (
+              <div>—</div>
+            )}
           </div>
           <div>
             <div className="muted">Name</div>
@@ -569,13 +735,17 @@ export default function InspectionSubmissionView() {
           </div>
           <div>
             <div className="muted">Date</div>
-            <div>{sub.signoff?.date ? new Date(sub.signoff.date).toLocaleDateString() : "—"}</div>
+            <div>
+              {sub.signoff?.date ? new Date(sub.signoff.date).toLocaleDateString() : "—"}
+            </div>
           </div>
         </div>
         {String(sub.overallResult || "").toLowerCase() === "fail" && (
           <div className="mt-2">
             <div className="muted">Follow-up inspection date</div>
-            <div>{sub.followUpDate ? new Date(sub.followUpDate).toLocaleDateString() : "—"}</div>
+            <div>
+              {sub.followUpDate ? new Date(sub.followUpDate).toLocaleDateString() : "—"}
+            </div>
           </div>
         )}
       </div>
@@ -584,20 +754,26 @@ export default function InspectionSubmissionView() {
       <div className="card mt-3">
         <h2 className="text-lg font-semibold">Project Manager Comments</h2>
 
+        {/* Existing comments */}
         {comments.length ? (
           <div className="mt-2">
             {comments.map((c, i) => (
               <div key={i} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
                 <div>
                   <b>{c.by?.name || "Manager"}</b>{" "}
-                  <small className="muted">({c.at ? new Date(c.at).toLocaleString() : "—"})</small>
+                  <small className="muted">
+                    ({c.at ? new Date(c.at).toLocaleString() : "—"})
+                  </small>
                 </div>
                 <div className="mt-1">{c.comment}</div>
               </div>
             ))}
           </div>
-        ) : <div className="muted mt-1">No comments yet.</div>}
+        ) : (
+          <div className="muted mt-1">No comments yet.</div>
+        )}
 
+        {/* Add new (screen only) */}
         <div className="mt-3 no-print">
           {commentErr ? <div className="text-red-600 mb-2">{commentErr}</div> : null}
           <textarea
@@ -610,7 +786,9 @@ export default function InspectionSubmissionView() {
             style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}
           />
           <div className="row mt-2">
-            <Link to="/inspections" className="muted">Back to list</Link>
+            <Link to="/inspections" className="muted">
+              Back to list
+            </Link>
             <button
               className="btn-primary"
               onClick={saveComment}
@@ -623,8 +801,11 @@ export default function InspectionSubmissionView() {
         </div>
       </div>
 
+      {/* Footer */}
       <div className="mt-6 row" style={{ fontSize: 12 }}>
-        <div>© {new Date().getFullYear()} {orgName || ""}</div>
+        <div>
+          © {new Date().getFullYear()} {orgName || ""}
+        </div>
         <div className="right">Inspection powered by MOAT SmartOps</div>
       </div>
     </div>
@@ -648,7 +829,7 @@ function niceCase(s) {
 
 /** Try to resolve org branding from window, token, or API (best-effort, safe failures). */
 async function resolveOrgBranding() {
-  // Prefer canonical endpoint first
+  // ✅ Prefer canonical endpoint first (returns stable logoUrl)
   try {
     const { data } = await api.get("/org", { params: { _ts: Date.now() } });
     const { name, logo } = extractOrgFields(data || {});
@@ -674,9 +855,13 @@ async function resolveOrgBranding() {
     const tok = localStorage.getItem("token");
     if (tok && tok.split(".").length === 3) {
       const payload = JSON.parse(atob(tok.split(".")[1] || ""));
-      const { name, logo } = extractOrgFields(payload?.org || payload?.organization || payload || {});
+      const { name, logo } = extractOrgFields(
+        payload?.org || payload?.organization || payload || {}
+      );
       if (name || logo) return { name, logo, bust: payload?.updatedAt || "" };
-      if (payload?.orgName && typeof payload.orgName === "string") return { name: payload.orgName, logo: "", bust: payload?.updatedAt || "" };
+      if (payload?.orgName && typeof payload.orgName === "string") {
+        return { name: payload.orgName, logo: "", bust: payload?.updatedAt || "" };
+      }
     }
   } catch {}
 
@@ -694,21 +879,42 @@ async function resolveOrgBranding() {
 }
 
 function extractOrgFields(obj) {
+  // ✅ handle nested shapes: { org: {...} } or { organization: {...} }
   const o =
     obj && typeof obj === "object" && obj.org && typeof obj.org === "object"
       ? obj.org
-      : obj && typeof obj === "object" && obj.organization && typeof obj.organization === "object"
+      : obj &&
+        typeof obj === "object" &&
+        obj.organization &&
+        typeof obj.organization === "object"
       ? obj.organization
       : obj;
 
   if (!o || typeof o !== "object") return { name: "", logo: "" };
 
-  const name = pickFirst(o.name, o.orgName, o.company, o.displayName, o.settings?.name, o.profile?.name);
-  const logo = pickFirst(o.logoUrl, o.logo, o.branding?.logoUrl, o.branding?.logo, o.assets?.logo, o.images?.logo, o.settings?.logoUrl);
+  const name = pickFirst(
+    o.name,
+    o.orgName,
+    o.company,
+    o.displayName,
+    o.settings?.name,
+    o.profile?.name
+  );
+  const logo = pickFirst(
+    o.logoUrl,
+    o.logo,
+    o.branding?.logoUrl,
+    o.branding?.logo,
+    o.assets?.logo,
+    o.images?.logo,
+    o.settings?.logoUrl
+  );
   return { name: stringOrEmpty(name), logo: stringOrEmpty(logo) };
 }
 function pickFirst(...vals) {
-  for (const v of vals) if (typeof v === "string" && v.trim()) return v;
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v;
+  }
   return "";
 }
 function stringOrEmpty(v) {
@@ -717,7 +923,7 @@ function stringOrEmpty(v) {
 
 /* ---- Minimal KMZ packer (store-only ZIP) ---- */
 function crc32(buf) {
-  let c = ~0 >>> 0;
+  let c = (~0) >>> 0;
   for (let i = 0; i < buf.length; i++) {
     c ^= buf[i];
     for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
@@ -759,7 +965,7 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const sigEnd = strToUint8("PK\u0005\u0006");
   const version = u16(20);
   const flags = u16(0);
-  const methodStore = u16(0);
+  const methodStore = u16(0); // no compression
   const time = u16(0),
     date = u16(0);
   const crc = u32(crc32(data));
@@ -770,7 +976,7 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const diskNum = u16(0);
   const intAttr = u16(0);
   const extAttr = u32(0);
-  const relOffset = u32(0);
+  const relOffset = u32(0); // always 0 (single file)
 
   const localHeader = concatU8([
     sigLocal,
@@ -819,7 +1025,9 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   return new Blob([zip], { type: "application/vnd.google-earth.kmz" });
 }
 
+/* ===== Export helpers (KMZ backend, KMZ fallback) ===== */
 async function exportKmz(realId, submission, names) {
+  // 1) Try backend KMZ first
   try {
     const res = await api.get(`/inspections/${realId}/export.kmz`, { responseType: "blob" });
     const blob =
@@ -835,7 +1043,9 @@ async function exportKmz(realId, submission, names) {
     a.remove();
     URL.revokeObjectURL(url);
     return;
-  } catch {}
+  } catch {
+    // 2) Fallback to client-built KMZ
+  }
 
   const kml = buildKmlFromSubmission(submission, names || {});
   const blob = makeKmz(kml, "inspection.kml");
@@ -864,7 +1074,13 @@ function buildKmlFromSubmission(s, names = {}) {
 
   const subjectTypeRaw = String(s?.subjectAtRun?.type || "none");
   const subjectNice =
-    subjectTypeRaw === "none" ? "General" : subjectTypeRaw === "vehicle" ? "Vehicle" : subjectTypeRaw === "asset" ? "Asset" : "Performance";
+    subjectTypeRaw === "none"
+      ? "General"
+      : subjectTypeRaw === "vehicle"
+      ? "Vehicle"
+      : subjectTypeRaw === "asset"
+      ? "Asset"
+      : "Performance";
   const subjectLabel = s?.subjectAtRun?.label || "";
 
   const inspector =
@@ -872,21 +1088,34 @@ function buildKmlFromSubmission(s, names = {}) {
 
   const items = Array.isArray(s?.items) ? s.items : [];
   const answers = Array.isArray(s?.answers) ? s.answers : items;
-  const anyFail = answers.some((a) => String(a?.result || "").toLowerCase() === "fail" || a?.pass === false);
+  const anyFail = answers.some(
+    (a) => String(a?.result || "").toLowerCase() === "fail" || a?.pass === false
+  );
 
   let status = String(s?.overallResult || "").toLowerCase();
   if (!status || status === "na") status = anyFail ? "fail" : "pass";
   const outcomeUpper = status.toUpperCase();
 
   const scope = s?.scopeAtRun || s?.scope?.type || "";
-  const descriptionText = s?.subjectAtRun?.description || s?.description || s?.summary || s?.note || s?.managerNote || "";
+
+  const descriptionText =
+    s?.subjectAtRun?.description ||
+    s?.description ||
+    s?.summary ||
+    s?.note ||
+    s?.managerNote ||
+    "";
 
   const nameEsc = escapeXml(title);
   const projEsc = escapeXml(String(proj || ""));
   const taskEsc = escapeXml(String(task || ""));
   const mileEsc = escapeXml(String(milestone || ""));
+  const subjectTypeEsc = escapeXml(subjectTypeRaw);
+  const subjectNiceEsc = escapeXml(subjectNice);
+  const subjectLabelEsc = escapeXml(subjectLabel);
   const inspectorEsc = escapeXml(inspector);
   const whenEsc = escapeXml(whenHuman);
+  const outcomeEsc = escapeXml(status);
   const scopeEsc = escapeXml(String(scope || ""));
   const descEsc = escapeXml(descriptionText);
 
@@ -898,6 +1127,7 @@ function buildKmlFromSubmission(s, names = {}) {
           <tr><td><b>Project</b></td><td>${projEsc || "—"}</td></tr>
           <tr><td><b>Task</b></td><td>${taskEsc || "—"}</td></tr>
           <tr><td><b>Milestone</b></td><td>${mileEsc || "—"}</td></tr>
+          <tr><td><b>Subject</b></td><td>${subjectNiceEsc} – ${subjectLabelEsc || "—"}</td></tr>
           <tr><td><b>Outcome</b></td><td>${outcomeUpper}</td></tr>
           <tr><td><b>Date run</b></td><td>${whenEsc || "—"}</td></tr>
           <tr><td><b>Inspector</b></td><td>${inspectorEsc || "—"}</td></tr>
@@ -912,6 +1142,19 @@ function buildKmlFromSubmission(s, names = {}) {
     <Placemark>
       <name>${nameEsc}</name>
       <description>${descHtml}</description>
+      <ExtendedData>
+        <Data name="title"><value>${nameEsc}</value></Data>
+        <Data name="project"><value>${projEsc}</value></Data>
+        <Data name="task"><value>${taskEsc}</value></Data>
+        <Data name="milestone"><value>${mileEsc}</value></Data>
+        <Data name="subjectType"><value>${subjectTypeEsc}</value></Data>
+        <Data name="subjectLabel"><value>${subjectLabelEsc}</value></Data>
+        <Data name="description"><value>${descEsc}</value></Data>
+        <Data name="inspector"><value>${inspectorEsc}</value></Data>
+        <Data name="dateRun"><value>${whenEsc}</value></Data>
+        <Data name="outcome"><value>${outcomeEsc}</value></Data>
+        <Data name="scope"><value>${scopeEsc}</value></Data>
+      </ExtendedData>
       ${whenIso ? `<TimeStamp><when>${whenIso}</when></TimeStamp>` : ""}
       <Point><coordinates>${loc.lng},${loc.lat},0</coordinates></Point>
     </Placemark>`
