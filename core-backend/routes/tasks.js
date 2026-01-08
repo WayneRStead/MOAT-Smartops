@@ -53,7 +53,8 @@ function normalizeStatus(s) {
   if (s == null) return undefined;
   const v = String(s).trim().toLowerCase();
   if (["done", "finish", "finished", "complete", "completed"].includes(v)) return "completed";
-  if (["in progress", "in-progress", "inprogress", "started", "start", "resume", "resumed"].includes(v)) return "in-progress";
+  if (["in progress", "in-progress", "inprogress", "started", "start", "resume", "resumed"].includes(v))
+    return "in-progress";
   if (["pause", "paused"].includes(v)) return "paused";
   if (["open", "todo", "to-do", "pending"].includes(v)) return "pending";
   return v;
@@ -163,11 +164,11 @@ function normalizeMode(mode) {
   if (v === "restricted") return "assignees+groups";
   return v;
 }
+
 function buildVisibilityFilter(req) {
   if (isAdmin(req)) return {};
 
-  const me =
-    OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+  const me = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
   const myGroups = (req.myGroupIds || []).map((g) => OID(g)).filter(Boolean);
 
   return {
@@ -175,17 +176,17 @@ function buildVisibilityFilter(req) {
       { visibilityMode: { $exists: false } },
       { visibilityMode: "org" },
 
-      { visibilityMode: "assignees",        assignedUserIds: me },
+      { visibilityMode: "assignees", assignedUserIds: me },
       { visibilityMode: "assignees+groups", assignedUserIds: me },
 
-      { visibilityMode: "assignees",        assignedTo: me }, // legacy
+      { visibilityMode: "assignees", assignedTo: me }, // legacy
       { visibilityMode: "assignees+groups", assignedTo: me },
 
       ...(myGroups.length
         ? [
-            { visibilityMode: "groups",           assignedGroupIds: { $in: myGroups } },
+            { visibilityMode: "groups", assignedGroupIds: { $in: myGroups } },
             { visibilityMode: "assignees+groups", assignedGroupIds: { $in: myGroups } },
-            { visibilityMode: "groups",           groupId: { $in: myGroups } }, // legacy single group
+            { visibilityMode: "groups", groupId: { $in: myGroups } }, // legacy single group
             { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
           ]
         : []),
@@ -241,6 +242,19 @@ function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
   return out;
 }
 
+/**
+ * ✅ CRITICAL:
+ * Your Task model pre("validate") enforces assignee <-> assignedTo[0] mirroring.
+ * If routes update assignedTo without assignee, the model can revert assignedTo back.
+ * This helper sets assignedTo + assignedUserIds + assignee together, so saves stick.
+ */
+function applyAssignees(taskDoc, objIdArray) {
+  const arr = Array.isArray(objIdArray) ? objIdArray.filter(Boolean) : [];
+  taskDoc.assignedTo = [...arr];        // legacy
+  taskDoc.assignedUserIds = [...arr];   // new
+  taskDoc.assignee = arr[0] || null;    // singular mirror (model depends on this)
+}
+
 /* ---------------- Geofence helpers ---------------- */
 
 function haversineMeters(a, b) {
@@ -248,7 +262,8 @@ function haversineMeters(a, b) {
   const R = 6371000;
   const dLat = toRad(b.lat - a.lat);
   const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const lat1 = toRad(a.lat),
+    lat2 = toRad(b.lat);
   const h =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
@@ -257,11 +272,13 @@ function haversineMeters(a, b) {
 function pointInPolygon(point, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0], yi = ring[i][1];
-    const xj = ring[j][0], yj = ring[j][1];
+    const xi = ring[i][0],
+      yi = ring[i][1];
+    const xj = ring[j][0],
+      yj = ring[j][1];
     const intersect =
-      ((yi > point.lat) !== (yj > point.lat)) &&
-      (point.lng < (xj - xi) * (point.lat - yi) / (yj - yi) + xi);
+      yi > point.lat !== yj > point.lat &&
+      point.lng < ((xj - xi) * (point.lat - yi)) / (yj - yi) + xi;
     if (intersect) inside = !inside;
   }
   return inside;
@@ -325,25 +342,39 @@ const memUpload = multer({
 function parseGeoJSONToFences(buf, defaultRadius = 50) {
   const fences = [];
   let gj;
-  try { gj = JSON.parse(buf.toString("utf8")); } catch { return fences; }
+  try {
+    gj = JSON.parse(buf.toString("utf8"));
+  } catch {
+    return fences;
+  }
   function addGeom(geom) {
     if (!geom || !geom.type) return;
     const t = geom.type;
     if (t === "Polygon" && Array.isArray(geom.coordinates) && geom.coordinates.length) {
       const outer = geom.coordinates[0];
       if (Array.isArray(outer) && outer.length >= 3) {
-        fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
+        fences.push({
+          type: "polygon",
+          polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]),
+        });
       }
     } else if (t === "MultiPolygon" && Array.isArray(geom.coordinates)) {
       for (const poly of geom.coordinates) {
         const outer = Array.isArray(poly) && poly.length ? poly[0] : null;
         if (outer && outer.length >= 3) {
-          fences.push({ type: "polygon", polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]) });
+          fences.push({
+            type: "polygon",
+            polygon: outer.map(([lng, lat]) => [Number(lng), Number(lat)]),
+          });
         }
       }
     } else if (t === "Point" && Array.isArray(geom.coordinates) && geom.coordinates.length >= 2) {
       const [lng, lat] = geom.coordinates;
-      fences.push({ type: "circle", center: { lat: Number(lat), lng: Number(lng) }, radius: Number(defaultRadius) });
+      fences.push({
+        type: "circle",
+        center: { lat: Number(lat), lng: Number(lng) },
+        radius: Number(defaultRadius),
+      });
     }
   }
   if (gj.type === "FeatureCollection" && Array.isArray(gj.features)) {
@@ -383,19 +414,13 @@ function parseKMLToFences(text, defaultRadius = 50) {
 /* ---------------------------- LIST ---------------------------- */
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const {
-      q, status, userId, groupId, projectId, tag, priority,
-      dueFrom, dueTo, startFrom, startTo, sort, limit
-    } = req.query;
+    const { q, status, userId, groupId, projectId, tag, priority, dueFrom, dueTo, startFrom, startTo, sort, limit } =
+      req.query;
 
     const base = { ...orgScope(Task, req) };
 
     if (q) {
-      base.$or = [
-        { title: new RegExp(q, "i") },
-        { description: new RegExp(q, "i") },
-        { tags: String(q) },
-      ];
+      base.$or = [{ title: new RegExp(q, "i") }, { description: new RegExp(q, "i") }, { tags: String(q) }];
     }
     if (status) base.status = normalizeStatus(status);
     if (priority) base.priority = String(priority).toLowerCase();
@@ -417,7 +442,7 @@ router.get("/", requireAuth, async (req, res) => {
     if (dueFrom || dueTo) {
       base.dueDate = {
         ...(dueFrom ? { $gte: new Date(dueFrom) } : {}),
-        ...(dueTo   ? { $lte: new Date(dueTo) }   : {}),
+        ...(dueTo ? { $lte: new Date(dueTo) } : {}),
       };
     }
 
@@ -425,7 +450,7 @@ router.get("/", requireAuth, async (req, res) => {
     if (startFrom || startTo) {
       base.startDate = {
         ...(startFrom ? { $gte: new Date(startFrom) } : {}),
-        ...(startTo   ? { $lte: new Date(startTo) }   : {}),
+        ...(startTo ? { $lte: new Date(startTo) } : {}),
       };
     }
 
@@ -435,14 +460,9 @@ router.get("/", requireAuth, async (req, res) => {
 
     // Sorting: default by due; timeline mode sorts by start then due
     const useTimelineSort = sort === "timeline" || !!startFrom || !!startTo;
-    const sortSpec = useTimelineSort
-      ? { startDate: 1, dueAt: 1, dueDate: 1, updatedAt: -1 }
-      : { dueDate: 1, updatedAt: -1 };
+    const sortSpec = useTimelineSort ? { startDate: 1, dueAt: 1, dueDate: 1, updatedAt: -1 } : { dueDate: 1, updatedAt: -1 };
 
-    const rows = await Task.find(filter)
-      .sort(sortSpec)
-      .limit(lim)
-      .lean();
+    const rows = await Task.find(filter).sort(sortSpec).limit(lim).lean();
 
     res.json(rows.map(normalizeOut));
   } catch (e) {
@@ -491,14 +511,10 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
     }
 
     // start date
-    const startDate =
-      body.startDate ? new Date(body.startDate)
-      : body.startAt   ? new Date(body.startAt)
-      : undefined;
+    const startDate = body.startDate ? new Date(body.startDate) : body.startAt ? new Date(body.startAt) : undefined;
 
     // due date aliases
-    const rawDue =
-      body.dueAt ?? body.dueDate ?? body.deadline ?? body.deadlineAt ?? undefined;
+    const rawDue = body.dueAt ?? body.dueDate ?? body.deadline ?? body.deadlineAt ?? undefined;
     const dueDate = rawDue ? new Date(rawDue) : undefined;
 
     // Visibility fields
@@ -516,9 +532,13 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       status: normalizeStatus(body.status) || "pending",
       tags: Array.isArray(body.tags) ? body.tags : [],
 
+      // ✅ keep assignee + assignedTo + assignedUserIds aligned at create
       assignedTo, // legacy
+      assignee: assignedTo[0] || null,
+      assignedUserIds: [...assignedTo],
+
       projectId: OID(body.projectId),
-      groupId:   OID(body.groupId),   // legacy single group
+      groupId: OID(body.groupId), // legacy single group
 
       // timeline fields
       startDate,
@@ -537,9 +557,27 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
 
       estimatedDuration: body.estimatedDuration != null ? Number(body.estimatedDuration) : undefined,
 
-      // New visibility fields
+      // New visibility fields (may overwrite assignedUserIds if provided; that's OK)
       ...visibility,
     });
+
+    // If caller provided assignedUserIds/assignee/etc, enforce alignment once at end
+    // (this ensures model pre-validate does not revert)
+    const createIncoming =
+      Object.prototype.hasOwnProperty.call(body, "assignedUserIds") ? coerceObjectIdArray(body.assignedUserIds)
+      : Object.prototype.hasOwnProperty.call(body, "assignedTo") ? coerceObjectIdArray(body.assignedTo)
+      : (Object.prototype.hasOwnProperty.call(body, "assignee") || Object.prototype.hasOwnProperty.call(body, "assigneeId"))
+        ? (extractId(body.assignee || body.assigneeId) ? [extractId(body.assignee || body.assigneeId)] : [])
+        : null;
+
+    if (createIncoming != null) {
+      applyAssignees(doc, createIncoming);
+    } else {
+      // also align to whatever ended up in visibility if it set assignedUserIds
+      if (Array.isArray(doc.assignedUserIds) && doc.assignedUserIds.length) {
+        applyAssignees(doc, doc.assignedUserIds);
+      }
+    }
 
     // Attach org — refuse to write non-ObjectId tokens like "root"
     if (!ensureOrgOnDoc(Task, doc, req)) {
@@ -568,11 +606,8 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     if (b.status != null) t.status = normalizeStatus(b.status);
 
     // startDate / startAt
-    if (Object.prototype.hasOwnProperty.call(b, "startDate") ||
-        Object.prototype.hasOwnProperty.call(b, "startAt")) {
-      t.startDate = b.startDate ? new Date(b.startDate)
-                 : b.startAt   ? new Date(b.startAt)
-                 : undefined;
+    if (Object.prototype.hasOwnProperty.call(b, "startDate") || Object.prototype.hasOwnProperty.call(b, "startAt")) {
+      t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
     }
 
     // due date aliases: dueAt/dueDate/deadline/deadlineAt
@@ -590,21 +625,19 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
 
     // project/group
     if (b.projectId !== undefined) t.projectId = OID(b.projectId);
-    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId);
+    if (b.groupId !== undefined) t.groupId = OID(b.groupId);
 
-    // assignee/assignedTo
-    if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
-      if (Array.isArray(b.assignedTo)) {
-        t.assignedTo = b.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
-      } // if not an array, ignore to avoid accidental clearing
-    }
-    if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
+    // ✅ assignee updates (single source of truth, keeps model mirrors happy)
+    let incomingAssignees = null;
+
+    if (Object.prototype.hasOwnProperty.call(b, "assignedUserIds")) {
+      incomingAssignees = coerceObjectIdArray(b.assignedUserIds); // allows [] to clear
+    } else if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
+      incomingAssignees = Array.isArray(b.assignedTo) ? coerceObjectIdArray(b.assignedTo) : null;
+    } else if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
       const one = extractId(b.assignee || b.assigneeId);
-      if (one) {
-        t.assignedTo = [one];
-      } else if (b.assignee === null || b.assigneeId === null) {
-        t.assignedTo = [];
-      } // else ignore invalid shape instead of clearing
+      if (one) incomingAssignees = [one];
+      else if (b.assignee === null || b.assigneeId === null) incomingAssignees = [];
     }
 
     if (b.dependentTaskIds !== undefined) {
@@ -628,25 +661,24 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
 
-      if (vis.assignedUserIds != null) {
-        t.assignedUserIds = vis.assignedUserIds;
-
-        // ✅ Legacy mirror: keep assignedTo aligned with assignedUserIds
-        // This is critical because normalizeOut derives `assignee` from assignedTo[0]
-        t.assignedTo = Array.isArray(vis.assignedUserIds) ? [...vis.assignedUserIds] : [];
+      // If visibility provided assignees but no direct assignee fields, treat as incoming assignees
+      if (vis.assignedUserIds != null && incomingAssignees == null) {
+        incomingAssignees = vis.assignedUserIds;
       }
 
       if (vis.assignedGroupIds != null) {
         t.assignedGroupIds = vis.assignedGroupIds;
 
         // ✅ Legacy mirror: keep groupId aligned with assignedGroupIds[0]
-        // (optional but helps old code paths)
-        t.groupId = (Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0])
-          ? vis.assignedGroupIds[0]
-          : undefined;
+        t.groupId = Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
       }
     } catch (err) {
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
+    }
+
+    // ✅ Apply assignees LAST so model pre-validate can't revert
+    if (incomingAssignees != null) {
+      applyAssignees(t, incomingAssignees);
     }
 
     // Ensure org for legacy tasks
@@ -676,9 +708,7 @@ router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), 
     if (b.status != null) t.status = normalizeStatus(b.status);
 
     if (b.startDate != null || b.startAt != null) {
-      t.startDate = b.startDate ? new Date(b.startDate)
-                 : b.startAt   ? new Date(b.startAt)
-                 : undefined;
+      t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
     }
 
     if (b.dueAt != null || b.dueDate != null || b.deadline != null || b.deadlineAt != null) {
@@ -689,20 +719,19 @@ router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), 
     }
 
     if (b.projectId !== undefined) t.projectId = OID(b.projectId);
-    if (b.groupId   !== undefined) t.groupId   = OID(b.groupId);
+    if (b.groupId !== undefined) t.groupId = OID(b.groupId);
 
-    if (b.assignedTo !== undefined) {
-      if (Array.isArray(b.assignedTo)) {
-        t.assignedTo = b.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
-      } // ignore non-array to avoid clearing
-    }
-    if (b.assignee !== undefined || b.assigneeId !== undefined) {
+    // ✅ assignee updates (single source of truth, keeps model mirrors happy)
+    let incomingAssignees = null;
+
+    if (Object.prototype.hasOwnProperty.call(b, "assignedUserIds")) {
+      incomingAssignees = coerceObjectIdArray(b.assignedUserIds); // allows [] to clear
+    } else if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
+      incomingAssignees = Array.isArray(b.assignedTo) ? coerceObjectIdArray(b.assignedTo) : null;
+    } else if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
       const one = extractId(b.assignee || b.assigneeId);
-      if (one) {
-        t.assignedTo = [one];
-      } else if (b.assignee === null || b.assigneeId === null) {
-        t.assignedTo = [];
-      } // else ignore invalid shape
+      if (one) incomingAssignees = [one];
+      else if (b.assignee === null || b.assigneeId === null) incomingAssignees = [];
     }
 
     if (b.dependentTaskIds !== undefined) {
@@ -725,23 +754,24 @@ router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), 
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
 
-      if (vis.assignedUserIds != null) {
-        t.assignedUserIds = vis.assignedUserIds;
-
-        // ✅ Legacy mirror: normalizeOut derives `assignee` from assignedTo[0]
-        t.assignedTo = Array.isArray(vis.assignedUserIds) ? [...vis.assignedUserIds] : [];
+      // If visibility provided assignees but no direct assignee fields, treat as incoming assignees
+      if (vis.assignedUserIds != null && incomingAssignees == null) {
+        incomingAssignees = vis.assignedUserIds;
       }
 
       if (vis.assignedGroupIds != null) {
         t.assignedGroupIds = vis.assignedGroupIds;
 
-        // ✅ Legacy mirror: keep groupId aligned with assignedGroupIds[0] (optional but safe)
-        t.groupId = (Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0])
-          ? vis.assignedGroupIds[0]
-          : undefined;
+        // ✅ Legacy mirror: keep groupId aligned with assignedGroupIds[0]
+        t.groupId = Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
       }
     } catch (err) {
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
+    }
+
+    // ✅ Apply assignees LAST so model pre-validate can't revert
+    if (incomingAssignees != null) {
+      applyAssignees(t, incomingAssignees);
     }
 
     if (!ensureOrgOnDoc(Task, t, req)) {
@@ -786,7 +816,8 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       }
 
       if (t.enforceLocationCheck) {
-        const nLat = Number(lat), nLng = Number(lng);
+        const nLat = Number(lat),
+          nLng = Number(lng);
         if (!Number.isFinite(nLat) || !Number.isFinite(nLng)) {
           return res.status(400).json({ error: "location required" });
         }
@@ -806,10 +837,10 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       }
     }
 
-    const actorId =
-      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    const actorId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
-    const nLat = Number(lat), nLng = Number(lng);
+    const nLat = Number(lat),
+      nLng = Number(lng);
     t.actualDurationLog.push({
       action,
       at: new Date(),
@@ -824,10 +855,7 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     setStatusFromLog(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id)
-      .populate("assignedTo", "name email")
-      .populate("actualDurationLog.userId", "name email")
-      .lean();
+    const fresh = await Task.findById(t._id).populate("assignedTo", "name email").populate("actualDurationLog.userId", "name email").lean();
 
     res.json(normalizeOut(fresh));
   } catch (e) {
@@ -862,10 +890,10 @@ router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin
       msId = oid;
     }
 
-    const editorId =
-      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    const editorId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
-    const nLat = Number(lat), nLng = Number(lng);
+    const nLat = Number(lat),
+      nLng = Number(lng);
 
     t.actualDurationLog.push({
       action,
@@ -883,9 +911,7 @@ router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin
     setStatusFromLog(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id)
-      .populate("actualDurationLog.userId", "name email")
-      .lean();
+    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
 
     res.json(normalizeOut(fresh));
   } catch (e) {
@@ -921,9 +947,11 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
     if (note != null) row.note = String(note);
 
     if (lat != null && lng != null) {
-      const nLat = Number(lat), nLng = Number(lng);
+      const nLat = Number(lat),
+        nLng = Number(lng);
       if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
-        row.lat = nLat; row.lng = nLng;
+        row.lat = nLat;
+        row.lng = nLng;
       }
     }
 
@@ -941,15 +969,12 @@ router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "su
     }
 
     row.editedAt = new Date();
-    row.editedBy =
-      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    row.editedBy = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
     setStatusFromLog(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id)
-      .populate("actualDurationLog.userId", "name email")
-      .lean();
+    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
 
     res.json(normalizeOut(fresh));
   } catch (e) {
@@ -980,9 +1005,7 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
     setStatusFromLog(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id)
-      .populate("actualDurationLog.userId", "name email")
-      .lean();
+    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
 
     res.json(normalizeOut(fresh));
   } catch (e) {
@@ -1001,7 +1024,9 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
 // (legacy) Ensure uploads dir exists: core-backend/uploads/tasks
 const uploadsRoot = path.join(__dirname, "..", "uploads");
 const taskDir = path.join(uploadsRoot, "tasks");
-try { fs.mkdirSync(taskDir, { recursive: true }); } catch {}
+try {
+  fs.mkdirSync(taskDir, { recursive: true });
+} catch {}
 
 function cleanFilename(name) {
   return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
@@ -1066,11 +1091,12 @@ router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (re
     }
 
     const note = String(req.body?.note || "");
-    const lat = req.body?.lat, lng = req.body?.lng;
-    const nLat = Number(lat), nLng = Number(lng);
+    const lat = req.body?.lat,
+      lng = req.body?.lng;
+    const nLat = Number(lat),
+      nLng = Number(lng);
 
-    const userId =
-      OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
     // ✅ Write file bytes to Mongo GridFS
     const fileId = await putToGridFS({
@@ -1100,7 +1126,7 @@ router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (re
       uploadedAt: new Date(),
       note,
 
-      // helpful for cleanup + debugging
+      // helpful for cleanup + debugging (model may ignore these if strict)
       storage: "gridfs",
       fileId,
     });
@@ -1120,9 +1146,7 @@ router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (re
     ensureLogIds(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id)
-      .populate("actualDurationLog.userId", "name email")
-      .lean();
+    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
 
     res.json(normalizeOut(fresh));
   } catch (e) {
@@ -1296,15 +1320,18 @@ router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
       const proj = await Project.findById(t.projectId).lean();
       if (proj) {
         const pf = collectTaskFences(proj);
-        if (pf.length) { fences = pf; source = "project"; } else { source = "none"; }
+        if (pf.length) {
+          fences = pf;
+          source = "project";
+        } else {
+          source = "none";
+        }
       } else {
         source = "none";
       }
     }
 
-    const out = fences.map((f) => (f.type === "polygon" && f.ring)
-      ? { type: "polygon", polygon: f.ring }
-      : f);
+    const out = fences.map((f) => (f.type === "polygon" && f.ring ? { type: "polygon", polygon: f.ring } : f));
 
     res.json({ geoFences: out, source });
   } catch (e) {
