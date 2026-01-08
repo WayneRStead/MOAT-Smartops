@@ -443,6 +443,12 @@ export default function TaskDetail({ id: propId, onClose }) {
       return [];
     };
 
+    const normId = (x) => {
+      if (!x) return x;
+      const id = x._id ?? x.id;
+      return { ...x, _id: id != null ? String(id) : "" };
+    };
+
     (async () => {
       try {
         const [p, u, g] = await Promise.all([
@@ -451,11 +457,10 @@ export default function TaskDetail({ id: propId, onClose }) {
           api.get("/groups",   { params: { limit: 1000 } }),
         ]);
 
-        setProjects(asList(p.data));
-        setUsers(asList(u.data));
-        setGroups(asList(g.data));
+        setProjects(asList(p.data).map(normId).filter(x => x._id));
+        setUsers(asList(u.data).map(normId).filter(x => x._id));
+        setGroups(asList(g.data).map(normId).filter(x => x._id));
       } catch (e) {
-        // keep silent like before, but you can uncomment if needed:
         // console.warn("Lookup load failed:", e?.response?.data || e);
       }
     })();
@@ -1453,7 +1458,7 @@ if (navigator.geolocation) {
               >
                 <option value="">— none —</option>
                 {users.map((u) => (
-                  <option key={u._id} value={u._id}>
+                  <option key={u._id} value={String(u._id)}>
                     {u.name || u.email || u.username || u._id}
                   </option>
                 ))}
