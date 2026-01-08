@@ -443,7 +443,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [subViewErr, setSubViewErr] = useState("");
   const [subViewPreferHtml, setSubViewPreferHtml] = useState(true); // (kept for future)
   const [mgrNoteBySubId, setMgrNoteBySubId] = useState(new Map());
-  const [subViewIframeUrl, setSubViewIframeUrl] = useState("");
+  const [subViewHtml, setSubViewHtml] = useState("");
 
   // Activity
   const [logOpen, setLogOpen] = useState(false);
@@ -2042,25 +2042,28 @@ if (navigator.geolocation) {
   type="button"
   className="px-2 py-1 border rounded"
   onClick={async (ev) => {
-    // HARD STOP: prevent any parent click handler or default behavior
     ev.preventDefault();
     ev.stopPropagation();
 
     const subId = s._id || s.id;
 
-    // Always open modal
+    // open modal immediately with a loading state
     setSubViewErr("");
-    setSubView(s);              // quick placeholder
-    setSubViewIframeUrl("");    // clear iframe fallback
+    setSubView(null);
+    setSubViewIframeUrl("");
+    setSubViewHtml("");
     setSubViewOpen(true);
 
     try {
-      const { data } = await api.get(`/inspections/submissions/${subId}`, {
+      // 1) Try JSON details first
+      const res = await api.get(`/inspections/submissions/${subId}`, {
         headers: { Accept: "application/json" },
         params: { _ts: Date.now() },
       });
 
-      // If it's a valid submission shape, show JSON render
+      const data = res?.data;
+
+      // If it looks like a real submission object, render it
       if (
         data &&
         typeof data === "object" &&
@@ -2070,18 +2073,33 @@ if (navigator.geolocation) {
         return;
       }
 
-      // Otherwise fall back to iframe (still inside modal)
-      setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+      // If backend returned non-object (string/html), fall through to HTML fetch
+      throw new Error("Submission JSON not available.");
     } catch (e) {
-      // ✅ Never open a new tab. Fall back to iframe inside modal.
-      setSubViewErr(
-        e?.response?.data?.error ||
-        e?.message ||
-        "Failed to load submission details."
-      );
-      setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+      // 2) Fallback: fetch HTML and render INSIDE the modal via srcDoc (no new tab)
+      try {
+        const htmlRes = await api.get(`/inspections/submissions/${subId}`, {
+          headers: { Accept: "text/html" },
+          params: { _ts: Date.now() },
+          responseType: "text",
+        });
+
+        const html = typeof htmlRes?.data === "string" ? htmlRes.data : "";
+
+        if (!html.trim()) throw new Error("Empty HTML response.");
+
+        setSubView(null);
+        setSubViewIframeUrl(""); // IMPORTANT: do NOT set src to a URL
+        setSubViewHtml(html);
+      } catch (e2) {
+        setSubViewErr(
+          e2?.response?.data?.error ||
+            e2?.message ||
+            e?.response?.data?.error ||
+            e?.message ||
+            "Failed to load submission details."
+        );
+      }
     }
   }}
 >
@@ -2593,9 +2611,12 @@ if (navigator.geolocation) {
         open={subViewOpen}
         title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
         onClose={() => {
-           setSubViewOpen(false);
-           setSubViewIframeUrl("");
-        }}
+  setSubViewOpen(false);
+  setSubViewIframeUrl("");
+  setSubViewHtml("");
+  setSubView(null);
+  setSubViewErr("");
+}}
         size="xl"
 footer={
   <button
@@ -2616,11 +2637,22 @@ footer={
       >
 {subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
 
-{subViewIframeUrl ? (
+{subViewHtml ? (
+  <div className="w-full">
+    <iframe
+      title="Inspection Submission"
+      srcDoc={subViewHtml}
+      sandbox="allow-forms allow-same-origin allow-scripts"
+      className="w-full border rounded"
+      style={{ height: "70vh" }}
+    />
+  </div>
+) : subViewIframeUrl ? (
   <div className="w-full">
     <iframe
       title="Inspection Submission"
       src={subViewIframeUrl}
+      sandbox="allow-forms allow-same-origin allow-scripts"
       className="w-full border rounded"
       style={{ height: "70vh" }}
     />
