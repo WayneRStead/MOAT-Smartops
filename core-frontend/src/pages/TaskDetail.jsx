@@ -300,71 +300,19 @@ async function fetchManagerNotes(taskId, fallbackFromTask = []) {
 }
 
 /* ============= Small UI bits ============= */
-function Modal({ open, title, onClose, children, footer, size = "lg" }) {
+function Modal({ open, title, onClose, children, footer, size="lg" }) {
   if (!open) return null;
-  const maxW =
-    size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
-
+  const maxW = size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
   return (
-    <div
-      className="fixed inset-0 z-[100] grid place-items-center"
-      onMouseDown={(e) => {
-        // stop any mouse events reaching the page behind
-        e.preventDefault();
-        e.stopPropagation();
-      }}
-      onClick={(e) => {
-        // stop any click events reaching the page behind
-        e.preventDefault();
-        e.stopPropagation();
-      }}
-    >
-      {/* backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onClose?.();
-        }}
-      />
-
-      {/* panel */}
-      <div
-        className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}
-        onMouseDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        }}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        }}
-      >
+    <div className="fixed inset-0 z-[100] grid place-items-center">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}>
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <div className="text-lg font-semibold">{title}</div>
-          <button
-            type="button"
-            className="text-sm underline"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onClose?.();
-            }}
-          >
-            Close
-          </button>
+          <button className="text-sm underline" onClick={onClose}>Close</button>
         </div>
-
-        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">
-          {children}
-        </div>
-
-        {footer && (
-          <div className="px-4 py-3 border-t flex justify-end gap-2">
-            {footer}
-          </div>
-        )}
+        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">{children}</div>
+        {footer && <div className="px-4 py-3 border-t flex justify-end gap-2">{footer}</div>}
       </div>
     </div>
   );
@@ -443,7 +391,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [subViewErr, setSubViewErr] = useState("");
   const [subViewPreferHtml, setSubViewPreferHtml] = useState(true); // (kept for future)
   const [mgrNoteBySubId, setMgrNoteBySubId] = useState(new Map());
-  const [subViewHtml, setSubViewHtml] = useState("");
+  const [subViewIframeUrl, setSubViewIframeUrl] = useState("");
 
   // Activity
   const [logOpen, setLogOpen] = useState(false);
@@ -2041,65 +1989,35 @@ if (navigator.geolocation) {
 <button
   type="button"
   className="px-2 py-1 border rounded"
-  onClick={async (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-
+  onClick={async () => {
     const subId = s._id || s.id;
 
-    // open modal immediately with a loading state
+    // Always open modal
     setSubViewErr("");
-    setSubView(null);
-    setSubViewIframeUrl("");
-    setSubViewHtml("");
+    setSubView(s);              // quick placeholder
+    setSubViewIframeUrl("");    // clear iframe fallback
     setSubViewOpen(true);
 
     try {
-      // 1) Try JSON details first
-      const res = await api.get(`/inspections/submissions/${subId}`, {
+      const { data } = await api.get(`/inspections/submissions/${subId}`, {
         headers: { Accept: "application/json" },
         params: { _ts: Date.now() },
       });
 
-      const data = res?.data;
-
-      // If it looks like a real submission object, render it
-      if (
-        data &&
-        typeof data === "object" &&
-        (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)
-      ) {
+      // If it's a valid submission shape, show JSON render
+      if (data && typeof data === "object" && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
         setSubView(data);
         return;
       }
 
-      // If backend returned non-object (string/html), fall through to HTML fetch
-      throw new Error("Submission JSON not available.");
+      // Otherwise fall back to iframe
+      setSubView(null);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
     } catch (e) {
-      // 2) Fallback: fetch HTML and render INSIDE the modal via srcDoc (no new tab)
-      try {
-        const htmlRes = await api.get(`/inspections/submissions/${subId}`, {
-          headers: { Accept: "text/html" },
-          params: { _ts: Date.now() },
-          responseType: "text",
-        });
-
-        const html = typeof htmlRes?.data === "string" ? htmlRes.data : "";
-
-        if (!html.trim()) throw new Error("Empty HTML response.");
-
-        setSubView(null);
-        setSubViewIframeUrl(""); // IMPORTANT: do NOT set src to a URL
-        setSubViewHtml(html);
-      } catch (e2) {
-        setSubViewErr(
-          e2?.response?.data?.error ||
-            e2?.message ||
-            e?.response?.data?.error ||
-            e?.message ||
-            "Failed to load submission details."
-        );
-      }
+      // ✅ No new tab. Fall back to iframe inside modal.
+      setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
+      setSubView(null);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
     }
   }}
 >
@@ -2611,48 +2529,19 @@ if (navigator.geolocation) {
         open={subViewOpen}
         title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
         onClose={() => {
-  setSubViewOpen(false);
-  setSubViewIframeUrl("");
-  setSubViewHtml("");
-  setSubView(null);
-  setSubViewErr("");
-}}
+           setSubViewOpen(false);
+           setSubViewIframeUrl("");
+        }}
         size="xl"
-footer={
-  <button
-    type="button"
-    className="px-3 py-2 border rounded"
-    onClick={(e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setSubViewOpen(false);
-      setSubViewIframeUrl("");
-      setSubView(null);
-      setSubViewErr("");
-    }}
-  >
-    Close
-  </button>
-}
+        footer={<button className="px-3 py-2 border rounded" onClick={()=>setSubViewOpen(false)}>Close</button>}
       >
 {subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
 
-{subViewHtml ? (
-  <div className="w-full">
-    <iframe
-      title="Inspection Submission"
-      srcDoc={subViewHtml}
-      sandbox="allow-forms allow-same-origin allow-scripts"
-      className="w-full border rounded"
-      style={{ height: "70vh" }}
-    />
-  </div>
-) : subViewIframeUrl ? (
+{subViewIframeUrl ? (
   <div className="w-full">
     <iframe
       title="Inspection Submission"
       src={subViewIframeUrl}
-      sandbox="allow-forms allow-same-origin allow-scripts"
       className="w-full border rounded"
       style={{ height: "70vh" }}
     />
