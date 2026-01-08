@@ -435,6 +435,14 @@ export default function TaskDetail({ id: propId, onClose }) {
 
   /* ---------- load lookups ---------- */
   useEffect(() => {
+    const asList = (data) => {
+      if (Array.isArray(data)) return data;
+      if (Array.isArray(data?.items)) return data.items;
+      if (Array.isArray(data?.rows)) return data.rows;
+      if (Array.isArray(data?.data)) return data.data;
+      return [];
+    };
+
     (async () => {
       try {
         const [p, u, g] = await Promise.all([
@@ -442,12 +450,17 @@ export default function TaskDetail({ id: propId, onClose }) {
           api.get("/users",    { params: { limit: 1000 } }),
           api.get("/groups",   { params: { limit: 1000 } }),
         ]);
-        setProjects(Array.isArray(p.data) ? p.data : []);
-        setUsers(Array.isArray(u.data) ? u.data : []);
-        setGroups(Array.isArray(g.data) ? g.data : []);
-      } catch {}
+
+        setProjects(asList(p.data));
+        setUsers(asList(u.data));
+        setGroups(asList(g.data));
+      } catch (e) {
+        // keep silent like before, but you can uncomment if needed:
+        // console.warn("Lookup load failed:", e?.response?.data || e);
+      }
     })();
   }, []);
+
 // src/pages/TaskDetail.jsx  (Part 2/3) — continue
   /* ---------- fences helpers ---------- */
   function normalizeFencesPayload(data) {
@@ -1356,46 +1369,94 @@ if (navigator.geolocation) {
 
             <label className="text-sm block">
               Group
-              <div className="mt-1">
-                <GroupSelect
-                  value={groupId || null}
-                  onChange={(gid) => {
-                    const gidId = gid ? String(gid._id || gid.id || gid) : "";
-                    setGroupId(gidId);
+              <select
+                className="border p-2 w-full rounded mt-1"
+                value={groupId || ""}
+                onChange={(e) => {
+                  const gid = e.target.value || "";
+                  setGroupId(gid);
 
-                    const patch = {
-                      groupId: gidId || null,
-                      assignedGroupIds: gidId ? [gidId] : [],
-                      // extra compatibility fields (harmless if backend ignores)
-                      group: gidId || null,
-                      groupIds: gidId ? [gidId] : [],
-                    };
+                  // Backend definitely understands groupId (legacy) and assignedGroupIds (new visibility)
+                  const patch = {
+                    groupId: gid ? gid : null,
+                    assignedGroupIds: gid ? [gid] : [],
+                  };
 
-                    optimisticSave(
-                      patch,
-                      () =>
-                        setTask((t) => ({
-                          ...(t || {}),
-                          groupId: gidId || null,
-                          assignedGroupIds: gidId ? [gidId] : [],
-                        }))
-                    );
-                  }}
+                  optimisticSave(
+                    patch,
+                    () =>
+                      setTask((t) => ({
+                        ...(t || {}),
+                        groupId: gid ? gid : null,
+                        assignedGroupIds: gid ? [gid] : [],
+                      }))
+                  );
+                }}
+              >
+                <option value="">— none —</option>
+                {groups.map((g) => (
+                  <option key={g._id} value={g._id}>
+                    {g.name || g.title || g.label || g._id}
+                  </option>
+                ))}
+              </select>
 
-                  placeholder="(optional) assign a group"
-                />
-              </div>
+              {!groups.length && (
+                <div className="text-xs text-amber-700 mt-1">
+                  No groups loaded (check /groups response shape / permissions).
+                </div>
+              )}
             </label>
 
             <label className="text-sm block">
               Assignee
               <select
                 className="border p-2 w-full rounded mt-1"
-                value={assignee}
-                onChange={async (e) => { const v = e.target.value; setAssignee(v); await saveAssigneeOnce(v); }}
+                value={assignee || ""}
+                onChange={(e) => {
+                  const v = e.target.value || "";
+                  setAssignee(v);
+
+                  const current = lastGoodTaskRef.current;
+                  const currentId =
+                    current?.assignedTo?.[0]?._id
+                      ? String(current.assignedTo[0]._id)
+                      : current?.assignedTo?.[0]
+                      ? String(current.assignedTo[0])
+                      : current?.assignee?._id
+                      ? String(current.assignee._id)
+                      : current?.assignee
+                      ? String(current.assignee)
+                      : "";
+
+                  if (String(v) === String(currentId)) return;
+
+                  // Backend PUT/PATCH updates assignedTo (legacy) + will also sync assignedUserIds via sanitizer
+                  const patch = {
+                    assignee: v ? v : null,
+                    assigneeId: v ? v : null,
+                    assignedTo: v ? [v] : [],
+                    assignedUserIds: v ? [v] : [],
+                  };
+
+                  optimisticSave(
+                    patch,
+                    () =>
+                      setTask((t) => ({
+                        ...(t || {}),
+                        assignee: v ? v : null,
+                        assignedTo: v ? [v] : [],
+                        assignedUserIds: v ? [v] : [],
+                      }))
+                  );
+                }}
               >
                 <option value="">— none —</option>
-                {users.map(u => <option key={u._id} value={u._id}>{u.name || u.email || u.username}</option>)}
+                {users.map((u) => (
+                  <option key={u._id} value={u._id}>
+                    {u.name || u.email || u.username || u._id}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
