@@ -2012,12 +2012,12 @@ if (navigator.geolocation) {
 
       // Otherwise fall back to iframe
       setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
     } catch (e) {
       // ✅ No new tab. Fall back to iframe inside modal.
       setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
       setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
     }
   }}
 >

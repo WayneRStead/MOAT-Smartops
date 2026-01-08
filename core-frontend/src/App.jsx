@@ -154,16 +154,20 @@ function HomeRedirect() {
 function AppLayout() {
   const location = useLocation();
   const path = location.pathname || "";
+
+  const qs = new URLSearchParams(location.search);
+  const isEmbed = qs.get("embed") === "1";   // ✅ add this
+
   const isPublicRoute =
     path.startsWith("/public/") ||
     path === "/login" ||
     path === "/signup" ||
     path === "/signin";
 
-  const showChrome = !isPublicRoute && isAuthed() && hasOrgContext();
+  // ✅ prevent chrome in embed mode
+  const showChrome = !isEmbed && !isPublicRoute && isAuthed() && hasOrgContext();
 
   if (!showChrome) {
-    // Bare render (no sidebar) for public auth and pre-scope states
     return (
       <div style={{ minHeight: "100dvh", background: "var(--bg, #f7f7fb)" }}>
         <main style={{ minWidth: 0, padding: 16 }}>
@@ -173,12 +177,11 @@ function AppLayout() {
     );
   }
 
-  // Authenticated + org-scoped shell
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "auto 1fr", // sidebar | content
+        gridTemplateColumns: "auto 1fr",
         minHeight: "100dvh",
         background: "var(--bg, #f7f7fb)",
       }}
