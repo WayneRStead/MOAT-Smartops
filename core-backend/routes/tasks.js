@@ -623,12 +623,28 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
-    // Visibility updates
+    // Visibility updates (and keep legacy assignedTo/groupId in sync)
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
-      if (vis.assignedUserIds != null) t.assignedUserIds = vis.assignedUserIds;
-      if (vis.assignedGroupIds != null) t.assignedGroupIds = vis.assignedGroupIds;
+
+      if (vis.assignedUserIds != null) {
+        t.assignedUserIds = vis.assignedUserIds;
+
+        // ✅ Legacy mirror: keep assignedTo aligned with assignedUserIds
+        // This is critical because normalizeOut derives `assignee` from assignedTo[0]
+        t.assignedTo = Array.isArray(vis.assignedUserIds) ? [...vis.assignedUserIds] : [];
+      }
+
+      if (vis.assignedGroupIds != null) {
+        t.assignedGroupIds = vis.assignedGroupIds;
+
+        // ✅ Legacy mirror: keep groupId aligned with assignedGroupIds[0]
+        // (optional but helps old code paths)
+        t.groupId = (Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0])
+          ? vis.assignedGroupIds[0]
+          : undefined;
+      }
     } catch (err) {
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
     }
@@ -704,11 +720,26 @@ router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), 
       t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
+    // Visibility updates (and keep legacy assignedTo/groupId in sync)
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
-      if (vis.assignedUserIds != null) t.assignedUserIds = vis.assignedUserIds;
-      if (vis.assignedGroupIds != null) t.assignedGroupIds = vis.assignedGroupIds;
+
+      if (vis.assignedUserIds != null) {
+        t.assignedUserIds = vis.assignedUserIds;
+
+        // ✅ Legacy mirror: normalizeOut derives `assignee` from assignedTo[0]
+        t.assignedTo = Array.isArray(vis.assignedUserIds) ? [...vis.assignedUserIds] : [];
+      }
+
+      if (vis.assignedGroupIds != null) {
+        t.assignedGroupIds = vis.assignedGroupIds;
+
+        // ✅ Legacy mirror: keep groupId aligned with assignedGroupIds[0] (optional but safe)
+        t.groupId = (Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0])
+          ? vis.assignedGroupIds[0]
+          : undefined;
+      }
     } catch (err) {
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
     }
