@@ -391,6 +391,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [subViewErr, setSubViewErr] = useState("");
   const [subViewPreferHtml, setSubViewPreferHtml] = useState(true); // (kept for future)
   const [mgrNoteBySubId, setMgrNoteBySubId] = useState(new Map());
+  const [subViewIframeUrl, setSubViewIframeUrl] = useState("");
 
   // Activity
   const [logOpen, setLogOpen] = useState(false);
@@ -1985,38 +1986,43 @@ if (navigator.geolocation) {
                         <td className="border-t p-2">{latV}</td>
                         <td className="border-t p-2">{lngV}</td>
                         <td className="border-t p-2 text-right">
-                          <button
-                            className="px-2 py-1 border rounded"
-                            onClick={async ()=>{
-                              try {
-                                setSubViewErr(""); setSubView(s); // show fallback immediately
-                                setSubViewOpen(true);
+<button
+  type="button"
+  className="px-2 py-1 border rounded"
+  onClick={async () => {
+    const subId = s._id || s.id;
 
-                                const subId = s._id || s.id;
-                                const { data } = await api.get(`/inspections/submissions/${subId}`, {
-                                  headers: { Accept: "application/json" }
-                                });
-                                if (data && typeof data === "object" && data.error) {
-                                  throw new Error(data.error);
-                                }
-                                if (data && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
-                                  setSubView(data);
-                                } else {
-                                  throw new Error("Missing token");
-                                }
-                              } catch (e) {
-                                // Fallback to full Submission View page (like ProjectDetail)
-                                try {
-                                  const subId = s._id || s.id;
-                                  window.open(`/inspections/submissions/${subId}`, "_blank", "noopener,noreferrer");
-                                  setSubViewOpen(false);
-                                } catch {}
-                                setSubViewErr(e?.message || "Failed to load submission details.");
-                              }
-                            }}
-                          >
-                            View
-                          </button>
+    // Always open modal
+    setSubViewErr("");
+    setSubView(s);              // quick placeholder
+    setSubViewIframeUrl("");    // clear iframe fallback
+    setSubViewOpen(true);
+
+    try {
+      const { data } = await api.get(`/inspections/submissions/${subId}`, {
+        headers: { Accept: "application/json" },
+        params: { _ts: Date.now() },
+      });
+
+      // If it's a valid submission shape, show JSON render
+      if (data && typeof data === "object" && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
+        setSubView(data);
+        return;
+      }
+
+      // Otherwise fall back to iframe
+      setSubView(null);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+    } catch (e) {
+      // ✅ No new tab. Fall back to iframe inside modal.
+      setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
+      setSubView(null);
+      setSubViewIframeUrl(`/inspections/submissions/${subId}`);
+    }
+  }}
+>
+  View
+</button>
                         </td>
                       </tr>
                     );
@@ -2522,35 +2528,59 @@ if (navigator.geolocation) {
       <Modal
         open={subViewOpen}
         title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
-        onClose={()=>setSubViewOpen(false)}
+        onClose={() => {
+           setSubViewOpen(false);
+           setSubViewIframeUrl("");
+        }}
         size="xl"
         footer={<button className="px-3 py-2 border rounded" onClick={()=>setSubViewOpen(false)}>Close</button>}
       >
-        {subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
-        {subView ? (
-          <div className="space-y-2 text-sm">
-            <div className="text-gray-600">
-              Submitted: {subView.submittedAt ? new Date(subView.submittedAt).toLocaleString() : "—"}
-              {" • "}
-              Inspector: {usersById.get(String(subView?.actor?.userId || ""))?.name
-                || subView?.actor?.name || subView?.actor?.email || "—"}
-              {" • "}
-              Manager note: {subView?.managerNote || subView?.note || subView?.meta?.managerNote || "—"}
+{subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
+
+{subViewIframeUrl ? (
+  <div className="w-full">
+    <iframe
+      title="Inspection Submission"
+      src={subViewIframeUrl}
+      className="w-full border rounded"
+      style={{ height: "70vh" }}
+    />
+  </div>
+) : subView ? (
+  <div className="space-y-2 text-sm">
+    <div className="text-gray-600">
+      Submitted: {subView.submittedAt ? new Date(subView.submittedAt).toLocaleString() : "—"}
+      {" • "}
+      Inspector: {usersById.get(String(subView?.actor?.userId || ""))?.name
+        || subView?.actor?.name
+        || subView?.actor?.email
+        || "—"}
+      {" • "}
+      Manager note: {subView?.managerNote || subView?.note || subView?.meta?.managerNote || "—"}
+    </div>
+
+    {Array.isArray(subView.answers) && subView.answers.length ? (
+      <div className="space-y-1">
+        {subView.answers.map((a, i) => (
+          <div key={i} className="border rounded p-2">
+            <div className="font-medium">
+              {a?.label || a?.question || `Q${i + 1}`}
             </div>
-            {Array.isArray(subView.answers) && subView.answers.length ? (
-              <div className="space-y-1">
-                {subView.answers.map((a, i)=>(
-                  <div key={i} className="border rounded p-2">
-                    <div className="font-medium">{a?.label || a?.question || `Q${i+1}`}</div>
-                    <div className="text-gray-700 whitespace-pre-wrap">
-                      {typeof a?.value === "string" ? a.value : JSON.stringify(a?.value ?? "", null, 2)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : <div className="text-gray-600">No answers on this submission.</div>}
+            <div className="text-gray-700 whitespace-pre-wrap">
+              {typeof a?.value === "string"
+                ? a.value
+                : JSON.stringify(a?.value ?? "", null, 2)}
+            </div>
           </div>
-        ) : <div className="text-sm text-gray-600">Loading…</div>}
+        ))}
+      </div>
+    ) : (
+      <div className="text-gray-600">No answers on this submission.</div>
+    )}
+  </div>
+) : (
+  <div className="text-sm text-gray-600">Loading…</div>
+)}
       </Modal>
     </div>
   );
