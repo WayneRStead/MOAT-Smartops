@@ -300,19 +300,71 @@ async function fetchManagerNotes(taskId, fallbackFromTask = []) {
 }
 
 /* ============= Small UI bits ============= */
-function Modal({ open, title, onClose, children, footer, size="lg" }) {
+function Modal({ open, title, onClose, children, footer, size = "lg" }) {
   if (!open) return null;
-  const maxW = size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
+  const maxW =
+    size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
+
   return (
-    <div className="fixed inset-0 z-[100] grid place-items-center">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}>
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center"
+      onMouseDown={(e) => {
+        // stop any mouse events reaching the page behind
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      onClick={(e) => {
+        // stop any click events reaching the page behind
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      {/* backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose?.();
+        }}
+      />
+
+      {/* panel */}
+      <div
+        className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <div className="text-lg font-semibold">{title}</div>
-          <button className="text-sm underline" onClick={onClose}>Close</button>
+          <button
+            type="button"
+            className="text-sm underline"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onClose?.();
+            }}
+          >
+            Close
+          </button>
         </div>
-        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">{children}</div>
-        {footer && <div className="px-4 py-3 border-t flex justify-end gap-2">{footer}</div>}
+
+        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">
+          {children}
+        </div>
+
+        {footer && (
+          <div className="px-4 py-3 border-t flex justify-end gap-2">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1989,7 +2041,11 @@ if (navigator.geolocation) {
 <button
   type="button"
   className="px-2 py-1 border rounded"
-  onClick={async () => {
+  onClick={async (ev) => {
+    // HARD STOP: prevent any parent click handler or default behavior
+    ev.preventDefault();
+    ev.stopPropagation();
+
     const subId = s._id || s.id;
 
     // Always open modal
@@ -2005,17 +2061,25 @@ if (navigator.geolocation) {
       });
 
       // If it's a valid submission shape, show JSON render
-      if (data && typeof data === "object" && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
+      if (
+        data &&
+        typeof data === "object" &&
+        (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)
+      ) {
         setSubView(data);
         return;
       }
 
-      // Otherwise fall back to iframe
+      // Otherwise fall back to iframe (still inside modal)
       setSubView(null);
       setSubViewIframeUrl(`/inspections/submissions/${subId}`);
     } catch (e) {
-      // ✅ No new tab. Fall back to iframe inside modal.
-      setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
+      // ✅ Never open a new tab. Fall back to iframe inside modal.
+      setSubViewErr(
+        e?.response?.data?.error ||
+        e?.message ||
+        "Failed to load submission details."
+      );
       setSubView(null);
       setSubViewIframeUrl(`/inspections/submissions/${subId}`);
     }
@@ -2533,7 +2597,22 @@ if (navigator.geolocation) {
            setSubViewIframeUrl("");
         }}
         size="xl"
-        footer={<button className="px-3 py-2 border rounded" onClick={()=>setSubViewOpen(false)}>Close</button>}
+footer={
+  <button
+    type="button"
+    className="px-3 py-2 border rounded"
+    onClick={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setSubViewOpen(false);
+      setSubViewIframeUrl("");
+      setSubView(null);
+      setSubViewErr("");
+    }}
+  >
+    Close
+  </button>
+}
       >
 {subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
 
