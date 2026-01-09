@@ -189,7 +189,9 @@ const pickFirst = (...vals) => {
 };
 
 const normalizeOutcome = (sub) => {
+  // ✅ current schema: overallResult = "pass" | "fail" (sometimes other)
   const raw = pickFirst(
+    sub?.overallResult,
     sub?.outcome,
     sub?.result,
     sub?.status,
@@ -197,18 +199,47 @@ const normalizeOutcome = (sub) => {
     sub?.summary?.outcome,
     sub?.meta?.outcome
   );
+
   if (!raw) return "—";
+
   const s = String(raw).toLowerCase();
   if (["pass", "passed", "ok", "success", "completed"].includes(s)) return "Pass";
   if (["fail", "failed", "ng", "noncompliant", "non-compliant"].includes(s)) return "Fail";
   if (["pending", "inprogress", "in-progress"].includes(s)) return "Pending";
+
   return String(raw);
 };
 
 const inspectorNameFromSub = (sub) => {
-  const who = pickFirst(sub?.inspector, sub?.inspectorUser, sub?.user, sub?.createdBy, sub?.submittedBy, sub?.author);
+  // ✅ current schema: runBy is the person who performed it
+  // fallback: signoff, then older shapes
+  const who = pickFirst(
+    sub?.runBy,
+    sub?.signoff,
+    sub?.inspector,
+    sub?.inspectorUser,
+    sub?.user,
+    sub?.createdBy,
+    sub?.submittedBy,
+    sub?.author
+  );
+
+  if (!who) return "—";
   if (typeof who === "string") return who;
-  if (who && typeof who === "object") return pickFirst(who.name, who.email, who.username, who._id, who.id) || "—";
+
+  if (typeof who === "object") {
+    return (
+      pickFirst(
+        who.name,
+        who.fullName,
+        who.email,
+        who.username,
+        who._id,
+        who.id
+      ) || "—"
+    );
+  }
+
   return "—";
 };
 
@@ -1724,7 +1755,6 @@ export default function ProjectDetail({ id: propId, onClose }) {
                     <th className="p-2 text-left">Form name</th>
                     <th className="p-2 text-left">Outcome</th>
                     <th className="p-2 text-left">Inspector</th>
-                    <th className="p-2 text-left">Task name</th>
                     <th className="p-2 text-right">Action</th>
                   </tr>
                 </thead>
@@ -1734,16 +1764,12 @@ export default function ProjectDetail({ id: propId, onClose }) {
                     const when = submittedAtFromSub(sub);
                     const formTitle = formTitleFromSub(sub);
 
-                    const taskId = pickFirst(sub?.taskId, sub?.scope?.taskId, sub?.meta?.taskId, sub?.task?._id, sub?.task?.id);
-                    const taskName = taskId ? taskNameById.get(String(taskId)) || String(taskId) : "—";
-
                     return (
                       <tr key={sid || JSON.stringify(sub).slice(0, 32)}>
                         <td className="border-t p-2">{when ? new Date(when).toLocaleString() : "—"}</td>
                         <td className="border-t p-2">{formTitle}</td>
                         <td className="border-t p-2">{normalizeOutcome(sub)}</td>
                         <td className="border-t p-2">{inspectorNameFromSub(sub)}</td>
-                        <td className="border-t p-2">{taskName}</td>
                         <td className="border-t p-2 text-right">
                           <button className="px-2 py-1 border rounded text-xs" onClick={() => openSubmissionLightbox(sub)} disabled={!sid}>
                             View
