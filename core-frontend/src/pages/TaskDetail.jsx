@@ -786,15 +786,15 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
   useEffect(() => { loadForms(); loadSubs();   }, [id, projectId]);
-/* ---------- submission field resolver (robust) ---------- */
-function resolveSubmissionFields(s) {
-  // DATE
-  const submittedRaw =
-    s?.submittedAt || s?.createdAt || s?.completedAt || s?.finishedAt || s?.updatedAt || null;
-  const submitted = submittedRaw ? new Date(submittedRaw) : null;
+    /* ---------- submission field resolver (robust) ---------- */
+  function resolveSubmissionFields(s) {
+    // DATE
+    const submittedRaw =
+      s?.submittedAt || s?.createdAt || s?.completedAt || s?.finishedAt || s?.updatedAt || null;
+    const submitted = submittedRaw ? new Date(submittedRaw) : null;
 
-  // INSPECTOR (many shapes)
-  const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
+    // INSPECTOR (many shapes)
+     const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
   const actorObj =
     runBy ||
     s?.actor ||
@@ -810,10 +810,9 @@ function resolveSubmissionFields(s) {
     ""
   );
 
-  const actorFromUsers =
-    actorId && usersById.get(actorId)
-      ? (usersById.get(actorId).name || usersById.get(actorId).email)
-      : "";
+  const actorFromUsers = actorId && usersById.get(actorId)
+    ? (usersById.get(actorId).name || usersById.get(actorId).email)
+    : "";
 
   const inspector =
     actorFromUsers ||
@@ -826,8 +825,8 @@ function resolveSubmissionFields(s) {
     actorId ||
     "—";
 
-  // MANAGER NOTE (common nests)
-  let managerNote = "—";
+    // MANAGER NOTE (common nests)
+     let managerNote = "—";
   if (Array.isArray(s?.managerComments) && s.managerComments.length) {
     const latest = s.managerComments
       .slice()
@@ -843,79 +842,21 @@ function resolveSubmissionFields(s) {
       "—";
   }
 
-  // OUTCOME (prefer explicit overall outcome, else derive from answers)
-  const pickOutcome = (...vals) => {
-    for (const v of vals) {
-      if (v == null) continue;
-      const raw = String(v).trim();
-      if (!raw) continue;
+    // OUTCOME (keep your existing logic, but provide fallback)
+    const answers = Array.isArray(s?.answers) ? s.answers : [];
+    const anyFail = answers.some(a => a?.result === "fail" || a?.pass === false);
+    const outcome = s?.status === "needs-follow-up" ? "NEEDS FOLLOW-UP" : (anyFail ? "FAIL" : "PASS");
 
-      const up = raw.toUpperCase();
+    // FORM TITLE
+    const formTitle =
+      s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
 
-      // normalize common variants
-      if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up)) return "PASS";
-      if (["FAIL", "FAILED", "NOK", "NONCOMPLIANT", "NON-COMPLIANT"].includes(up)) return "FAIL";
-      if (["NEEDS FOLLOW-UP", "NEEDS_FOLLOW_UP", "FOLLOW-UP", "FOLLOW UP", "REQUIRES ACTION"].includes(up)) return "NEEDS FOLLOW-UP";
+    // coords
+    const lat = (s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat ?? null);
+    const lng = (s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng ?? null);
 
-      // if backend already gives something like "needs-follow-up"
-      if (up.replace(/_/g, "-") === "NEEDS-FOLLOW-UP") return "NEEDS FOLLOW-UP";
-    }
-    return "";
-  };
-
-  // 1) Try explicit “overall outcome” fields first (these vary by backend versions)
-  const explicitOutcome = pickOutcome(
-    s?.overallOutcome,
-    s?.outcome,
-    s?.result,
-    s?.finalResult,
-    s?.status,                  // sometimes status is literally PASS/FAIL
-    s?.summary?.outcome,
-    s?.summary?.result,
-    s?.meta?.outcome,
-    s?.meta?.overallOutcome,
-    s?.review?.outcome,
-    s?.review?.result
-  );
-
-  // 2) Otherwise derive from answers (more robust than just a.result === "fail")
-  const answers = Array.isArray(s?.answers) ? s.answers : [];
-  const anyFail = answers.some((a) => {
-    const r = String(a?.result ?? a?.status ?? "").toLowerCase().trim();
-    if (["fail", "failed", "nok", "noncompliant", "non-compliant"].includes(r)) return true;
-
-    // boolean-style fields
-    if (a?.pass === false || a?.passed === false || a?.ok === false) return true;
-
-    // sometimes value is boolean false for checks
-    if (a?.value === false) return true;
-
-    // sometimes value is a string "fail"/"no"
-    const v = typeof a?.value === "string" ? a.value.toLowerCase().trim() : "";
-    if (["fail", "failed", "no", "n", "false"].includes(v)) return true;
-
-    return false;
-  });
-
-  const needsFollowUp =
-    pickOutcome(s?.status) === "NEEDS FOLLOW-UP" ||
-    pickOutcome(s?.overallOutcome) === "NEEDS FOLLOW-UP" ||
-    pickOutcome(s?.outcome) === "NEEDS FOLLOW-UP";
-
-  const outcome =
-    explicitOutcome ||
-    (needsFollowUp ? "NEEDS FOLLOW-UP" : (anyFail ? "FAIL" : "PASS"));
-
-  // FORM TITLE
-  const formTitle =
-    s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
-
-  // coords
-  const lat = (s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat ?? null);
-  const lng = (s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng ?? null);
-
-  return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
-}
+    return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
+  }
 
   /* ---------- geofence ops ---------- */
   const fallbackCircle =
@@ -1987,7 +1928,12 @@ if (navigator.geolocation) {
                   const lat = Number(s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat);
                   const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
                   const when = s.submittedAt ? new Date(s.submittedAt).toLocaleString() : "—";
-                  const { inspector, outcome, formTitle } = resolveSubmissionFields(s);
+                  const answers = Array.isArray(s?.answers) ? s.answers : [];
+                  const anyFail = answers.some(a => a?.result === "fail" || a?.pass === false);
+                  const outcome = s?.status === "needs-follow-up" ? "NEEDS FOLLOW-UP" : (anyFail ? "FAIL" : "PASS");
+                  const formTitle = s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
+                  const inspector = usersById.get(String(s?.actor?.userId || ""))?.name
+                    || s?.actor?.name || s?.actor?.email || "—";
                   const desc = escapeXml(`Date: ${when}\nForm: ${formTitle}\nOutcome: ${outcome}\nInspector: ${inspector}`);
                   return `
 <Placemark>
@@ -2031,11 +1977,7 @@ if (navigator.geolocation) {
                       <tr key={s._id || s.id}>
                         <td className="border-t p-2">{whenText}</td>
                         <td className="border-t p-2">{formTitle}</td>
-                        <td className="border-t p-2">
-                          <span className={`px-2 py-0.5 rounded-full text-xs border ${outcome==="PASS"?"bg-green-50 text-green-700 border-green-200": outcome==="FAIL"?"bg-red-50 text-red-700 border-red-200":"bg-amber-50 text-amber-800 border-amber-200"}`}>
-                            {outcome}
-                          </span>
-                        </td>
+                        <td className="border-t p-2">{normalizeOutcome}</td>
                         <td className="border-t p-2">{inspector}</td>
                         <td className="border-t p-2">{latV}</td>
                         <td className="border-t p-2">{lngV}</td>
@@ -2602,20 +2544,16 @@ if (navigator.geolocation) {
   </div>
 ) : subView ? (
   <div className="space-y-2 text-sm">
-{(() => {
-  const { outcome, inspector, managerNote, submitted } = resolveSubmissionFields(subView);
-  return (
     <div className="text-gray-600">
-      Submitted: {submitted ? submitted.toLocaleString() : "—"}
+      Submitted: {subView.submittedAt ? new Date(subView.submittedAt).toLocaleString() : "—"}
       {" • "}
-      Inspector: {inspector}
+      Inspector: {usersById.get(String(subView?.actor?.userId || ""))?.name
+        || subView?.actor?.name
+        || subView?.actor?.email
+        || "—"}
       {" • "}
-      Outcome: <b>{outcome}</b>
-      {" • "}
-      Manager note: {managerNote}
+      Manager note: {subView?.managerNote || subView?.note || subView?.meta?.managerNote || "—"}
     </div>
-  );
-})()}
 
     {Array.isArray(subView.answers) && subView.answers.length ? (
       <div className="space-y-1">
