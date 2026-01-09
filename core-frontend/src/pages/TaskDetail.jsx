@@ -786,6 +786,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
   useEffect(() => { loadForms(); loadSubs();   }, [id, projectId]);
+
     /* ---------- submission field resolver (robust) ---------- */
   function resolveSubmissionFields(s) {
     // DATE
@@ -842,10 +843,49 @@ export default function TaskDetail({ id: propId, onClose }) {
       "—";
   }
 
-    // OUTCOME (keep your existing logic, but provide fallback)
-    const answers = Array.isArray(s?.answers) ? s.answers : [];
-    const anyFail = answers.some(a => a?.result === "fail" || a?.pass === false);
-    const outcome = s?.status === "needs-follow-up" ? "NEEDS FOLLOW-UP" : (anyFail ? "FAIL" : "PASS");
+// OUTCOME (MUST use overallResult)
+const readStr = (v) => {
+  if (v == null) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  // avoid crashing on objects/arrays
+  try { return String(v).trim(); } catch { return ""; }
+};
+
+const normalizeOverallResult = (v) => {
+  const raw = readStr(v);
+  if (!raw) return "";
+
+  const up = raw.toUpperCase().trim();
+
+  // normalize common variants
+  if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up)) return "PASS";
+  if (["FAIL", "FAILED", "NOK", "NONCOMPLIANT", "NON-COMPLIANT"].includes(up)) return "FAIL";
+  if (
+    ["NEEDS FOLLOW-UP", "NEEDS_FOLLOW_UP", "NEEDS-FOLLOW-UP", "FOLLOW-UP", "FOLLOW UP", "REQUIRES ACTION"].includes(up)
+  ) return "NEEDS FOLLOW-UP";
+
+  // if backend uses "pass"/"fail" lowercased
+  if (up === "PASS") return "PASS";
+  if (up === "FAIL") return "FAIL";
+
+  // last resort: return the raw string (but at least not crash)
+  return raw;
+};
+
+// ✅ This is the field you told me matters
+const overallResultRaw =
+  s?.overallResult ??
+  s?.overall?.overallResult ??
+  s?.summary?.overallResult ??
+  s?.meta?.overallResult ??
+  s?.review?.overallResult ??
+  s?.results?.overallResult ??
+  "";
+
+// IMPORTANT: do NOT default to PASS if missing.
+// If it's missing, show "—" so you don't lie to users.
+const outcome = normalizeOverallResult(overallResultRaw) || "—";
 
     // FORM TITLE
     const formTitle =
@@ -1924,24 +1964,31 @@ if (navigator.geolocation) {
                 });
                 if (!withCoords.length) { setErr("No lat/lng on submissions (in filter window) to export."); return; }
                 const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
-                const placemarks = withCoords.map((s)=>{
-                  const lat = Number(s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat);
-                  const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
-                  const when = s.submittedAt ? new Date(s.submittedAt).toLocaleString() : "—";
-                  const answers = Array.isArray(s?.answers) ? s.answers : [];
-                  const anyFail = answers.some(a => a?.result === "fail" || a?.pass === false);
-                  const outcome = s?.status === "needs-follow-up" ? "NEEDS FOLLOW-UP" : (anyFail ? "FAIL" : "PASS");
-                  const formTitle = s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
-                  const inspector = usersById.get(String(s?.actor?.userId || ""))?.name
-                    || s?.actor?.name || s?.actor?.email || "—";
-                  const desc = escapeXml(`Date: ${when}\nForm: ${formTitle}\nOutcome: ${outcome}\nInspector: ${inspector}`);
-                  return `
+const placemarks = withCoords.map((s) => {
+  try {
+    const lat = Number(s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat);
+    const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "";
+
+    const when = (s?.submittedAt || s?.createdAt)
+      ? new Date(s?.submittedAt || s?.createdAt).toLocaleString()
+      : "—";
+
+    const { outcome, formTitle, inspector } = resolveSubmissionFields(s);
+
+    const desc = escapeXml(`Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`);
+
+    return `
 <Placemark>
   <name>${escapeXml(formTitle)}</name>
   <description>${desc}</description>
   <Point><coordinates>${r6(lng)},${r6(lat)},0</coordinates></Point>
 </Placemark>`;
-                }).join("");
+  } catch (e) {
+    // skip bad row, don't kill export
+    return "";
+  }
+}).join("");
                 const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document><name>${escapeXml(title)}</name>${placemarks}</Document>
