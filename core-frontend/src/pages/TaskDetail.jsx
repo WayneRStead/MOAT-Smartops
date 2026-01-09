@@ -299,86 +299,6 @@ async function fetchManagerNotes(taskId, fallbackFromTask = []) {
   }
 }
 
-/* ---------------- Inspection helpers ---------------- */
-const pickFirst = (...vals) => {
-  for (const v of vals) {
-    if (v === undefined || v === null) continue;
-    if (typeof v === "string" && v.trim() === "") continue;
-    return v;
-  }
-  return "";
-};
-
-const normalizeOutcome = (sub) => {
-  // ✅ current schema: overallResult = "pass" | "fail" (sometimes other)
-  const raw = pickFirst(
-    sub?.overallResult,
-    sub?.outcome,
-    sub?.result,
-    sub?.status,
-    sub?.finalOutcome,
-    sub?.summary?.outcome,
-    sub?.meta?.outcome
-  );
-
-  if (!raw) return "—";
-
-  const s = String(raw).toLowerCase();
-  if (["pass", "passed", "ok", "success", "completed"].includes(s)) return "Pass";
-  if (["fail", "failed", "ng", "noncompliant", "non-compliant"].includes(s)) return "Fail";
-  if (["pending", "inprogress", "in-progress"].includes(s)) return "Pending";
-
-  return String(raw);
-};
-
-const inspectorNameFromSub = (sub) => {
-  // ✅ current schema: runBy is the person who performed it
-  // fallback: signoff, then older shapes
-  const who = pickFirst(
-    sub?.runBy,
-    sub?.signoff,
-    sub?.inspector,
-    sub?.inspectorUser,
-    sub?.user,
-    sub?.createdBy,
-    sub?.submittedBy,
-    sub?.author
-  );
-
-  if (!who) return "—";
-  if (typeof who === "string") return who;
-
-  if (typeof who === "object") {
-    return (
-      pickFirst(
-        who.name,
-        who.fullName,
-        who.email,
-        who.username,
-        who._id,
-        who.id
-      ) || "—"
-    );
-  }
-
-  return "—";
-};
-
-const submittedAtFromSub = (sub) =>
-  pickFirst(sub?.submittedAt, sub?.completedAt, sub?.createdAt, sub?.updatedAt, sub?.at) || "";
-
-const subIdFrom = (sub) => String(pickFirst(sub?._id, sub?.id, sub?.submissionId, sub?.subId) || "");
-
-const formTitleFromSub = (sub) =>
-  pickFirst(
-    sub?.formTitle,
-    sub?.formName,
-    sub?.form?.title,
-    sub?.form?.name,
-    sub?.templateTitle,
-    sub?.template?.title
-  ) || "Form";
-
 /* ============= Small UI bits ============= */
 function Modal({ open, title, onClose, children, footer, size="lg" }) {
   if (!open) return null;
@@ -2057,7 +1977,7 @@ if (navigator.geolocation) {
                       <tr key={s._id || s.id}>
                         <td className="border-t p-2">{whenText}</td>
                         <td className="border-t p-2">{formTitle}</td>
-                        <td className="border-t p-2">{normalizeOutcome(sub)}</td>
+                        <td className="border-t p-2">{outcome}</td>
                         <td className="border-t p-2">{inspector}</td>
                         <td className="border-t p-2">{latV}</td>
                         <td className="border-t p-2">{lngV}</td>
