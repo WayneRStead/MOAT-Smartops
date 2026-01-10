@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, fileUrl } from "../lib/api";
+import SubmittedInspections from "../components/SubmittedInspections";
 
 /* ---------------- time helpers ---------------- */
 function toLocalDateTimeInput(date) {
@@ -1057,8 +1058,13 @@ export default function AssetDetail() {
         )}
       </Card>
 
-      {/* Inspections */}
+            {/* Inspections */}
       <Card title="Inspections">
+        {/* NEW: submitted inspections list + lightbox viewer */}
+        <SubmittedInspections entityType="asset" entityId={id} />
+
+        {/* OPTIONAL: keep your legacy list below for debugging during transition */}
+        {/* 
         {insErr && <div className="text-red-600 text-sm mb-2">{insErr}</div>}
         {insLoading ? (
           <div className="text-sm text-gray-600">Loading inspections…</div>
@@ -1117,6 +1123,7 @@ export default function AssetDetail() {
             })}
           </div>
         )}
+        */}
       </Card>
 
       {/* Schedule (optional) */}
