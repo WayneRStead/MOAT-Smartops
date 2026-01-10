@@ -33,6 +33,8 @@ function UploaderName({ att }) {
   return <span>{by || "Unknown"}</span>;
 }
 
+
+
 /* ------------ inspection subject matching helpers ------------ */
 function sameId(a, b) {
   if (a == null || b == null) return false;
@@ -88,6 +90,73 @@ function isForAsset(ins, asset) {
   const matchByAltId = sameId(altId, asset._id);
 
   return (isAssetType && (matchById || matchByLabel)) || matchByAltId;
+}
+
+/* -------- overallResult helpers -------- */
+const readStr = (v) => {
+  if (v == null) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try { return String(v).trim(); } catch { return ""; }
+};
+
+const normalizeOverallResult = (v) => {
+  const raw = readStr(v);
+  if (!raw) return "";
+  const up = raw.toUpperCase().trim();
+
+  if (["PASS","PASSED","OK","SUCCESS","COMPLIANT"].includes(up)) return "PASS";
+  if (["FAIL","FAILED","NOK","NONCOMPLIANT","NON-COMPLIANT"].includes(up)) return "FAIL";
+  if (["NEEDS FOLLOW-UP","NEEDS_FOLLOW_UP","NEEDS-FOLLOW-UP","FOLLOW-UP","FOLLOW UP","REQUIRES ACTION"].includes(up))
+    return "NEEDS FOLLOW-UP";
+
+  return raw; // keep whatever backend uses
+};
+
+function resolveInspectionRow(s) {
+  // submitted date
+  const submittedRaw = s?.submittedAt || s?.completedAt || s?.createdAt || s?.updatedAt || null;
+  const submitted = submittedRaw ? new Date(submittedRaw) : null;
+
+  // inspector (many shapes)
+  const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
+  const actorObj =
+    runBy ||
+    s?.actor ||
+    (s?.user && typeof s.user === "object" ? s.user : null) ||
+    null;
+
+  const inspector =
+    actorObj?.name ||
+    actorObj?.email ||
+    runBy?.name ||
+    runBy?.email ||
+    s?.userName ||
+    s?.createdByName ||
+    "—";
+
+  // form title
+  const formTitle =
+    s?.form?.title ||
+    s?.formTitle ||
+    s?.templateTitle ||
+    s?.templateName ||
+    s?.title ||
+    "Form";
+
+  // ✅ overallResult (do NOT default to PASS)
+  const overallResultRaw =
+    s?.overallResult ??
+    s?.overall?.overallResult ??
+    s?.summary?.overallResult ??
+    s?.meta?.overallResult ??
+    s?.review?.overallResult ??
+    s?.results?.overallResult ??
+    "";
+
+  const outcome = normalizeOverallResult(overallResultRaw) || "—";
+
+  return { submitted, inspector, formTitle, outcome };
 }
 
 /* ---------------- Leaflet mini map ---------------- */
@@ -240,7 +309,10 @@ export default function AssetDetail() {
   const [inspections, setInspections] = useState([]);
   const [insLoading, setInsLoading] = useState(false);
   const [insErr, setInsErr] = useState("");
-  const [previewInspection, setPreviewInspection] = useState(null);
+const [subViewOpen, setSubViewOpen] = useState(false);
+const [subView, setSubView] = useState(null);
+const [subViewErr, setSubViewErr] = useState("");
+const [subViewIframeUrl, setSubViewIframeUrl] = useState("");
 
   // scanned context from URL (no new hook imports)
   const scannedContext = (() => {
@@ -307,15 +379,21 @@ export default function AssetDetail() {
           ? r.data
           : [];
 
-      const attempts = [
-        { url: "/inspection-submissions", params: { subjectType: "asset", subjectId: id, limit: 400 } },
-        { url: "/inspectionsubmissions", params: { subjectType: "asset", subjectId: id, limit: 400 } },
-        { url: "/inspection-submissions", params: { subject: id, limit: 400 } }, // some APIs accept subject=<id>
-        // Legacy/compat fallbacks:
-        { url: "/inspections", params: { assetId: id, limit: 400 } },
-        { url: "/inspections", params: { entityId: id, entityType: "asset", limit: 400 } },
-        { url: "/inspections", params: { targetId: id, scope: "asset", limit: 400 } },
-      ];
+const attempts = [
+  // ✅ match Task/Project pattern first
+  { url: "/inspections/submissions", params: { subjectType: "asset", subjectId: id, limit: 400 } },
+  { url: "/inspections/submissions", params: { assetId: id, limit: 400 } },
+  { url: "/inspections/submissions", params: { subject: id, limit: 400 } },
+
+  // your earlier variants (keep as fallback)
+  { url: "/inspection-submissions", params: { subjectType: "asset", subjectId: id, limit: 400 } },
+  { url: "/inspectionsubmissions", params: { subjectType: "asset", subjectId: id, limit: 400 } },
+
+  // legacy/compat
+  { url: "/inspections", params: { assetId: id, limit: 400 } },
+  { url: "/inspections", params: { entityId: id, entityType: "asset", limit: 400 } },
+  { url: "/inspections", params: { targetId: id, scope: "asset", limit: 400 } },
+];
 
       let arr = [];
       for (const t of attempts) {
@@ -1058,66 +1136,98 @@ export default function AssetDetail() {
       </Card>
 
       {/* Inspections */}
-      <Card title="Inspections">
-        {insErr && <div className="text-red-600 text-sm mb-2">{insErr}</div>}
-        {insLoading ? (
-          <div className="text-sm text-gray-600">Loading inspections…</div>
-        ) : !inspections.length ? (
-          <div className="text-sm text-gray-600">No inspections for this asset.</div>
-        ) : (
-          <div className="rounded border divide-y">
-            {inspections.map((ins) => {
-              const title =
-                ins.title || ins.templateName || ins.formName || `Inspection ${ins._id ? `#${shortId(ins._id)}` : ""}`;
+      <Card title="Submitted Inspections">
+  {insErr && <div className="text-red-600 text-sm mb-2">{insErr}</div>}
 
-              const who =
-                ins.inspector?.name ||
-                ins.inspector?.email ||
-                ins.by?.name ||
-                ins.by?.email ||
-                ins.user?.name ||
-                ins.user?.email ||
-                ins.inspector ||
-                ins.by ||
-                "—";
+  {insLoading ? (
+    <div className="text-sm text-gray-600">Loading inspections…</div>
+  ) : !inspections.length ? (
+    <div className="text-sm text-gray-600">No inspections for this asset.</div>
+  ) : (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="bg-gray-50">
+            <th className="p-2 text-left">Submitted</th>
+            <th className="p-2 text-left">Form</th>
+            <th className="p-2 text-left">Inspector</th>
+            <th className="p-2 text-left">Overall outcome</th>
+            <th className="p-2 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {inspections.map((s) => {
+            const subId = s._id || s.id;
+            const { submitted, inspector, formTitle, outcome } = resolveInspectionRow(s);
 
-              const whenRaw = ins.submittedAt || ins.completedAt || ins.createdAt;
-              const when = whenRaw ? new Date(whenRaw).toLocaleString() : "—";
+            return (
+              <tr key={subId || `${formTitle}-${submitted?.toISOString?.() || ""}`}>
+                <td className="border-t p-2">
+                  {submitted ? submitted.toLocaleString() : "—"}
+                </td>
+                <td className="border-t p-2">{formTitle}</td>
+                <td className="border-t p-2">{inspector}</td>
+                <td className="border-t p-2">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-xs border ${
+                      outcome === "PASS"
+                        ? "bg-green-50 text-green-700 border-green-200"
+                        : outcome === "FAIL"
+                        ? "bg-red-50 text-red-700 border-red-200"
+                        : outcome === "—"
+                        ? "bg-gray-50 text-gray-700 border-gray-200"
+                        : "bg-amber-50 text-amber-800 border-amber-200"
+                    }`}
+                  >
+                    {outcome}
+                  </span>
+                </td>
+                <td className="border-t p-2 text-right">
+                  <button
+                    type="button"
+                    className="px-2 py-1 border rounded"
+                    onClick={async () => {
+                      // open modal immediately
+                      setSubViewErr("");
+                      setSubView(s);
+                      setSubViewIframeUrl("");
+                      setSubViewOpen(true);
 
-              const status =
-                ins.status || ins.result || (ins.pass === true ? "pass" : ins.pass === false ? "fail" : "—");
+                      if (!subId) return;
 
-              return (
-                <div key={ins._id || `${whenRaw || ""}-${title}`} className="p-2 flex items-center justify-between">
-                  <div className="text-sm min-w-0">
-                    <button
-                      type="button"
-                      className="font-medium underline underline-offset-2 text-left truncate"
-                      title="View inspection"
-                      onClick={() => setPreviewInspection(ins)}
-                    >
-                      {title}
-                    </button>
-                    <div className="text-xs text-gray-600">
-                      {when} • {who} • {status}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="px-2 py-1 border rounded"
-                      onClick={() => setPreviewInspection(ins)}
-                      title="Quick view"
-                    >
-                      View
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
+                      try {
+                        const { data } = await api.get(`/inspections/submissions/${subId}`, {
+                          headers: { Accept: "application/json" },
+                          params: { _ts: Date.now() },
+                        });
+
+                        // show JSON if it looks like a submission
+                        if (data && typeof data === "object" && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
+                          setSubView(data);
+                          return;
+                        }
+
+                        // else iframe fallback
+                        setSubView(null);
+                        setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
+                      } catch (e) {
+                        setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
+                        setSubView(null);
+                        setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
+                      }
+                    }}
+                  >
+                    View
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  )}
+</Card>
 
       {/* Schedule (optional) */}
       {schedEnabled && (
@@ -1184,94 +1294,60 @@ export default function AssetDetail() {
 
       {/* Quick View modal for an inspection */}
       <Modal
-        open={!!previewInspection}
-        onClose={() => setPreviewInspection(null)}
-        title={
-          previewInspection
-            ? previewInspection.title || previewInspection.templateName || previewInspection.formName || "Inspection"
-            : "Inspection"
-        }
-      >
-        {previewInspection ? (
-          <div className="space-y-3">
-            <div className="text-sm text-gray-700">
-              <div>
-                <b>Submitted:</b>{" "}
-                {previewInspection.submittedAt
-                  ? new Date(previewInspection.submittedAt).toLocaleString()
-                  : previewInspection.completedAt
-                  ? new Date(previewInspection.completedAt).toLocaleString()
-                  : previewInspection.createdAt
-                  ? new Date(previewInspection.createdAt).toLocaleString()
-                  : "—"}
+  open={subViewOpen}
+  onClose={() => { setSubViewOpen(false); setSubViewIframeUrl(""); }}
+  title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
+  width={980}
+>
+  {subViewErr && <div className="text-red-600 text-sm mb-2">{subViewErr}</div>}
+
+  {subViewIframeUrl ? (
+    <iframe
+      title="Inspection Submission"
+      src={subViewIframeUrl}
+      className="w-full border rounded"
+      style={{ height: "70vh" }}
+    />
+  ) : subView ? (
+    <div className="space-y-2 text-sm">
+      {(() => {
+        const { submitted, inspector, formTitle, outcome } = resolveInspectionRow(subView);
+        return (
+          <div className="text-gray-600">
+            Submitted: {submitted ? submitted.toLocaleString() : "—"}
+            {" • "}
+            Form: {formTitle}
+            {" • "}
+            Inspector: {inspector}
+            {" • "}
+            Overall: <b>{outcome}</b>
+          </div>
+        );
+      })()}
+
+      {Array.isArray(subView.answers) && subView.answers.length ? (
+        <div className="space-y-1">
+          {subView.answers.map((a, i) => (
+            <div key={i} className="border rounded p-2">
+              <div className="font-medium">
+                {a?.label || a?.question || `Q${i + 1}`}
               </div>
-              <div>
-                <b>By:</b>{" "}
-                {previewInspection.inspector?.name ||
-                  previewInspection.inspector?.email ||
-                  previewInspection.by?.name ||
-                  previewInspection.by?.email ||
-                  previewInspection.user?.name ||
-                  previewInspection.user?.email ||
-                  "—"}
-              </div>
-              <div>
-                <b>Status:</b>{" "}
-                {previewInspection.status ||
-                  previewInspection.result ||
-                  (previewInspection.pass === true
-                    ? "pass"
-                    : previewInspection.pass === false
-                    ? "fail"
-                    : "—")}
+              <div className="text-gray-700 whitespace-pre-wrap">
+                {typeof a?.value === "string"
+                  ? a.value
+                  : JSON.stringify(a?.value ?? a?.answer ?? "", null, 2)}
               </div>
             </div>
-
-            {Array.isArray(previewInspection.answers) && (
-              <div className="border rounded p-2">
-                <div className="font-medium mb-1 text-sm">Answers</div>
-                <div className="grid gap-1">
-                  {previewInspection.answers.map((a, idx) => (
-                    <div key={idx} className="text-sm">
-                      <span className="font-medium">{a?.question || a?.label || `Q${idx + 1}`}:</span>{" "}
-                      <span>{String(a?.answer ?? a?.value ?? "—")}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {previewInspection.sections && Array.isArray(previewInspection.sections) && (
-              <div className="border rounded p-2">
-                <div className="font-medium mb-1 text-sm">Sections</div>
-                <div className="grid gap-2">
-                  {previewInspection.sections.map((sec, i) => (
-                    <div key={i}>
-                      <div className="text-sm font-semibold">{sec.title || `Section ${i + 1}`}</div>
-                      {Array.isArray(sec.items) && (
-                        <div className="ml-3 grid gap-1">
-                          {sec.items.map((it, j) => (
-                            <div key={j} className="text-sm">
-                              <span className="font-medium">{it.label || it.question || `Item ${j + 1}`}:</span>{" "}
-                              <span>{String(it.value ?? it.answer ?? "—")}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {!previewInspection.answers && !previewInspection.sections && (
-              <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto">
-                {JSON.stringify(previewInspection, null, 2)}
-              </pre>
-            )}
-          </div>
-        ) : null}
-      </Modal>
+          ))}
+        </div>
+      ) : (
+        <div className="text-gray-600">No answers on this submission.</div>
+      )}
+    </div>
+  ) : (
+    <div className="text-sm text-gray-600">Loading…</div>
+  )}
+</Modal>
     </div>
   );
 }
