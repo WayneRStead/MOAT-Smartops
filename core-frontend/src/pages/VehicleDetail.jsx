@@ -476,18 +476,33 @@ export default function VehicleDetail() {
   const [inspModalTitle, setInspModalTitle] = useState("");
 
   async function openInspectionLightbox(insp) {
-    try {
-      const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
-      const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
-      setInspModalTitle(insp.title || insp.templateName || "Inspection");
-      setInspModalHtml(String(html));
-      setInspModalOpen(true);
-    } catch {
-      setInspModalTitle("Inspection");
-      setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
-      setInspModalOpen(true);
-    }
+  // If this inspection is derived from logbook fallback, preview notes directly
+  if (insp?._source === "logbook") {
+    setInspModalTitle(insp.title || "Inspection");
+    setInspModalHtml(
+      `<div style="padding:12px">
+        <div style="margin-bottom:8px"><b>Date:</b> ${insp.ts ? new Date(insp.ts).toLocaleString() : "—"}</div>
+        <div style="margin-bottom:8px"><b>Result:</b> ${insp.status || "—"}</div>
+        <div><b>Notes:</b><br/>${String(insp._logbookNotes || "—").replace(/\n/g, "<br/>")}</div>
+      </div>`
+    );
+    setInspModalOpen(true);
+    return;
   }
+
+  // otherwise load the real inspection HTML
+  try {
+    const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
+    const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
+    setInspModalTitle(insp.title || insp.templateName || "Inspection");
+    setInspModalHtml(String(html));
+    setInspModalOpen(true);
+  } catch {
+    setInspModalTitle("Inspection");
+    setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
+    setInspModalOpen(true);
+  }
+}
 
   // ----- Loaders -----
   async function load() {
@@ -672,51 +687,98 @@ export default function VehicleDetail() {
     }
   }
 
-  // REPLACE: loadInspections to quietly try multiple APIs and fall back to logbook 'inspection' entries
-  async function loadInspections() {
-    setInspErr("");
-    setInspInfo("");
+  // REPLACE: loadInspections with proper multi-endpoint attempts + normalization
+async function loadInspections() {
+  setInspErr("");
+  setInspInfo("");
 
-    async function tryGet(url, params) {
-      try {
-        const { data } = await api.get(url, { params });
-        if (Array.isArray(data)) return data;
-        if (Array.isArray(data?.items)) return data.items;
-        return Array.isArray(data?.rows) ? data.rows : data;
-      } catch (e) {
-        if (e?.response?.status === 404) return { _404: true };
-        return { _err: e };
-      }
-    }
-
-    // 1) Try likely endpoints
-    const paramsA = { vehicleId: id, limit: 200 };
-    const paramsB = { subjectType: "vehicle", subjectId: id, limit: 200 };
-
-    let res =
-      (await tryGet("/inspections", paramsA)) ||
-      (await tryGet("/inspection", paramsA)) ||
-      (await tryGet("/inspections", paramsB)) ||
-      (await tryGet("/inspection", paramsB));
-
-    // 2) If all 404 or error, fallback: derive from logbook entries of type 'inspection'
-    if (!Array.isArray(res)) {
-      const fromLogbook = (entries || [])
-        .filter((e) => (e?.type || "").toLowerCase() === "inspection")
-        .map((e) => ({
-          _id: e._id,
-          ts: e.ts || e.date,
-          title: e.title || "Inspection",
-          userId: e.userId || e.user,
-          status: e.status || e.result || (e.notes ? "recorded" : "—"),
-          _source: "logbook",
-        }));
-      setInspections(fromLogbook);
-      return;
-    }
-
-    setInspections(res);
+  // Normalize list response shapes
+  function normalizeList(data) {
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.rows)) return data.rows;
+    if (Array.isArray(data?.results)) return data.results;
+    return null;
   }
+
+  // Normalize inspection objects so the UI always has ts/title/user/status
+  function normalizeInspection(insp) {
+    return {
+      ...insp,
+      _id: insp?._id || insp?.id,
+      ts:
+        insp?.ts ||
+        insp?.performedAt ||
+        insp?.createdAt ||
+        insp?.date ||
+        insp?.submittedAt ||
+        null,
+      title: insp?.title || insp?.templateName || insp?.name || "Inspection",
+      userId: insp?.userId || insp?.user || insp?.performedBy || insp?.createdBy,
+      status: insp?.status || insp?.result || insp?.outcome || insp?.scoreLabel || "—",
+    };
+  }
+
+  const attempts = [
+    { url: "/inspections", params: { vehicleId: id, limit: 200 } },
+    { url: "/inspection", params: { vehicleId: id, limit: 200 } },
+
+    // common “subject” pattern
+    { url: "/inspections", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
+    { url: "/inspection", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
+
+    // common nested patterns
+    { url: `/vehicles/${id}/inspections`, params: { limit: 200 } },
+    { url: `/vehicles/${id}/inspection`, params: { limit: 200 } },
+  ];
+
+  // 1) Try endpoints in order; ONLY stop on a real array
+  let list = null;
+  let lastNon404 = null;
+
+  for (const a of attempts) {
+    try {
+      const { data } = await api.get(a.url, { params: a.params });
+      const normalized = normalizeList(data);
+      if (Array.isArray(normalized)) {
+        list = normalized;
+        break;
+      }
+    } catch (e) {
+      if (e?.response?.status === 404) continue; // keep trying
+      lastNon404 = e; // remember but keep trying others
+    }
+  }
+
+  // 2) If we got inspections from API
+  if (Array.isArray(list)) {
+    setInspections(list.map(normalizeInspection));
+    return;
+  }
+
+  // 3) Fallback: derive from logbook entries of type 'inspection'
+  const fromLogbook = (entries || [])
+    .filter((e) => (String(e?.type || "").toLowerCase() === "inspection") || resolveEntryType(e) === "inspection")
+    .map((e) => {
+      const d = entryDisplay(e);
+      return {
+        _id: e._id,
+        ts: d.ts || e.ts || e.date || null,
+        title: e.title || "Inspection",
+        userId: e.userId || e.user,
+        status: e.status || e.result || (d.notes ? "recorded" : "—"),
+        _source: "logbook",
+        _logbookNotes: d.notes || e.notes || "",
+      };
+    });
+
+  setInspections(fromLogbook);
+
+  // Only show an error if we had a real non-404 failure
+  if (lastNon404) {
+    setInspErr(lastNon404?.response?.data?.error || String(lastNon404));
+  }
+}
 
   /* -------- Trips loader (robust to 404 on /open) -------- */
   async function loadTrips() {
@@ -2972,11 +3034,11 @@ export default function VehicleDetail() {
                       <td className="border-b border-border p-2">{userLabel(insp.userId || insp.user)}</td>
                       <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
-                        {insp._id && (
-                          <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>
-                            View
-                          </Link>
-                        )}
+                       {insp._id && insp._source !== "logbook" && (
+  <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>
+    View
+  </Link>
+)}
                         <button type="button" className="link text-sm underline" onClick={() => openInspectionLightbox(insp)} title="Quick view">
                           view
                         </button>
