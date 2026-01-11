@@ -692,7 +692,6 @@ async function loadInspections() {
   setInspErr("");
   setInspInfo("");
 
-  // Normalize list response shapes
   function normalizeList(data) {
     if (Array.isArray(data)) return data;
     if (Array.isArray(data?.items)) return data.items;
@@ -701,41 +700,78 @@ async function loadInspections() {
     return null;
   }
 
-  // Normalize inspection objects so the UI always has ts/title/user/status
   function normalizeInspection(insp) {
     return {
       ...insp,
       _id: insp?._id || insp?.id,
-      ts:
-        insp?.ts ||
-        insp?.performedAt ||
-        insp?.createdAt ||
-        insp?.date ||
-        insp?.submittedAt ||
-        null,
+      ts: insp?.ts || insp?.performedAt || insp?.createdAt || insp?.date || insp?.submittedAt || null,
       title: insp?.title || insp?.templateName || insp?.name || "Inspection",
       userId: insp?.userId || insp?.user || insp?.performedBy || insp?.createdBy,
       status: insp?.status || insp?.result || insp?.outcome || insp?.scoreLabel || "—",
     };
   }
 
+  // Checks whether an inspection record references THIS vehicle id, across many possible shapes.
+  function matchesVehicle(insp) {
+    const vid = String(id);
+
+    const eq = (v) => (v == null ? false : String(v) === vid);
+
+    // direct/common
+    if (eq(insp.vehicleId) || eq(insp.vehicle_id) || eq(insp.vehicle)) return true;
+
+    // sometimes stored as object
+    if (eq(insp.vehicle?._id) || eq(insp.vehicle?.id)) return true;
+
+    // "subject" patterns
+    if (eq(insp.subjectId) || eq(insp.subject_id)) return true;
+    if (eq(insp.subject?._id) || eq(insp.subject?.id)) return true;
+
+    // subjectType / subjectId combos
+    const st = String(insp.subjectType || insp.subject_type || insp.entityType || insp.entity_type || "").toLowerCase();
+    if (st.includes("vehicle") && (eq(insp.subjectId) || eq(insp.subject_id) || eq(insp.subject?._id) || eq(insp.subject?.id)))
+      return true;
+
+    // nested "meta" / "context" patterns
+    if (eq(insp.meta?.vehicleId) || eq(insp.meta?.vehicle_id)) return true;
+    if (eq(insp.context?.vehicleId) || eq(insp.context?.vehicle_id)) return true;
+
+    // generic refs arrays
+    if (Array.isArray(insp.refs)) {
+      if (insp.refs.some((r) => eq(r) || eq(r?._id) || eq(r?.id))) return true;
+    }
+
+    // last resort: scan shallow values for exact id match (cheap + practical)
+    // (keeps it safe, won’t break anything else)
+    for (const k of ["resourceId", "parentId", "ownerId", "linkedId"]) {
+      if (eq(insp?.[k])) return true;
+    }
+
+    return false;
+  }
+
   const attempts = [
+    // direct list w/ query params
     { url: "/inspections", params: { vehicleId: id, limit: 200 } },
     { url: "/inspection", params: { vehicleId: id, limit: 200 } },
 
-    // common “subject” pattern
+    // subject pattern
     { url: "/inspections", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
     { url: "/inspection", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
 
-    // common nested patterns
+    // nested patterns
     { url: `/vehicles/${id}/inspections`, params: { limit: 200 } },
     { url: `/vehicles/${id}/inspection`, params: { limit: 200 } },
+
+    // alternative common naming
+    { url: "/vehicle-inspections", params: { vehicleId: id, limit: 200 } },
+    { url: "/vehicleInspections", params: { vehicleId: id, limit: 200 } },
   ];
 
-  // 1) Try endpoints in order; ONLY stop on a real array
   let list = null;
   let lastNon404 = null;
 
+  // 1) Try vehicle-filtered endpoints first
   for (const a of attempts) {
     try {
       const { data } = await api.get(a.url, { params: a.params });
@@ -745,18 +781,35 @@ async function loadInspections() {
         break;
       }
     } catch (e) {
-      if (e?.response?.status === 404) continue; // keep trying
-      lastNon404 = e; // remember but keep trying others
+      if (e?.response?.status === 404) continue;
+      lastNon404 = e;
+      continue;
     }
   }
 
-  // 2) If we got inspections from API
+  // 2) If we got something from an endpoint, use it
   if (Array.isArray(list)) {
     setInspections(list.map(normalizeInspection));
     return;
   }
 
-  // 3) Fallback: derive from logbook entries of type 'inspection'
+  // 3) ASSET-STYLE FALLBACK:
+  // Pull a broader inspections list and filter client-side by anything that matches this vehicle id.
+  try {
+    const { data } = await api.get("/inspections", { params: { limit: 500 } });
+    const all = normalizeList(data) || [];
+    const filtered = (all || []).filter(matchesVehicle).map(normalizeInspection);
+
+    if (filtered.length) {
+      setInspections(filtered);
+      return;
+    }
+  } catch (e) {
+    // ignore here, we still have logbook fallback below
+    if (e?.response?.status !== 404) lastNon404 = lastNon404 || e;
+  }
+
+  // 4) Logbook fallback (your existing fallback logic)
   const fromLogbook = (entries || [])
     .filter((e) => (String(e?.type || "").toLowerCase() === "inspection") || resolveEntryType(e) === "inspection")
     .map((e) => {
