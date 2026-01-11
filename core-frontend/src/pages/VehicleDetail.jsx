@@ -475,187 +475,29 @@ export default function VehicleDetail() {
   const [inspModalHtml, setInspModalHtml] = useState("");
   const [inspModalTitle, setInspModalTitle] = useState("");
 
-  function escHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (ch) => {
-    const m = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-    return m[ch] || ch;
-  });
-}
-
-function asDateTime(v) {
-  if (!v) return "—";
-  const d = new Date(v);
-  return Number.isFinite(d.getTime()) ? d.toLocaleString() : String(v);
-}
-
-function asDate(v) {
-  if (!v) return "—";
-  const d = new Date(v);
-  return Number.isFinite(d.getTime()) ? d.toLocaleDateString() : String(v);
-}
-
-function pickImgUrls(obj) {
-  // tries a bunch of likely shapes
-  const urls = [];
-
-  const push = (u) => {
-    if (!u) return;
-    const s = String(u).trim();
-    if (!s) return;
-    urls.push(s);
-  };
-
-  // direct
-  push(obj?.url);
-  push(obj?.src);
-  push(obj?.href);
-
-  // common nested
-  push(obj?.photo?.url);
-  push(obj?.image?.url);
-  push(obj?.attachment?.url);
-
-  // arrays
-  (obj?.photos || obj?.images || obj?.attachments || obj?.files || []).forEach((x) => {
-    if (typeof x === "string") push(x);
-    else push(x?.url || x?.src || x?.href);
-  });
-
-  // if it's a string itself
-  if (typeof obj === "string") push(obj);
-
-  // de-dupe
-  return Array.from(new Set(urls));
-}
-
-function renderItem(it, idx) {
-  const label =
-    it?.label ||
-    it?.title ||
-    it?.question ||
-    it?.name ||
-    `Item ${idx + 1}`;
-
-  const result =
-    it?.overallResult ||
-    it?.result ||
-    it?.status ||
-    it?.answer ||
-    it?.value ||
-    it?.selectedOption ||
-    "";
-
-  const score =
-    it?.score ??
-    it?.points ??
-    (it?.scoring?.score != null ? it.scoring.score : null);
-
-  const comment = it?.comment || it?.notes || it?.remark || "";
-
-  // try to find any images on the item
-  const imgUrls = [
-    ...pickImgUrls(it),
-    ...pickImgUrls(it?.response),
-    ...pickImgUrls(it?.meta),
-  ];
-
-  const imgsHtml = imgUrls.length
-    ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-        ${imgUrls
-          .map(
-            (u) => `
-              <a href="${escHtml(toAbsoluteUrl(u))}" target="_blank" rel="noreferrer">
-                <img src="${escHtml(toAbsoluteUrl(u))}" alt="attachment" style="width:120px;height:80px;object-fit:cover;border-radius:10px;border:1px solid #eee" />
-              </a>
-            `
-          )
-          .join("")}
+  async function openInspectionLightbox(insp) {
+  // If this inspection is derived from logbook fallback, preview notes directly
+  if (insp?._source === "logbook") {
+    setInspModalTitle(insp.title || "Inspection");
+    setInspModalHtml(
+      `<div style="padding:12px">
+        <div style="margin-bottom:8px"><b>Date:</b> ${insp.ts ? new Date(insp.ts).toLocaleString() : "—"}</div>
+        <div style="margin-bottom:8px"><b>Result:</b> ${insp.status || "—"}</div>
+        <div><b>Notes:</b><br/>${String(insp._logbookNotes || "—").replace(/\n/g, "<br/>")}</div>
       </div>`
-    : "";
-
-  return `
-    <div style="border:1px solid #eee;border-radius:14px;padding:12px;margin-bottom:10px">
-      <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap">
-        <div style="font-weight:600">${escHtml(label)}</div>
-        <div style="font-size:12px;color:#555">
-          ${score != null ? `<span><b>Score:</b> ${escHtml(score)}</span>` : ""}
-        </div>
-      </div>
-
-      <div style="margin-top:6px">
-        <div style="font-size:14px">
-          <b>Result:</b> ${escHtml(result || "—")}
-        </div>
-        ${comment ? `<div style="margin-top:6px;color:#444"><b>Comment:</b> ${escHtml(comment)}</div>` : ""}
-        ${imgsHtml}
-      </div>
-    </div>
-  `;
-}
-
-async function openInspectionLightbox(insp) {
-  try {
-    const { data } = await api.get(`/inspections/submissions/${insp._id}`);
-    const sub = data || {};
-
-    const title = sub?.formTitle || insp?.title || "Inspection";
-    const ranAt = asDateTime(sub?.createdAt || sub?.submittedAt || sub?.ts || sub?.updatedAt);
-    const by = sub?.runBy?.name || sub?.runBy?.email || sub?.runBy?.userId || "—";
-
-    const subjectLabel = sub?.subjectAtRun?.label || sub?.subject?.label || "—";
-    const overall = sub?.overallResult || sub?.status || sub?.result || "—";
-    const percent = sub?.scoringSummary?.percentScore;
-    const followUp = sub?.followUpDate ? asDate(sub.followUpDate) : "";
-
-    const links = sub?.links || {};
-    const proj = links?.projectId ? escHtml(projectLabel(links.projectId)) : "";
-    const task = links?.taskId ? escHtml(taskLabel(links.taskId)) : "";
-
-    const items = Array.isArray(sub?.items) ? sub.items : [];
-    const itemsHtml = items.length
-      ? items.map((it, idx) => renderItem(it, idx)).join("")
-      : `<div style="color:#666">No items found on this submission.</div>`;
-
-    const html = `
-      <div style="font-family:ui-sans-serif,system-ui;padding:8px">
-        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
-          <div>
-            <div style="font-size:18px;font-weight:700">${escHtml(title)}</div>
-            <div style="margin-top:4px;color:#555;font-size:13px">
-              <b>Subject:</b> ${escHtml(subjectLabel)}
-            </div>
-          </div>
-
-          <div style="text-align:right;color:#444;font-size:13px">
-            <div><b>Ran:</b> ${escHtml(ranAt)}</div>
-            <div><b>By:</b> ${escHtml(by)}</div>
-          </div>
-        </div>
-
-        <div style="margin-top:10px;border:1px solid #eee;border-radius:14px;padding:10px;background:#fafafa">
-          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:14px">
-            <div><b>Overall:</b> ${escHtml(overall)}</div>
-            ${
-              Number.isFinite(Number(percent))
-                ? `<div><b>Score:</b> ${Number(percent).toFixed(1)}%</div>`
-                : ""
-            }
-            ${followUp ? `<div><b>Follow-up:</b> ${escHtml(followUp)}</div>` : ""}
-            ${proj ? `<div><b>Project:</b> ${proj}</div>` : ""}
-            ${task ? `<div><b>Task:</b> ${task}</div>` : ""}
-          </div>
-        </div>
-
-        <div style="margin-top:12px">
-          ${itemsHtml}
-        </div>
-      </div>
-    `;
-
-    setInspModalTitle(title);
-    setInspModalHtml(html);
+    );
     setInspModalOpen(true);
-  } catch (e) {
+    return;
+  }
+
+  // otherwise load the real inspection HTML
+  try {
+    const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
+    const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
+    setInspModalTitle(insp.title || insp.templateName || "Inspection");
+    setInspModalHtml(String(html));
+    setInspModalOpen(true);
+  } catch {
     setInspModalTitle("Inspection");
     setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
     setInspModalOpen(true);
