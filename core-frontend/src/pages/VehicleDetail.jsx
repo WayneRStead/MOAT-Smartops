@@ -61,6 +61,12 @@ function Modal({ open, title, onClose, children, footer }) {
 function toAbsoluteUrl(u) {
   if (!u) return "";
   if (/^https?:\/\//i.test(u)) return u;
+  const backend = import.meta.env.VITE_API_BASE || import.meta.env.VITE_BACKEND_ORIGIN || "";
+  if (backend) {
+   const b = String(backend).replace(/\/+$/, "");
+   const path = u.startsWith("/") ? u : `/${u}`;
+   return `${b}${path}`;
+ }
   const baseFromApi = (api?.defaults?.baseURL || "").replace(/\/api\/?$/i, "").replace(/\/+$/, "");
   const base =
     baseFromApi ||
@@ -608,8 +614,8 @@ async function openInspectionLightbox(insp) {
     const followUp = sub?.followUpDate ? asDate(sub.followUpDate) : "";
 
     const links = sub?.links || {};
-    const proj = links?.projectId ? escHtml(projectLabel(links.projectId)) : "";
-    const task = links?.taskId ? escHtml(taskLabel(links.taskId)) : "";
+    const proj = links?.projectId ? escHtml(projectLabelFrom(projects, links.projectId)) : "";
+    const task = links?.taskId ? escHtml(taskLabelFrom(tasks, links.taskId)) : "";
 
     const items = Array.isArray(sub?.items) ? sub.items : [];
     const itemsHtml = items.length
@@ -849,6 +855,7 @@ async function openInspectionLightbox(insp) {
 async function loadInspections() {
   setInspErr("");
   setInspInfo("");
+  let lastNon404 = null;
 
   function normalizeList(data) {
     if (Array.isArray(data)) return data;
@@ -895,7 +902,7 @@ async function loadInspections() {
     }
   } catch (e) {
     // if this fails, we keep going to fallback
-    if (e?.response?.status !== 404) setInspErr(e?.response?.data?.error || String(e));
+    if (e?.response?.status !== 404) lastNon404 = e;
   }
 
   // Fallback: your logbook-based inspection entries (keeps your previous behavior)
