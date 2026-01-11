@@ -475,29 +475,65 @@ export default function VehicleDetail() {
   const [inspModalHtml, setInspModalHtml] = useState("");
   const [inspModalTitle, setInspModalTitle] = useState("");
 
-  async function openInspectionLightbox(insp) {
-  // If this inspection is derived from logbook fallback, preview notes directly
-  if (insp?._source === "logbook") {
-    setInspModalTitle(insp.title || "Inspection");
-    setInspModalHtml(
-      `<div style="padding:12px">
-        <div style="margin-bottom:8px"><b>Date:</b> ${insp.ts ? new Date(insp.ts).toLocaleString() : "—"}</div>
-        <div style="margin-bottom:8px"><b>Result:</b> ${insp.status || "—"}</div>
-        <div><b>Notes:</b><br/>${String(insp._logbookNotes || "—").replace(/\n/g, "<br/>")}</div>
-      </div>`
-    );
-    setInspModalOpen(true);
-    return;
-  }
-
-  // otherwise load the real inspection HTML
+async function openInspectionLightbox(insp) {
   try {
-    const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
-    const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
-    setInspModalTitle(insp.title || insp.templateName || "Inspection");
-    setInspModalHtml(String(html));
+    const { data } = await api.get(`/inspections/submissions/${insp._id}`);
+    // backend returns JSON (not HTML) based on what you showed
+    const sub = data || {};
+
+    const title = sub?.formTitle || insp.title || "Inspection";
+    const result = sub?.overallResult || sub?.status || "—";
+    const score = sub?.scoringSummary?.percentScore;
+    const followUp = sub?.followUpDate ? new Date(sub.followUpDate).toLocaleDateString() : "";
+    const ranAt = sub?.createdAt ? new Date(sub.createdAt).toLocaleString() : "";
+    const by = sub?.runBy?.name || sub?.runBy?.email || "—";
+
+    const items = Array.isArray(sub?.items) ? sub.items : [];
+    const rows = items
+      .map((it, idx) => {
+        const q = it?.label || it?.title || it?.question || `Item ${idx + 1}`;
+        const r = it?.result || it?.answer || it?.value || it?.status || "";
+        const c = it?.comment || it?.notes || "";
+        return `<tr>
+          <td style="padding:6px;border-bottom:1px solid #eee;">${String(q)}</td>
+          <td style="padding:6px;border-bottom:1px solid #eee;">${String(r)}</td>
+          <td style="padding:6px;border-bottom:1px solid #eee;">${String(c)}</td>
+        </tr>`;
+      })
+      .join("");
+
+    const html = `
+      <div style="font-family:ui-sans-serif,system-ui;padding:8px">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+          <div><b>Result:</b> ${String(result)}</div>
+          ${Number.isFinite(Number(score)) ? `<div><b>Score:</b> ${Number(score).toFixed(1)}%</div>` : ""}
+          ${followUp ? `<div><b>Follow-up:</b> ${followUp}</div>` : ""}
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;color:#444">
+          <div><b>Ran:</b> ${ranAt || "—"}</div>
+          <div><b>By:</b> ${String(by)}</div>
+        </div>
+        <div style="overflow:auto;border:1px solid #eee;border-radius:10px">
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <thead>
+              <tr style="background:#fafafa">
+                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Item</th>
+                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Result</th>
+                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Comment</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || `<tr><td colspan="3" style="padding:10px">No item details.</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    setInspModalTitle(title);
+    setInspModalHtml(html);
     setInspModalOpen(true);
-  } catch {
+  } catch (e) {
     setInspModalTitle("Inspection");
     setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
     setInspModalOpen(true);
@@ -697,135 +733,63 @@ async function loadInspections() {
     if (Array.isArray(data?.items)) return data.items;
     if (Array.isArray(data?.rows)) return data.rows;
     if (Array.isArray(data?.results)) return data.results;
-    return null;
+    return [];
   }
 
-  function normalizeInspection(insp) {
+  // We normalize to the fields your table expects
+  function normalizeSubmission(sub) {
+    const subj = sub?.subjectAtRun || sub?.subject || {};
     return {
-      ...insp,
-      _id: insp?._id || insp?.id,
-      ts: insp?.ts || insp?.performedAt || insp?.createdAt || insp?.date || insp?.submittedAt || null,
-      title: insp?.title || insp?.templateName || insp?.name || "Inspection",
-      userId: insp?.userId || insp?.user || insp?.performedBy || insp?.createdBy,
-      status: insp?.status || insp?.result || insp?.outcome || insp?.scoreLabel || "—",
+      _id: sub?._id || sub?.id,
+      ts: sub?.createdAt || sub?.updatedAt || sub?.submittedAt || sub?.ts || null,
+      title: sub?.formTitle || sub?.title || sub?.formName || "Inspection",
+      userId: sub?.runBy?.userId || sub?.runBy?._id || sub?.userId || sub?.user,
+      status: sub?.overallResult || sub?.status || sub?.result || "—",
+      subjectType: subj?.type,
+      subjectId: subj?.id,
+      _raw: sub,
+      _source: "submission",
     };
   }
 
-  // Checks whether an inspection record references THIS vehicle id, across many possible shapes.
-  function matchesVehicle(insp) {
+  function isThisVehicle(sub) {
     const vid = String(id);
-
-    const eq = (v) => (v == null ? false : String(v) === vid);
-
-    // direct/common
-    if (eq(insp.vehicleId) || eq(insp.vehicle_id) || eq(insp.vehicle)) return true;
-
-    // sometimes stored as object
-    if (eq(insp.vehicle?._id) || eq(insp.vehicle?.id)) return true;
-
-    // "subject" patterns
-    if (eq(insp.subjectId) || eq(insp.subject_id)) return true;
-    if (eq(insp.subject?._id) || eq(insp.subject?.id)) return true;
-
-    // subjectType / subjectId combos
-    const st = String(insp.subjectType || insp.subject_type || insp.entityType || insp.entity_type || "").toLowerCase();
-    if (st.includes("vehicle") && (eq(insp.subjectId) || eq(insp.subject_id) || eq(insp.subject?._id) || eq(insp.subject?.id)))
-      return true;
-
-    // nested "meta" / "context" patterns
-    if (eq(insp.meta?.vehicleId) || eq(insp.meta?.vehicle_id)) return true;
-    if (eq(insp.context?.vehicleId) || eq(insp.context?.vehicle_id)) return true;
-
-    // generic refs arrays
-    if (Array.isArray(insp.refs)) {
-      if (insp.refs.some((r) => eq(r) || eq(r?._id) || eq(r?.id))) return true;
-    }
-
-    // last resort: scan shallow values for exact id match (cheap + practical)
-    // (keeps it safe, won’t break anything else)
-    for (const k of ["resourceId", "parentId", "ownerId", "linkedId"]) {
-      if (eq(insp?.[k])) return true;
-    }
-
-    return false;
+    const subj = sub?.subjectAtRun || sub?.subject || {};
+    const subjType = String(subj?.type || "").toLowerCase();
+    const subjId = subj?.id != null ? String(subj.id) : "";
+    return subjType === "vehicle" && subjId === vid;
   }
 
-  const attempts = [
-    // direct list w/ query params
-    { url: "/inspections", params: { vehicleId: id, limit: 200 } },
-    { url: "/inspection", params: { vehicleId: id, limit: 200 } },
-
-    // subject pattern
-    { url: "/inspections", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
-    { url: "/inspection", params: { subjectType: "vehicle", subjectId: id, limit: 200 } },
-
-    // nested patterns
-    { url: `/vehicles/${id}/inspections`, params: { limit: 200 } },
-    { url: `/vehicles/${id}/inspection`, params: { limit: 200 } },
-
-    // alternative common naming
-    { url: "/vehicle-inspections", params: { vehicleId: id, limit: 200 } },
-    { url: "/vehicleInspections", params: { vehicleId: id, limit: 200 } },
-  ];
-
-  let list = null;
-  let lastNon404 = null;
-
-  // 1) Try vehicle-filtered endpoints first
-  for (const a of attempts) {
-    try {
-      const { data } = await api.get(a.url, { params: a.params });
-      const normalized = normalizeList(data);
-      if (Array.isArray(normalized)) {
-        list = normalized;
-        break;
-      }
-    } catch (e) {
-      if (e?.response?.status === 404) continue;
-      lastNon404 = e;
-      continue;
-    }
-  }
-
-  // 2) If we got something from an endpoint, use it
-  if (Array.isArray(list)) {
-    setInspections(list.map(normalizeInspection));
-    return;
-  }
-
-  // 3) ASSET-STYLE FALLBACK:
-  // Pull a broader inspections list and filter client-side by anything that matches this vehicle id.
   try {
-    const { data } = await api.get("/inspections", { params: { limit: 500 } });
-    const all = normalizeList(data) || [];
-    const filtered = (all || []).filter(matchesVehicle).map(normalizeInspection);
+    // ✅ Primary: submissions list, then filter client-side
+    // (even if backend doesn’t support query params, this still works)
+    const { data } = await api.get("/inspections/submissions", { params: { limit: 500 } });
+    const all = normalizeList(data);
+    const mine = all.filter(isThisVehicle).map(normalizeSubmission);
 
-    if (filtered.length) {
-      setInspections(filtered);
+    if (mine.length) {
+      setInspections(mine);
       return;
     }
   } catch (e) {
-    // ignore here, we still have logbook fallback below
-    if (e?.response?.status !== 404) lastNon404 = lastNon404 || e;
+    // if this fails, we keep going to fallback
+    if (e?.response?.status !== 404) setInspErr(e?.response?.data?.error || String(e));
   }
 
-  // 4) Logbook fallback (your existing fallback logic)
+  // Fallback: your logbook-based inspection entries (keeps your previous behavior)
   const fromLogbook = (entries || [])
     .filter((e) => (String(e?.type || "").toLowerCase() === "inspection") || resolveEntryType(e) === "inspection")
-    .map((e) => {
-      const d = entryDisplay(e);
-      return {
-        _id: e._id,
-        ts: d.ts || e.ts || e.date || null,
-        title: e.title || "Inspection",
-        userId: e.userId || e.user,
-        status: e.status || e.result || (d.notes ? "recorded" : "—"),
-        _source: "logbook",
-        _logbookNotes: d.notes || e.notes || "",
-      };
-    });
+    .map((e) => ({
+      _id: e._id,
+      ts: e.ts || e.date,
+      title: e.title || "Inspection",
+      userId: e.userId || e.user,
+      status: e.status || e.result || (e.notes ? "recorded" : "—"),
+      _source: "logbook",
+    }));
 
   setInspections(fromLogbook);
+}
 
   // Only show an error if we had a real non-404 failure
   if (lastNon404) {
@@ -3088,9 +3052,9 @@ async function loadInspections() {
                       <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
                        {insp._id && insp._source !== "logbook" && (
-  <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>
-    View
-  </Link>
+<Link className="btn btn-sm mr-2" to={`/inspections/submissions/${insp._id}`}>
+  View
+</Link>
 )}
                         <button type="button" className="link text-sm underline" onClick={() => openInspectionLightbox(insp)} title="Quick view">
                           view
