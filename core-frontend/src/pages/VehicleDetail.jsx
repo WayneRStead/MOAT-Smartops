@@ -476,64 +476,28 @@ export default function VehicleDetail() {
   const [inspModalTitle, setInspModalTitle] = useState("");
 
   async function openInspectionLightbox(insp) {
-  try {
-    const { data } = await api.get(`/inspections/submissions/${insp._id}`);
-    // backend returns JSON (not HTML) based on what you showed
-    const sub = data || {};
-
-    const title = sub?.formTitle || insp.title || "Inspection";
-    const result = sub?.overallResult || sub?.status || "—";
-    const score = sub?.scoringSummary?.percentScore;
-    const followUp = sub?.followUpDate ? new Date(sub.followUpDate).toLocaleDateString() : "";
-    const ranAt = sub?.createdAt ? new Date(sub.createdAt).toLocaleString() : "";
-    const by = sub?.runBy?.name || sub?.runBy?.email || "—";
-
-    const items = Array.isArray(sub?.items) ? sub.items : [];
-    const rows = items
-      .map((it, idx) => {
-        const q = it?.label || it?.title || it?.question || `Item ${idx + 1}`;
-        const r = it?.result || it?.answer || it?.value || it?.status || "";
-        const c = it?.comment || it?.notes || "";
-        return `<tr>
-          <td style="padding:6px;border-bottom:1px solid #eee;">${String(q)}</td>
-          <td style="padding:6px;border-bottom:1px solid #eee;">${String(r)}</td>
-          <td style="padding:6px;border-bottom:1px solid #eee;">${String(c)}</td>
-        </tr>`;
-      })
-      .join("");
-
-    const html = `
-      <div style="font-family:ui-sans-serif,system-ui;padding:8px">
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">
-          <div><b>Result:</b> ${String(result)}</div>
-          ${Number.isFinite(Number(score)) ? `<div><b>Score:</b> ${Number(score).toFixed(1)}%</div>` : ""}
-          ${followUp ? `<div><b>Follow-up:</b> ${followUp}</div>` : ""}
-        </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;color:#444">
-          <div><b>Ran:</b> ${ranAt || "—"}</div>
-          <div><b>By:</b> ${String(by)}</div>
-        </div>
-        <div style="overflow:auto;border:1px solid #eee;border-radius:10px">
-          <table style="width:100%;border-collapse:collapse;font-size:14px">
-            <thead>
-              <tr style="background:#fafafa">
-                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Item</th>
-                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Result</th>
-                <th style="text-align:left;padding:8px;border-bottom:1px solid #eee;">Comment</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rows || `<tr><td colspan="3" style="padding:10px">No item details.</td></tr>`}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
-
-    setInspModalTitle(title);
-    setInspModalHtml(html);
+  // If this inspection is derived from logbook fallback, preview notes directly
+  if (insp?._source === "logbook") {
+    setInspModalTitle(insp.title || "Inspection");
+    setInspModalHtml(
+      `<div style="padding:12px">
+        <div style="margin-bottom:8px"><b>Date:</b> ${insp.ts ? new Date(insp.ts).toLocaleString() : "—"}</div>
+        <div style="margin-bottom:8px"><b>Result:</b> ${insp.status || "—"}</div>
+        <div><b>Notes:</b><br/>${String(insp._logbookNotes || "—").replace(/\n/g, "<br/>")}</div>
+      </div>`
+    );
     setInspModalOpen(true);
-  } catch (e) {
+    return;
+  }
+
+  // otherwise load the real inspection HTML
+  try {
+    const { data } = await api.get(`/inspections/${insp._id}`); // expect { html } or { content }
+    const html = data?.html || data?.content || "<div style='padding:12px'>No preview available.</div>";
+    setInspModalTitle(insp.title || insp.templateName || "Inspection");
+    setInspModalHtml(String(html));
+    setInspModalOpen(true);
+  } catch {
     setInspModalTitle("Inspection");
     setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
     setInspModalOpen(true);
@@ -3051,9 +3015,9 @@ async function loadInspections() {
                       <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
                        {insp._id && insp._source !== "logbook" && (
-<Link className="btn btn-sm mr-2" to={`/inspections/submissions/${insp._id}`}>
-  View
-</Link>
+  <Link className="btn btn-sm mr-2" to={`/inspections/${insp._id}`}>
+    View
+  </Link>
 )}
                         <button type="button" className="link text-sm underline" onClick={() => openInspectionLightbox(insp)} title="Quick view">
                           view
