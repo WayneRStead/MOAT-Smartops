@@ -37,47 +37,24 @@ function HeaderRow({ headers }) {
   );
 }
 
-// ---------------- Inspection Quick View (Modal / "lightbox") ----------------
-const [subViewOpen, setSubViewOpen] = useState(false);
-const [subView, setSubView] = useState(null);
-const [subViewErr, setSubViewErr] = useState("");
-const [subViewIframeUrl, setSubViewIframeUrl] = useState("");
-
-async function openInspectionSubmissionQuickView(submissionRow) {
-  const subId = submissionRow?._id || submissionRow?.id;
-
-  // open immediately (so it feels instant)
-  setSubViewErr("");
-  setSubView(submissionRow || null);
-  setSubViewIframeUrl("");
-  setSubViewOpen(true);
-
-  if (!subId) return;
-
-  try {
-    const { data } = await api.get(`/inspections/submissions/${subId}`, {
-      headers: { Accept: "application/json" },
-      params: { _ts: Date.now() },
-    });
-
-    // If it's a real submission shape, render JSON view
-    if (
-      data &&
-      typeof data === "object" &&
-      (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)
-    ) {
-      setSubView(data);
-      return;
-    }
-
-    // otherwise fallback to iframe
-    setSubView(null);
-    setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
-  } catch (e) {
-    setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
-    setSubView(null);
-    setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
-  }
+/* Tiny modal / lightbox */
+function Modal({ open, title, onClose, children, footer }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.35)" }} onClick={onClose} />
+      <div className="relative z-10 w-full max-w-4xl rounded-2xl border border-border bg-white p-4 shadow-xl">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-lg font-semibold">{title}</div>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="space-y-3">{children}</div>
+        {footer && <div className="mt-4 flex items-center justify-end gap-2">{footer}</div>}
+      </div>
+    </div>
+  );
 }
 
 /* Resolve backend-relative URLs (for thumbnails) */
@@ -622,139 +599,10 @@ function renderItem(it, idx) {
   `;
 }
 
-async function fetchInspectionHtml(submissionId) {
-  // Try "assets-style" server-rendered HTML endpoints first
-  const attempts = [
-    { url: `/inspections/submissions/${submissionId}/render`, mode: "text" },
-    { url: `/inspections/submissions/${submissionId}/html`, mode: "text" },
-    { url: `/inspections/submissions/${submissionId}?format=html`, mode: "text" },
-    { url: `/inspections/submissions/${submissionId}`, mode: "json" }, // fallback JSON detail
-  ];
-
-  let lastErr = null;
-
-  for (const a of attempts) {
-    try {
-      if (a.mode === "text") {
-        const res = await api.get(a.url, { responseType: "text" });
-
-        // axios returns text in res.data
-        const text = res?.data;
-
-        // If backend returns { html: "..." } as JSON accidentally, handle it too
-        if (text && typeof text === "string" && text.trim().startsWith("<")) {
-          return { kind: "html", html: text };
-        }
-        if (text && typeof text === "object") {
-          const html = text?.html || text?.renderedHtml || text?.content;
-          if (typeof html === "string" && html.trim().startsWith("<")) {
-            return { kind: "html", html };
-          }
-        }
-
-        // If this endpoint responds but isn't HTML, keep going
-        continue;
-      }
-
-      // JSON detail
-      const { data } = await api.get(a.url);
-      return { kind: "json", data: data || {} };
-    } catch (e) {
-      lastErr = e;
-      // try next attempt, regardless of 404, like assets does
-      continue;
-    }
-  }
-
-  throw lastErr || new Error("Failed to load inspection submission");
-}
-
 async function openInspectionLightbox(insp) {
-  // 1) If this row came from logbook fallback, open a "recorded inspection" lightbox
-  if (insp?._source === "logbook") {
-    const entry = (entries || []).find((e) => String(e._id) === String(insp._id));
-    const d = entry ? entryDisplay(entry) : null;
-
-    const title = insp?.title || "Inspection";
-    const ranAt = insp?.ts ? asDateTime(insp.ts) : "—";
-    const by = userLabel(insp?.userId || insp?.user);
-
-    const html = `
-      <div style="font-family:ui-sans-serif,system-ui;padding:8px">
-        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
-          <div>
-            <div style="font-size:18px;font-weight:700">${escHtml(title)}</div>
-            <div style="margin-top:4px;color:#555;font-size:13px">
-              <b>Type:</b> Logbook record (no submitted form attached)
-            </div>
-          </div>
-          <div style="text-align:right;color:#444;font-size:13px">
-            <div><b>Recorded:</b> ${escHtml(ranAt)}</div>
-            <div><b>By:</b> ${escHtml(by)}</div>
-          </div>
-        </div>
-
-        <div style="margin-top:10px;border:1px solid #eee;border-radius:14px;padding:10px;background:#fafafa">
-          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:14px">
-            <div><b>Result:</b> ${escHtml(insp?.status || insp?.result || "—")}</div>
-            ${
-              d?.odometer != null && d?.odometer !== ""
-                ? `<div><b>Odometer:</b> ${escHtml(d.odometer)} km</div>`
-                : ""
-            }
-            ${d?.vendor ? `<div><b>Vendor:</b> ${escHtml(d.vendor)}</div>` : ""}
-            ${
-              d?.cost !== "" && d?.cost != null
-                ? `<div><b>Cost:</b> ${escHtml(d.cost)}</div>`
-                : ""
-            }
-          </div>
-        </div>
-
-        <div style="margin-top:12px">
-          ${
-            d?.notes
-              ? `<div style="border:1px solid #eee;border-radius:14px;padding:12px">
-                   <div style="font-weight:600;margin-bottom:6px">Notes</div>
-                   <div style="color:#444;white-space:pre-wrap">${escHtml(d.notes)}</div>
-                 </div>`
-              : `<div style="color:#666">No additional notes recorded.</div>`
-          }
-
-          ${
-            d?.tags?.length
-              ? `<div style="margin-top:10px;color:#555;font-size:13px">
-                   <b>Tags:</b> ${escHtml(d.tags.join(", "))}
-                 </div>`
-              : ""
-          }
-        </div>
-      </div>
-    `;
-
-    setInspModalTitle(title);
-    setInspModalHtml(html);
-    setInspModalOpen(true);
-    return;
-  }
-
-  // 2) Otherwise: load the submitted inspection (assets-style HTML if available)
   try {
-    const submissionId = insp?._id;
-
-    const loaded = await fetchInspectionHtml(submissionId);
-
-    // A) If backend gave us rendered HTML (assets-style), use it as-is
-    if (loaded?.kind === "html" && typeof loaded.html === "string") {
-      const title = insp?.title || "Inspection";
-      setInspModalTitle(title);
-      setInspModalHtml(loaded.html);
-      setInspModalOpen(true);
-      return;
-    }
-
-    // B) Otherwise build HTML from JSON (your existing fallback renderer)
-    const sub = loaded?.data || {};
+    const { data } = await api.get(`/inspections/submissions/${insp._id}`);
+    const sub = data || {};
 
     const title = sub?.formTitle || insp?.title || "Inspection";
     const ranAt = asDateTime(sub?.createdAt || sub?.submittedAt || sub?.ts || sub?.updatedAt);
@@ -814,16 +662,8 @@ async function openInspectionLightbox(insp) {
     setInspModalHtml(html);
     setInspModalOpen(true);
   } catch (e) {
-    // Consistent UX: still open modal with an error
-    setInspModalTitle(insp?.title || "Inspection");
-    setInspModalHtml(
-      `<div style="padding:12px;color:#b91c1c">
-        Failed to load submitted inspection details.
-        <div style="margin-top:6px;color:#555;font-size:13px">${escHtml(
-          e?.response?.data?.error || String(e)
-        )}</div>
-      </div>`
-    );
+    setInspModalTitle("Inspection");
+    setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
     setInspModalOpen(true);
   }
 }
@@ -3340,12 +3180,13 @@ async function loadInspections() {
                       <td className="border-b border-border p-2">{insp.status || insp.result || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
                        <button
-                        type="button"
-                        className="px-2 py-1 border rounded"
-                        onClick={() => openInspectionSubmissionQuickView(s)}
-                      >
-                      View
-                      </button>
+                         type="button"
+                         className="btn btn-sm"
+                         onClick={() => openInspectionLightbox(insp)}
+                         title="View full submitted inspection"
+                       >
+                       View
+                       </button>
                       </td>
                     </tr>
                   ))}
