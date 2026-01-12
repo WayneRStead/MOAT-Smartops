@@ -36,13 +36,18 @@ const dOr = (d, fmt="date") => {
 function safeArr(v){ return Array.isArray(v) ? v : v ? [v] : []; }
 
 function extractCommentsFromObj(obj) {
-  const pools = []
-    .concat(safeArr(obj?.comments))
-    .concat(safeArr(obj?.notes))
-    .concat(safeArr(obj?.updates))
-    .concat(safeArr(obj?.activity))
-    .concat(safeArr(obj?.history))
-    .concat(safeArr(obj?.logs));
+const pools = []
+  .concat(safeArr(obj?.comments))
+  .concat(safeArr(obj?.notes))
+  .concat(safeArr(obj?.updates))
+  .concat(safeArr(obj?.activity))
+  .concat(safeArr(obj?.history))
+  .concat(safeArr(obj?.logs))
+  .concat(safeArr(obj?.reviews))
+  .concat(safeArr(obj?.approvals))
+  .concat(safeArr(obj?.approvalHistory))
+  .concat(safeArr(obj?.reviewHistory))
+  .concat(safeArr(obj?.auditTrail));
 
   return pools.map((c) => ({
     at: c?.at || c?.date || c?.createdAt || c?.timestamp || c?.updatedAt || c?.when,
@@ -505,17 +510,29 @@ const inspRows = React.useMemo(() => {
       ins.name || "";
 
     // --- Inspector ---
-    const inspector =
-      ins.inspectorName ||
-      ins.performedByName ||
-      ins.completedByName ||
-      ins.userName ||
-      (ins.inspector ? (ins.inspector.name || ins.inspector.fullName || userNameById(idOf(ins.inspector))) : "") ||
-      (ins.performedBy ? (ins.performedBy.name || ins.performedBy.fullName || userNameById(idOf(ins.performedBy))) : "") ||
-      (ins.completedBy ? (ins.completedBy.name || ins.completedBy.fullName || userNameById(idOf(ins.completedBy))) : "") ||
-      (ins.user ? (ins.user.name || ins.user.fullName || userNameById(idOf(ins.user))) : "") ||
-      (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
-      (ins.userId ? userNameById(ins.userId) : "");
+const inspector =
+  ins.inspectorName ||
+  ins.performedByName ||
+  ins.completedByName ||
+  ins.submittedByName ||
+  ins.createdByName ||
+  ins.userName ||
+
+  // nested user-ish objects
+  (ins.inspector ? (ins.inspector.name || ins.inspector.fullName || ins.inspector.email || userNameById(idOf(ins.inspector))) : "") ||
+  (ins.performedBy ? (ins.performedBy.name || ins.performedBy.fullName || ins.performedBy.email || userNameById(idOf(ins.performedBy))) : "") ||
+  (ins.completedBy ? (ins.completedBy.name || ins.completedBy.fullName || ins.completedBy.email || userNameById(idOf(ins.completedBy))) : "") ||
+  (ins.submittedBy ? (ins.submittedBy.name || ins.submittedBy.fullName || ins.submittedBy.email || userNameById(idOf(ins.submittedBy))) : "") ||
+  (ins.createdBy ? (ins.createdBy.name || ins.createdBy.fullName || ins.createdBy.email || userNameById(idOf(ins.createdBy))) : "") ||
+  (ins.user ? (ins.user.name || ins.user.fullName || ins.user.email || userNameById(idOf(ins.user))) : "") ||
+
+  // id fields
+  (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
+  (ins.performedById ? userNameById(ins.performedById) : "") ||
+  (ins.completedById ? userNameById(ins.completedById) : "") ||
+  (ins.submittedById ? userNameById(ins.submittedById) : "") ||
+  (ins.createdById ? userNameById(ins.createdById) : "") ||
+  (ins.userId ? userNameById(ins.userId) : "");
 
     // --- Overall Status ---
     const rawStatus =
@@ -534,23 +551,30 @@ const inspRows = React.useMemo(() => {
       statusRaw;
 
     // --- Manager note / last manager comment ---
-    const commentFromHistory = extractCommentsFromObj(ins)
-      .filter(c =>
-        norm(c.authorRole).includes("manager") ||
-        (managerUserId && String(c.authorId) === String(managerUserId))
-      )
-      .sort((a,b)=> new Date(b.at||0) - new Date(a.at||0))[0]?.text || "";
+const commentFromHistory = extractCommentsFromObj(ins)
+  .filter(c => {
+    const role = norm(c.authorRole);
+    if (role.includes("manager") || role.includes("pm") || role.includes("project-manager")) return true;
+    if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
 
-    const managerComment =
-      ins.lastManagerNote ||
-      ins.managerNote ||
-      ins.managerComment ||
-      ins.review?.managerNote ||
-      ins.review?.managerComment ||
-      ins.approval?.managerNote ||
-      ins.approval?.note ||
-      commentFromHistory ||
-      "";
+    // sometimes role isn't provided but message mentions manager approval
+    const t = String(c.text || "").toLowerCase();
+    if (t.includes("manager") && (t.includes("note") || t.includes("approve") || t.includes("review"))) return true;
+
+    return false;
+  })
+  .sort((a,b)=> new Date(b.at||0) - new Date(a.at||0))[0]?.text || "";
+
+const managerComment =
+  ins.lastManagerNote ||
+  ins.managerNote ||
+  ins.managerComment ||
+  ins.review?.managerNote ||
+  ins.review?.managerComment ||
+  ins.approval?.managerNote ||
+  ins.approval?.note ||
+  commentFromHistory ||
+  "";
 
     // --- Date ---
     const date =
