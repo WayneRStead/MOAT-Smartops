@@ -600,8 +600,82 @@ function renderItem(it, idx) {
 }
 
 async function openInspectionLightbox(insp) {
+  // 1) If this row came from logbook fallback, open a "recorded inspection" lightbox
+  if (insp?._source === "logbook") {
+    const entry = (entries || []).find((e) => String(e._id) === String(insp._id));
+    const d = entry ? entryDisplay(entry) : null;
+
+    const title = insp?.title || "Inspection";
+    const ranAt = insp?.ts ? asDateTime(insp.ts) : "—";
+    const by = userLabel(insp?.userId || insp?.user);
+
+    const html = `
+      <div style="font-family:ui-sans-serif,system-ui;padding:8px">
+        <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
+          <div>
+            <div style="font-size:18px;font-weight:700">${escHtml(title)}</div>
+            <div style="margin-top:4px;color:#555;font-size:13px">
+              <b>Type:</b> Logbook record (no submitted form attached)
+            </div>
+          </div>
+          <div style="text-align:right;color:#444;font-size:13px">
+            <div><b>Recorded:</b> ${escHtml(ranAt)}</div>
+            <div><b>By:</b> ${escHtml(by)}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;border:1px solid #eee;border-radius:14px;padding:10px;background:#fafafa">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:14px">
+            <div><b>Result:</b> ${escHtml(insp?.status || insp?.result || "—")}</div>
+            ${
+              d?.odometer != null && d?.odometer !== ""
+                ? `<div><b>Odometer:</b> ${escHtml(d.odometer)} km</div>`
+                : ""
+            }
+            ${
+              d?.vendor
+                ? `<div><b>Vendor:</b> ${escHtml(d.vendor)}</div>`
+                : ""
+            }
+            ${
+              d?.cost !== "" && d?.cost != null
+                ? `<div><b>Cost:</b> ${escHtml(d.cost)}</div>`
+                : ""
+            }
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          ${
+            d?.notes
+              ? `<div style="border:1px solid #eee;border-radius:14px;padding:12px">
+                   <div style="font-weight:600;margin-bottom:6px">Notes</div>
+                   <div style="color:#444;white-space:pre-wrap">${escHtml(d.notes)}</div>
+                 </div>`
+              : `<div style="color:#666">No additional notes recorded.</div>`
+          }
+
+          ${
+            d?.tags?.length
+              ? `<div style="margin-top:10px;color:#555;font-size:13px">
+                   <b>Tags:</b> ${escHtml(d.tags.join(", "))}
+                 </div>`
+              : ""
+          }
+        </div>
+      </div>
+    `;
+
+    setInspModalTitle(title);
+    setInspModalHtml(html);
+    setInspModalOpen(true);
+    return;
+  }
+
+  // 2) Otherwise treat it as a real inspection submission and load full detail
   try {
-    const { data } = await api.get(`/inspections/submissions/${insp._id}`);
+    const submissionId = insp?._id;
+    const { data } = await api.get(`/inspections/submissions/${submissionId}`);
     const sub = data || {};
 
     const title = sub?.formTitle || insp?.title || "Inspection";
@@ -662,8 +736,14 @@ async function openInspectionLightbox(insp) {
     setInspModalHtml(html);
     setInspModalOpen(true);
   } catch (e) {
-    setInspModalTitle("Inspection");
-    setInspModalHtml("<div style='padding:12px;color:#b91c1c'>Failed to load inspection.</div>");
+    // Even failures should still open a lightbox (consistent UX)
+    setInspModalTitle(insp?.title || "Inspection");
+    setInspModalHtml(
+      `<div style="padding:12px;color:#b91c1c">
+        Failed to load submitted inspection details.
+        <div style="margin-top:6px;color:#555;font-size:13px">${escHtml(e?.response?.data?.error || String(e))}</div>
+      </div>`
+    );
     setInspModalOpen(true);
   }
 }
