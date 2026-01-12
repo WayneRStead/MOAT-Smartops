@@ -599,6 +599,53 @@ function renderItem(it, idx) {
   `;
 }
 
+async function fetchInspectionHtml(submissionId) {
+  // Try "assets-style" server-rendered HTML endpoints first
+  const attempts = [
+    { url: `/inspections/submissions/${submissionId}/render`, mode: "text" },
+    { url: `/inspections/submissions/${submissionId}/html`, mode: "text" },
+    { url: `/inspections/submissions/${submissionId}?format=html`, mode: "text" },
+    { url: `/inspections/submissions/${submissionId}`, mode: "json" }, // fallback JSON detail
+  ];
+
+  let lastErr = null;
+
+  for (const a of attempts) {
+    try {
+      if (a.mode === "text") {
+        const res = await api.get(a.url, { responseType: "text" });
+
+        // axios returns text in res.data
+        const text = res?.data;
+
+        // If backend returns { html: "..." } as JSON accidentally, handle it too
+        if (text && typeof text === "string" && text.trim().startsWith("<")) {
+          return { kind: "html", html: text };
+        }
+        if (text && typeof text === "object") {
+          const html = text?.html || text?.renderedHtml || text?.content;
+          if (typeof html === "string" && html.trim().startsWith("<")) {
+            return { kind: "html", html };
+          }
+        }
+
+        // If this endpoint responds but isn't HTML, keep going
+        continue;
+      }
+
+      // JSON detail
+      const { data } = await api.get(a.url);
+      return { kind: "json", data: data || {} };
+    } catch (e) {
+      lastErr = e;
+      // try next attempt, regardless of 404, like assets does
+      continue;
+    }
+  }
+
+  throw lastErr || new Error("Failed to load inspection submission");
+}
+
 async function openInspectionLightbox(insp) {
   // 1) If this row came from logbook fallback, open a "recorded inspection" lightbox
   if (insp?._source === "logbook") {
@@ -632,11 +679,7 @@ async function openInspectionLightbox(insp) {
                 ? `<div><b>Odometer:</b> ${escHtml(d.odometer)} km</div>`
                 : ""
             }
-            ${
-              d?.vendor
-                ? `<div><b>Vendor:</b> ${escHtml(d.vendor)}</div>`
-                : ""
-            }
+            ${d?.vendor ? `<div><b>Vendor:</b> ${escHtml(d.vendor)}</div>` : ""}
             ${
               d?.cost !== "" && d?.cost != null
                 ? `<div><b>Cost:</b> ${escHtml(d.cost)}</div>`
@@ -672,11 +715,23 @@ async function openInspectionLightbox(insp) {
     return;
   }
 
-  // 2) Otherwise treat it as a real inspection submission and load full detail
+  // 2) Otherwise: load the submitted inspection (assets-style HTML if available)
   try {
     const submissionId = insp?._id;
-    const { data } = await api.get(`/inspections/submissions/${submissionId}`);
-    const sub = data || {};
+
+    const loaded = await fetchInspectionHtml(submissionId);
+
+    // A) If backend gave us rendered HTML (assets-style), use it as-is
+    if (loaded?.kind === "html" && typeof loaded.html === "string") {
+      const title = insp?.title || "Inspection";
+      setInspModalTitle(title);
+      setInspModalHtml(loaded.html);
+      setInspModalOpen(true);
+      return;
+    }
+
+    // B) Otherwise build HTML from JSON (your existing fallback renderer)
+    const sub = loaded?.data || {};
 
     const title = sub?.formTitle || insp?.title || "Inspection";
     const ranAt = asDateTime(sub?.createdAt || sub?.submittedAt || sub?.ts || sub?.updatedAt);
@@ -736,12 +791,14 @@ async function openInspectionLightbox(insp) {
     setInspModalHtml(html);
     setInspModalOpen(true);
   } catch (e) {
-    // Even failures should still open a lightbox (consistent UX)
+    // Consistent UX: still open modal with an error
     setInspModalTitle(insp?.title || "Inspection");
     setInspModalHtml(
       `<div style="padding:12px;color:#b91c1c">
         Failed to load submitted inspection details.
-        <div style="margin-top:6px;color:#555;font-size:13px">${escHtml(e?.response?.data?.error || String(e))}</div>
+        <div style="margin-top:6px;color:#555;font-size:13px">${escHtml(
+          e?.response?.data?.error || String(e)
+        )}</div>
       </div>`
     );
     setInspModalOpen(true);
