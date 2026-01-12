@@ -280,18 +280,32 @@ export default function ProjectOverviewPanel() {
   }, [users]);
 
   /* ------------------------ Manager identity & notes ---------------------- */
-  const managerUserId =
-    project?.managerUserId || project?.pmUserId || project?.ownerUserId ||
-    project?.managerId || project?.pmId || project?.ownerId ||
-    project?.manager?._id || project?.pm?._id || project?.owner?._id ||
-    idOf(project?.projectManager) || idOf(project?.managerUser) || "";
+/* ------------------------ Manager identity & notes ---------------------- */
+const managerUserId =
+  // common id fields
+  project?.managerUserId || project?.pmUserId || project?.ownerUserId ||
+  project?.projectManagerId || project?.projectManagerUserId ||
+  project?.assignedProjectManagerId || project?.assignedManagerId ||
+  project?.managerId || project?.pmId || project?.ownerId ||
 
-  const managerObj = project?.manager || project?.projectManager || project?.pm || project?.owner || project?.managerUser || null;
+  // nested objects
+  project?.manager?._id || project?.manager?.id || project?.manager?.userId ||
+  project?.pm?._id || project?.pm?.id || project?.pm?.userId ||
+  project?.owner?._id || project?.owner?.id || project?.owner?.userId ||
+  project?.projectManager?._id || project?.projectManager?.id || project?.projectManager?.userId ||
+  project?.assignedProjectManager?._id || project?.assignedProjectManager?.id || project?.assignedProjectManager?.userId ||
 
-  const managerName =
-    managerObj?.name || managerObj?.displayName || managerObj?.fullName ||
-    project?.managerName || project?.pmName || project?.ownerName ||
-    (managerUserId ? userNameById(managerUserId) : "");
+  // fallback: sometimes project.manager is literally the id
+  idOf(project?.projectManager) || idOf(project?.managerUser) || idOf(project?.manager) || "";
+
+const managerObj =
+  project?.manager || project?.projectManager || project?.assignedProjectManager ||
+  project?.pm || project?.owner || project?.managerUser || null;
+
+const managerName =
+  managerObj?.name || managerObj?.displayName || managerObj?.fullName || managerObj?.email ||
+  project?.managerName || project?.pmName || project?.ownerName || project?.projectManagerName ||
+  (managerUserId ? userNameById(managerUserId) : "");
 
   const projectComments = React.useMemo(() => {
     const base = extractCommentsFromObj(project || {});
@@ -433,31 +447,45 @@ export default function ProjectOverviewPanel() {
   }, [assets, focusedProjectId, inspectionIndex]);
 
   /* ----------------------- Invoices + outstanding ------------------------- */
-  const invRows = React.useMemo(() => {
-    return invoices
-      .filter(inv => String(inv.projectId || inv.project?._id || inv.project?.id || "") === focusedProjectId)
-      .map(inv => ({
+const invRows = React.useMemo(() => {
+  return invoices
+    .filter(inv => String(inv.projectId || inv.project?._id || inv.project?.id || "") === focusedProjectId)
+    .map(inv => {
+      const amount = Number(inv.total ?? inv.amount ?? inv.value ?? 0);
+      const paid = Number(inv.paid ?? inv.amountPaid ?? inv.paidAmount ?? 0);
+
+      const statusRaw =
+        inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
+
+      const statusNorm = String(statusRaw || "").toLowerCase();
+
+      const paidLike =
+        !!inv.paidAt ||
+        /paid|settled|complete|completed/.test(statusNorm) ||
+        (paid > 0 && paid >= amount);
+
+      const balance =
+        Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? (amount - paid));
+
+      const safeBalance = paidLike ? 0 : (isNaN(balance) ? (amount - paid) : balance);
+
+      return {
         id: idOf(inv),
         number: inv.number || inv.ref || inv.reference || inv.code || idOf(inv),
         submittedAt: inv.submittedAt || inv.issueDate || inv.date || inv.createdAt || "",
-        status: (inv.status || (inv.paidAt ? "paid" : "unpaid")),
-        amount: Number(inv.total ?? inv.amount ?? inv.value ?? 0),
-        paid: Number(inv.paid ?? inv.amountPaid ?? 0),
-        balance: Number(
-          inv.balanceDue ??
-          (inv.total != null ? (Number(inv.total) - Number(inv.paid || 0)) :
-           inv.amount != null ? (Number(inv.amount) - Number(inv.paid || 0)) : 0)
-        ),
+        status: statusRaw,
+        statusNorm,
+        amount,
+        paid,
+        balance: safeBalance,
         fileUrl: inv.fileUrl || inv.url || inv.documentUrl || inv.attachment?.url || inv.file?.url || "",
-      }));
-  }, [invoices, focusedProjectId]);
+      };
+    });
+}, [invoices, focusedProjectId]);
 
-  const outstandingTotal = React.useMemo(() => {
-    return invRows.reduce((sum, r) => {
-      const bal = isNaN(r.balance) ? (String(r.status||"").toLowerCase()==="paid" ? 0 : (r.amount - r.paid)) : r.balance;
-      return sum + (isNaN(bal) ? 0 : bal);
-    }, 0);
-  }, [invRows]);
+const outstandingTotal = React.useMemo(() => {
+  return invRows.reduce((sum, r) => sum + (isNaN(r.balance) ? 0 : r.balance), 0);
+}, [invRows]);
 
   /* --------------------------- Inspections feed --------------------------- */
   const inspRows = React.useMemo(() => {
