@@ -75,6 +75,39 @@ function money(n, currency="ZAR") {
   catch { return v.toFixed(2); }
 }
 
+function deriveInspectionStatus(ins) {
+  // 1) obvious direct fields
+  const direct =
+    ins.overallStatus || ins.summaryStatus || ins.finalStatus ||
+    ins.passFail || ins.result || ins.outcome || ins.status || ins.state;
+
+  if (direct != null && String(direct).trim() !== "") return String(direct);
+
+  // 2) booleans
+  if (ins.passed === true) return "Pass";
+  if (ins.passed === false) return "Fail";
+
+  const overallPassed =
+    ins.overall?.passed ?? ins.summary?.passed ?? ins.stats?.passed ?? ins.totals?.passed;
+  if (overallPassed === true) return "Pass";
+  if (overallPassed === false) return "Fail";
+
+  // 3) counts
+  const failCount =
+    ins.failedCount ?? ins.failCount ?? ins.stats?.failCount ?? ins.summary?.failCount ?? ins.totals?.failCount;
+  if (Number.isFinite(Number(failCount))) return Number(failCount) > 0 ? "Fail" : "Pass";
+
+  // 4) try infer from answers/responses (if present)
+  const answers = ins.responses || ins.answers || ins.items || ins.results || [];
+  if (Array.isArray(answers) && answers.length) {
+    const text = JSON.stringify(answers).toLowerCase();
+    if (text.includes("fail")) return "Fail";
+    if (text.includes("pass")) return "Pass";
+  }
+
+  return "";
+}
+
 /* --------------------------- filter bridge ------------------------------- */
 function useFiltersBridge() {
   const [rag, setRag] = React.useState("");
@@ -543,12 +576,12 @@ const inspector =
       ins.result || ins.outcome ||
       (ins.passed === true ? "Pass" : ins.passed === false ? "Fail" : "");
 
-    const statusRaw = String(rawStatus || "");
+const statusRaw = deriveInspectionStatus(ins);
 
-    const status =
-      /pass/i.test(statusRaw) && !/fail/i.test(statusRaw) ? "Passed" :
-      /fail/i.test(statusRaw) ? "Failed" :
-      statusRaw;
+const status =
+  /pass/i.test(statusRaw) && !/fail/i.test(statusRaw) ? "Passed" :
+  /fail/i.test(statusRaw) ? "Failed" :
+  statusRaw;
 
     // --- Manager note / last manager comment ---
 const commentFromHistory = extractCommentsFromObj(ins)
