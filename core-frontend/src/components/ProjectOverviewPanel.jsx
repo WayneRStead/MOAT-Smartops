@@ -488,32 +488,98 @@ const outstandingTotal = React.useMemo(() => {
 }, [invRows]);
 
   /* --------------------------- Inspections feed --------------------------- */
-  const inspRows = React.useMemo(() => {
-    const src = submissions.length ? submissions : inspections;
-    return src.map(ins => {
-      const statusRaw = String(ins.status ?? ins.result ?? ins.outcome ?? (ins.passed===true?"Pass":ins.passed===false?"Fail":""));
-      const managerComment =
-        ins.managerComment || ins.managerNote || ins.review?.managerComment || ins.reviewerComment ||
-        (extractCommentsFromObj(ins).find(c => norm(c.authorRole).includes("manager"))?.text) || "";
-      const name = ins.title || ins.type || ins.formName || ins.form?.name || ins.name || "";
-      const inspector =
-        ins.inspectorName ||
-        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
-        (ins.inspectorId ? userNameById(ins.inspectorId) : "");
-      return {
-        id: idOf(ins),
-        date: ins.date || ins.inspectedAt || ins.completedAt || ins.createdAt || ins.updatedAt || "",
-        name,
-        scope: ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project",
-        status: /pass/i.test(statusRaw) && !/fail/i.test(statusRaw) ? "Passed" :
-                /fail/i.test(statusRaw) ? "Failed" : (statusRaw || ""),
-        inspector,
-        managerComment,
-        isSubmission: Boolean(ins.responses || ins.answers || ins.formId || ins.form || ins.submission || ins.formSchema),
-      };
-    }).filter(x => within(x.date, fromAt, toAt))
-      .sort((a,b)=> new Date(b.date||0) - new Date(a.date||0));
-  }, [submissions, inspections, fromAt, toAt, users]);
+const inspRows = React.useMemo(() => {
+  const src = submissions.length ? submissions : inspections;
+
+  return src.map(ins => {
+    // --- Title / form name ---
+    const name =
+      ins.formTitle ||
+      ins.templateTitle ||
+      ins.inspectionTitle ||
+      ins.title ||
+      ins.formName ||
+      ins.form?.title || ins.form?.name ||
+      ins.schema?.title || ins.schema?.name ||
+      ins.type ||
+      ins.name || "";
+
+    // --- Inspector ---
+    const inspector =
+      ins.inspectorName ||
+      ins.performedByName ||
+      ins.completedByName ||
+      ins.userName ||
+      (ins.inspector ? (ins.inspector.name || ins.inspector.fullName || userNameById(idOf(ins.inspector))) : "") ||
+      (ins.performedBy ? (ins.performedBy.name || ins.performedBy.fullName || userNameById(idOf(ins.performedBy))) : "") ||
+      (ins.completedBy ? (ins.completedBy.name || ins.completedBy.fullName || userNameById(idOf(ins.completedBy))) : "") ||
+      (ins.user ? (ins.user.name || ins.user.fullName || userNameById(idOf(ins.user))) : "") ||
+      (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
+      (ins.userId ? userNameById(ins.userId) : "");
+
+    // --- Overall Status ---
+    const rawStatus =
+      ins.overallStatus ||
+      ins.summaryStatus ||
+      ins.finalStatus ||
+      ins.status || ins.state ||
+      ins.result || ins.outcome ||
+      (ins.passed === true ? "Pass" : ins.passed === false ? "Fail" : "");
+
+    const statusRaw = String(rawStatus || "");
+
+    const status =
+      /pass/i.test(statusRaw) && !/fail/i.test(statusRaw) ? "Passed" :
+      /fail/i.test(statusRaw) ? "Failed" :
+      statusRaw;
+
+    // --- Manager note / last manager comment ---
+    const commentFromHistory = extractCommentsFromObj(ins)
+      .filter(c =>
+        norm(c.authorRole).includes("manager") ||
+        (managerUserId && String(c.authorId) === String(managerUserId))
+      )
+      .sort((a,b)=> new Date(b.at||0) - new Date(a.at||0))[0]?.text || "";
+
+    const managerComment =
+      ins.lastManagerNote ||
+      ins.managerNote ||
+      ins.managerComment ||
+      ins.review?.managerNote ||
+      ins.review?.managerComment ||
+      ins.approval?.managerNote ||
+      ins.approval?.note ||
+      commentFromHistory ||
+      "";
+
+    // --- Date ---
+    const date =
+      ins.completedAt || ins.submittedAt || ins.inspectedAt ||
+      ins.date || ins.createdAt || ins.updatedAt || "";
+
+    // --- Scope ---
+    const scope =
+      ins.assetId ? "Asset" :
+      ins.vehicleId ? "Vehicle" :
+      ins.projectId ? "Project" :
+      "Project";
+
+    return {
+      id: idOf(ins),
+      date,
+      name,
+      scope,
+      status,
+      inspector,
+      managerComment,
+      isSubmission: Boolean(
+        ins.responses || ins.answers || ins.formId || ins.form || ins.submission || ins.formSchema || ins.schema
+      ),
+    };
+  })
+  .filter(x => within(x.date, fromAt, toAt))
+  .sort((a,b)=> new Date(b.date||0) - new Date(a.date||0));
+}, [submissions, inspections, fromAt, toAt, users, managerUserId]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
