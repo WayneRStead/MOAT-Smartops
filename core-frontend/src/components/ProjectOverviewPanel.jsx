@@ -529,114 +529,88 @@ const outstandingTotal = React.useMemo(() => {
 const inspRows = React.useMemo(() => {
   const src = submissions.length ? submissions : inspections;
 
-  return src.map(ins => {
-    // --- Title / form name ---
-    const name =
-      ins.formTitle ||
-      ins.templateTitle ||
-      ins.inspectionTitle ||
-      ins.title ||
-      ins.formName ||
-      ins.form?.title || ins.form?.name ||
-      ins.schema?.title || ins.schema?.name ||
-      ins.type ||
-      ins.name || "";
+  return src
+    .map((ins) => {
+      // Title (matches SubmissionView: sub.formTitle)
+      const name =
+        ins.formTitle ||
+        ins.title ||
+        ins.formName ||
+        ins.form?.name ||
+        ins.name ||
+        "";
 
-    // --- Inspector ---
-const inspector =
-  ins.inspectorName ||
-  ins.performedByName ||
-  ins.completedByName ||
-  ins.submittedByName ||
-  ins.createdByName ||
-  ins.userName ||
+      // Inspector (matches SubmissionView: sub.runBy?.name)
+      const inspector =
+        ins.runBy?.name ||
+        ins.signoff?.name ||
+        ins.runBy?.email ||
+        ins.inspectorName ||
+        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
+        (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
+        "";
 
-  // nested user-ish objects
-  (ins.inspector ? (ins.inspector.name || ins.inspector.fullName || ins.inspector.email || userNameById(idOf(ins.inspector))) : "") ||
-  (ins.performedBy ? (ins.performedBy.name || ins.performedBy.fullName || ins.performedBy.email || userNameById(idOf(ins.performedBy))) : "") ||
-  (ins.completedBy ? (ins.completedBy.name || ins.completedBy.fullName || ins.completedBy.email || userNameById(idOf(ins.completedBy))) : "") ||
-  (ins.submittedBy ? (ins.submittedBy.name || ins.submittedBy.fullName || ins.submittedBy.email || userNameById(idOf(ins.submittedBy))) : "") ||
-  (ins.createdBy ? (ins.createdBy.name || ins.createdBy.fullName || ins.createdBy.email || userNameById(idOf(ins.createdBy))) : "") ||
-  (ins.user ? (ins.user.name || ins.user.fullName || ins.user.email || userNameById(idOf(ins.user))) : "") ||
+      // Overall status (matches SubmissionView: sub.overallResult => pass/fail)
+      const raw = String(
+        ins.overallResult ??
+          ins.status ??
+          ins.result ??
+          ins.outcome ??
+          (ins.passed === true ? "pass" : ins.passed === false ? "fail" : "")
+      ).toLowerCase();
 
-  // id fields
-  (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
-  (ins.performedById ? userNameById(ins.performedById) : "") ||
-  (ins.completedById ? userNameById(ins.completedById) : "") ||
-  (ins.submittedById ? userNameById(ins.submittedById) : "") ||
-  (ins.createdById ? userNameById(ins.createdById) : "") ||
-  (ins.userId ? userNameById(ins.userId) : "");
+      const status =
+        raw === "pass" ? "Passed" :
+        raw === "fail" ? "Failed" :
+        raw ? raw : "";
 
-    // --- Overall Status ---
-    const rawStatus =
-      ins.overallStatus ||
-      ins.summaryStatus ||
-      ins.finalStatus ||
-      ins.status || ins.state ||
-      ins.result || ins.outcome ||
-      (ins.passed === true ? "Pass" : ins.passed === false ? "Fail" : "");
+      // Manager comment (matches SubmissionView: sub.managerComments preferred)
+      let managerComment = "";
+      if (Array.isArray(ins.managerComments) && ins.managerComments.length) {
+        // pick latest by timestamp if present, otherwise last item
+        const sorted = [...ins.managerComments].sort(
+          (a, b) => new Date(b.at || b.createdAt || 0) - new Date(a.at || a.createdAt || 0)
+        );
+        managerComment = sorted[0]?.comment || "";
+      } else if (Array.isArray(ins.comments) && ins.comments.length) {
+        // legacy fallback used in SubmissionView
+        const sorted = [...ins.comments].sort(
+          (a, b) => new Date(b.createdAt || b.at || 0) - new Date(a.createdAt || a.at || 0)
+        );
+        managerComment = sorted[0]?.comment || "";
+      } else {
+        // last-ditch fallback if some endpoints store manager notes directly
+        managerComment =
+          ins.managerNote ||
+          ins.managerComment ||
+          ins.lastManagerNote ||
+          "";
+      }
 
-const statusRaw = deriveInspectionStatus(ins);
+      const date =
+        ins.completedAt ||
+        ins.submittedAt ||
+        ins.createdAt ||
+        ins.updatedAt ||
+        ins.date ||
+        "";
 
-const status =
-  /pass/i.test(statusRaw) && !/fail/i.test(statusRaw) ? "Passed" :
-  /fail/i.test(statusRaw) ? "Failed" :
-  statusRaw;
+      const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
 
-    // --- Manager note / last manager comment ---
-const commentFromHistory = extractCommentsFromObj(ins)
-  .filter(c => {
-    const role = norm(c.authorRole);
-    if (role.includes("manager") || role.includes("pm") || role.includes("project-manager")) return true;
-    if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
-
-    // sometimes role isn't provided but message mentions manager approval
-    const t = String(c.text || "").toLowerCase();
-    if (t.includes("manager") && (t.includes("note") || t.includes("approve") || t.includes("review"))) return true;
-
-    return false;
-  })
-  .sort((a,b)=> new Date(b.at||0) - new Date(a.at||0))[0]?.text || "";
-
-const managerComment =
-  ins.lastManagerNote ||
-  ins.managerNote ||
-  ins.managerComment ||
-  ins.review?.managerNote ||
-  ins.review?.managerComment ||
-  ins.approval?.managerNote ||
-  ins.approval?.note ||
-  commentFromHistory ||
-  "";
-
-    // --- Date ---
-    const date =
-      ins.completedAt || ins.submittedAt || ins.inspectedAt ||
-      ins.date || ins.createdAt || ins.updatedAt || "";
-
-    // --- Scope ---
-    const scope =
-      ins.assetId ? "Asset" :
-      ins.vehicleId ? "Vehicle" :
-      ins.projectId ? "Project" :
-      "Project";
-
-    return {
-      id: idOf(ins),
-      date,
-      name,
-      scope,
-      status,
-      inspector,
-      managerComment,
-      isSubmission: Boolean(
-        ins.responses || ins.answers || ins.formId || ins.form || ins.submission || ins.formSchema || ins.schema
-      ),
-    };
-  })
-  .filter(x => within(x.date, fromAt, toAt))
-  .sort((a,b)=> new Date(b.date||0) - new Date(a.date||0));
-}, [submissions, inspections, fromAt, toAt, users, managerUserId]);
+      return {
+        id: idOf(ins),
+        date,
+        name,
+        scope,
+        status,
+        inspector,
+        managerComment,
+        isSubmission: Boolean(ins.items || ins.managerComments || ins.overallResult || ins.runBy),
+      };
+    })
+    .filter((x) => within(x.date, fromAt, toAt))
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+}, [submissions, inspections, fromAt, toAt, users]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
