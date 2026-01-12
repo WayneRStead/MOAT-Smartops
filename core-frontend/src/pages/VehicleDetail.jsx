@@ -3663,64 +3663,6 @@ async function loadInspections() {
           </div>
         </form>
       </Modal>
-
-      <Modal
-  open={subViewOpen}
-  onClose={() => {
-    setSubViewOpen(false);
-    setSubViewIframeUrl("");
-  }}
-  title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
-  width={980}
->
-  {subViewErr && <div className="text-red-600 text-sm mb-2">{subViewErr}</div>}
-
-  {subViewIframeUrl ? (
-    <iframe
-      title="Inspection Submission"
-      src={subViewIframeUrl}
-      className="w-full border rounded"
-      style={{ height: "70vh" }}
-    />
-  ) : subView ? (
-    <div className="space-y-2 text-sm">
-      {/* Optional header: remove this block if VehicleDetail doesn't have resolveInspectionRow */}
-      {typeof resolveInspectionRow === "function" && (() => {
-        const { submitted, inspector, formTitle, outcome } = resolveInspectionRow(subView);
-        return (
-          <div className="text-gray-600">
-            Submitted: {submitted ? submitted.toLocaleString() : "—"}
-            {" • "}
-            Form: {formTitle}
-            {" • "}
-            Inspector: {inspector}
-            {" • "}
-            Overall: <b>{outcome}</b>
-          </div>
-        );
-      })()}
-
-      {Array.isArray(subView.answers) && subView.answers.length ? (
-        <div className="space-y-1">
-          {subView.answers.map((a, i) => (
-            <div key={i} className="border rounded p-2">
-              <div className="font-medium">{a?.label || a?.question || `Q${i + 1}`}</div>
-              <div className="text-gray-700 whitespace-pre-wrap">
-                {typeof a?.value === "string"
-                  ? a.value
-                  : JSON.stringify(a?.value ?? a?.answer ?? "", null, 2)}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="text-gray-600">No answers on this submission.</div>
-      )}
-    </div>
-  ) : (
-    <div className="text-sm text-gray-600">Loading…</div>
-  )}
-</Modal>
     </div>
   );
 }
