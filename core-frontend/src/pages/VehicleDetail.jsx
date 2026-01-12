@@ -1,18 +1,10 @@
 // src/pages/VehicleDetail.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import Modal from "../components/Modal"; // <-- change path if your Modal lives elsewhere
+import Modal from "../components/Modal";
 import { api } from "../lib/api";
 
-import {
-  getOpenTrip,
-  listTrips,
-  startTrip,
-  endTrip,
-  uploadTripPhoto,
-  updateTrip as compatUpdateTrip,
-} from "../lib/vehicleTrips";
-
+import { getOpenTrip, listTrips, startTrip, endTrip, uploadTripPhoto } from "../lib/vehicleTrips";
 import { listPurchases, createPurchase, deletePurchase, listVendors } from "../lib/purchases";
 
 /* ---------- Small UI bits ---------- */
@@ -111,6 +103,16 @@ function toAbsoluteUrl(u) {
   return u.startsWith("/") ? `${base}${u}` : `${base}/${u}`;
 }
 
+function appOrApiAbsoluteUrl(path) {
+  if (!path) return "";
+  if (/^https?:\/\//i.test(path)) return path;
+
+  const backend = import.meta.env.VITE_API_BASE || import.meta.env.VITE_BACKEND_ORIGIN || "";
+  const b = String(backend).replace(/\/+$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return b ? `${b}${p}` : p;
+}
+
 function normalizeStoredUrl(u) {
   if (!u) return "";
   return String(u).trim();
@@ -122,10 +124,7 @@ function tripPhotoUrl(trip, which /* "start" | "end" */) {
       ? trip?.startPhoto || trip?.start_photo || trip?.startImage || trip?.startPhotoUrl
       : trip?.endPhoto || trip?.end_photo || trip?.endImage || trip?.endPhotoUrl;
 
-  let url =
-    (typeof photo === "string" && photo) ||
-    (photo && typeof photo.url === "string" && photo.url) ||
-    "";
+  let url = (typeof photo === "string" && photo) || (photo && typeof photo.url === "string" && photo.url) || "";
 
   if (!url && photo && typeof photo === "object") {
     const filename = typeof photo.filename === "string" ? photo.filename : "";
@@ -136,7 +135,7 @@ function tripPhotoUrl(trip, which /* "start" | "end" */) {
 
   const backend = import.meta.env.VITE_API_BASE || import.meta.env.VITE_BACKEND_ORIGIN || "";
   if (/^https?:\/\//i.test(url)) return url;
-  const b = backend.replace(/\/+$/, "");
+  const b = String(backend || "").replace(/\/+$/, "");
   const u = url.startsWith("/") ? url : `/${url}`;
   return b ? `${b}${u}` : u;
 }
@@ -162,16 +161,6 @@ function parseReminderCategory(notes = "") {
 function parseReminderCompletedOn(notes = "") {
   const m = notes.match(/\(\s*Completed:\s*([^)]+?)\s*\)/i);
   return m ? m[1].trim() : "";
-}
-function parseRecurDays(notes = "") {
-  const m = notes.match(/\(\s*RecurDays:\s*([^)]+?)\s*\)/i);
-  const n = m ? Number(m[1].trim()) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-function parseRecurKm(notes = "") {
-  const m = notes.match(/\(\s*RecurKm:\s*([^)]+?)\s*\)/i);
-  const n = m ? Number(m[1].trim()) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : null;
 }
 function stripReminderTokens(notes = "") {
   return (notes || "")
@@ -266,7 +255,6 @@ export default function VehicleDetail() {
   const [tripsLoading, setTripsLoading] = useState(false);
   const [tripErr, setTripErr] = useState("");
   const [tripInfo, setTripInfo] = useState("");
-  const [tripSaving, setTripSaving] = useState(false);
   const [tripModalErr, setTripModalErr] = useState("");
 
   const [odoStart, setOdoStart] = useState("");
@@ -301,11 +289,12 @@ export default function VehicleDetail() {
     notes: "",
   });
 
-  // Inspections list + Quick View modal (THIS MUST BE INSIDE THE COMPONENT)
+  // Inspections
   const [inspections, setInspections] = useState([]);
   const [inspErr, setInspErr] = useState("");
   const [inspInfo, setInspInfo] = useState("");
 
+  // Quick View modal
   const [subViewOpen, setSubViewOpen] = useState(false);
   const [subView, setSubView] = useState(null);
   const [subViewErr, setSubViewErr] = useState("");
@@ -344,6 +333,7 @@ export default function VehicleDetail() {
     setTripProjectId(v?.projectId || "");
     setTripTaskId(v?.taskId || "");
     setPForm((f) => ({ ...f, projectId: v?.projectId || "", taskId: v?.taskId || "" }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [v?.projectId, v?.taskId]);
 
   // ----- Loaders -----
@@ -393,8 +383,8 @@ export default function VehicleDetail() {
     setRInfo("");
     try {
       const { data } = await api.get(`/vehicles/${id}/reminders`);
-      setReminders(data.reminders || []);
-      setNextDue(data.nextDue || null);
+      setReminders(data?.reminders || []);
+      setNextDue(data?.nextDue || null);
     } catch (e) {
       setRErr(e?.response?.data?.error || String(e));
     }
@@ -408,7 +398,6 @@ export default function VehicleDetail() {
       const list = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
       setEntries(list);
     } catch (e) {
-      // soft-fail if endpoint doesn't exist
       if (e?.response?.status === 404) {
         setEntries([]);
         return;
@@ -427,6 +416,7 @@ export default function VehicleDetail() {
       } catch (e) {
         if (e?.response?.status !== 404) throw e;
       }
+
       const data = await listTrips(id, { limit: 200 }).catch(() => []);
       const list = Array.isArray(data) ? data : [];
       if (!open) open = list.find((t) => !t.endedAt) || null;
@@ -462,8 +452,6 @@ export default function VehicleDetail() {
   async function loadInspections() {
     setInspErr("");
     setInspInfo("");
-
-    // Primary: submissions list (filter client side by subjectAtRun: {type:'vehicle', id})
     try {
       const { data } = await api.get("/inspections/submissions", { params: { limit: 500 } });
       const all = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
@@ -473,22 +461,20 @@ export default function VehicleDetail() {
           return String(subj?.type || "").toLowerCase() === "vehicle" && String(subj?.id) === String(id);
         })
         .map((sub) => ({
-          _id: sub?._id || sub?.id,
+          _id: sub?._id || sub?.id || sub?.submissionId || sub?.submission?._id,
           ts: sub?.createdAt || sub?.updatedAt || sub?.submittedAt || sub?.ts || null,
           title: sub?.formTitle || sub?.title || sub?.formName || "Inspection",
           userId: sub?.runBy?.userId || sub?.runBy?._id || sub?.userId || sub?.user,
           status: sub?.overallResult || sub?.status || sub?.result || "—",
           _raw: sub,
-        }));
+        }))
+        .filter((x) => x._id);
 
       setInspections(mine);
-      return;
     } catch (e) {
       if (e?.response?.status !== 404) setInspErr(e?.response?.data?.error || String(e));
+      setInspections([]);
     }
-
-    // Fallback: none
-    setInspections([]);
   }
 
   useEffect(() => {
@@ -552,14 +538,14 @@ export default function VehicleDetail() {
       const { data } = await api.put(`/vehicles/${id}`, patch);
       setV(data);
       setInfo("Saved");
-      setTimeout(() => setInfo(""), 1200);
+      window.setTimeout(() => setInfo(""), 1200);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
 
   async function delVehicle() {
-    if (!confirm("Delete this vehicle?")) return;
+    if (!window.confirm("Delete this vehicle?")) return;
     try {
       await api.delete(`/vehicles/${id}`);
       navigate("/vehicles");
@@ -580,15 +566,17 @@ export default function VehicleDetail() {
               rForm.recurKm ? ` (RecurKm: ${Number(rForm.recurKm)})` : ""
             }`
           : "";
+
       const payload = {
         kind: rForm.kind,
         dueDate: rForm.kind === "date" ? rForm.dueDate : undefined,
         dueOdometer: rForm.kind === "odometer" ? Number(rForm.dueOdometer) : undefined,
         notes: `${rForm.notes || ""}${typeToken}${recurTokens}`.trim(),
       };
+
       const { data } = await api.post(`/vehicles/${id}/reminders`, payload);
-      setReminders(data.reminders || []);
-      setNextDue(data.nextDue || null);
+      setReminders(data?.reminders || []);
+      setNextDue(data?.nextDue || null);
       setRForm({
         kind: "date",
         category: "service",
@@ -608,19 +596,19 @@ export default function VehicleDetail() {
   async function toggleReminderActive(rid, active) {
     try {
       const { data } = await api.put(`/vehicles/${id}/reminders/${rid}`, { active });
-      setReminders(data.reminders || []);
-      setNextDue(data.nextDue || null);
+      setReminders(data?.reminders || []);
+      setNextDue(data?.nextDue || null);
     } catch (e2) {
       setRErr(e2?.response?.data?.error || String(e2));
     }
   }
 
   async function deleteReminder(rid) {
-    if (!confirm("Delete this reminder?")) return;
+    if (!window.confirm("Delete this reminder?")) return;
     try {
       const { data } = await api.delete(`/vehicles/${id}/reminders/${rid}`);
-      setReminders(data.reminders || []);
-      setNextDue(data.nextDue || null);
+      setReminders(data?.reminders || []);
+      setNextDue(data?.nextDue || null);
     } catch (e2) {
       setRErr(e2?.response?.data?.error || String(e2));
     }
@@ -653,7 +641,6 @@ export default function VehicleDetail() {
         odometerEnd: odoNum,
       };
 
-      // Try a sane default endpoint; if yours differs, change it here.
       const { data } = await api.post(`/vehicles/${id}/logbook`, payload).catch(async (err1) => {
         if (err1?.response?.status === 404) {
           const r = await api.post(`/logbook`, payload);
@@ -728,7 +715,7 @@ export default function VehicleDetail() {
 
       await loadTrips();
       setTripInfo("Trip started.");
-      setTimeout(() => setTripInfo(""), 1500);
+      window.setTimeout(() => setTripInfo(""), 1500);
     } catch (e2) {
       setTripModalErr(e2?.response?.data?.error || String(e2));
     }
@@ -787,14 +774,10 @@ export default function VehicleDetail() {
 
       await loadTrips();
       setTripInfo("Trip ended.");
-      setTimeout(() => setTripInfo(""), 1500);
+      window.setTimeout(() => setTripInfo(""), 1500);
     } catch (e2) {
       setTripModalErr(e2?.response?.data?.error || String(e2));
     }
-  }
-
-  async function apiUpdateTrip(_vehId, tripId, patch) {
-    return compatUpdateTrip(tripId, patch, { vehicleId: _vehId });
   }
 
   async function handleAddPurchase(e) {
@@ -814,7 +797,6 @@ export default function VehicleDetail() {
         notes: pForm.notes || "",
       };
 
-      // optional: receipt upload (reuses trip uploader)
       if (pPhotoFile) {
         try {
           const { url } = await uploadTripPhoto(pPhotoFile);
@@ -845,7 +827,7 @@ export default function VehicleDetail() {
   }
 
   async function handleDeletePurchase(rowId) {
-    if (!confirm("Delete this purchase?")) return;
+    if (!window.confirm("Delete this purchase?")) return;
     setPErr("");
     setPInfo("");
     try {
@@ -857,15 +839,19 @@ export default function VehicleDetail() {
     }
   }
 
-  async function openInspectionSubmissionQuickView(submissionRow) {
-    const subId = submissionRow?._id || submissionRow?.id;
+  async function openInspectionSubmissionQuickView(row) {
+    const raw = row?._raw || row;
+    const subId = raw?._id || raw?.id || row?._id || row?.id;
 
     setSubViewErr("");
-    setSubView(submissionRow || null);
+    setSubView(row || null);
     setSubViewIframeUrl("");
     setSubViewOpen(true);
 
-    if (!subId) return;
+    if (!subId) {
+      setSubViewErr("Missing submission id.");
+      return;
+    }
 
     try {
       const { data } = await api.get(`/inspections/submissions/${subId}`, {
@@ -873,17 +859,23 @@ export default function VehicleDetail() {
         params: { _ts: Date.now() },
       });
 
-      if (data && typeof data === "object") {
-        setSubView(data);
+      const resolved =
+        data?.submission ||
+        data?.item ||
+        data?.data ||
+        (Array.isArray(data?.items) ? data.items[0] : null) ||
+        data;
+
+      if (resolved && typeof resolved === "object") {
+        setSubView(resolved);
         return;
       }
 
-      setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
+      throw new Error("Unexpected response shape");
     } catch (e) {
       setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
       setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
+      setSubViewIframeUrl(appOrApiAbsoluteUrl(`/inspections/submissions/${subId}?embed=1`));
     }
   }
 
@@ -896,7 +888,7 @@ export default function VehicleDetail() {
     );
   }
 
-    const selectedDriverId = v?.driver?._id || v?.driverId || "";
+  const selectedDriverId = v?.driver?._id || v?.driverId || "";
 
   const sectionButtons = [
     { id: "meta", label: "Meta" },
@@ -925,13 +917,13 @@ export default function VehicleDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn btn-ghost" onClick={delVehicle}>
+          <button className="btn btn-ghost" type="button" onClick={delVehicle}>
             Delete
           </button>
-          <button className="btn" onClick={() => window.print()}>
+          <button className="btn" type="button" onClick={() => window.print()}>
             Print PDF
           </button>
-          <button className="btn" onClick={() => navigate(-1)}>
+          <button className="btn" type="button" onClick={() => navigate(-1)}>
             Back
           </button>
         </div>
@@ -1082,7 +1074,9 @@ export default function VehicleDetail() {
                 </button>
               )}
             </div>
-            {selectedDriverId && <div className="mt-1 text-xs text-gray-600">Currently: {userLabel(v.driver || v.driverId)}</div>}
+            {selectedDriverId && (
+              <div className="mt-1 text-xs text-gray-600">Currently: {userLabel(v.driver || v.driverId)}</div>
+            )}
           </label>
 
           <label className="block text-sm">
@@ -1488,11 +1482,7 @@ export default function VehicleDetail() {
                       <td className="border-b border-border p-2">{userLabel(insp.userId || insp.user)}</td>
                       <td className="border-b border-border p-2">{insp.status || "—"}</td>
                       <td className="border-b border-border p-2 text-right">
-                        <button
-                          type="button"
-                          className="px-2 py-1 border rounded"
-                          onClick={() => openInspectionSubmissionQuickView(insp)}  // <-- FIXED (was s)
-                        >
+                        <button type="button" className="px-2 py-1 border rounded" onClick={() => openInspectionSubmissionQuickView(insp)}>
                           View
                         </button>
                       </td>
@@ -1514,7 +1504,7 @@ export default function VehicleDetail() {
           setStartTripOpen(false);
         }}
         footer={
-          <button className="btn" onClick={handleStartTrip}>
+          <button className="btn" type="button" onClick={handleStartTrip}>
             Start trip
           </button>
         }
@@ -1538,6 +1528,7 @@ export default function VehicleDetail() {
             </select>
           </label>
           <div />
+
           <label className="text-sm">
             Project (optional)
             <select
@@ -1557,6 +1548,7 @@ export default function VehicleDetail() {
               ))}
             </select>
           </label>
+
           <label className="text-sm">
             Task (optional)
             <select className="w-full" value={tripTaskId} onChange={(e) => setTripTaskId(e.target.value)}>
@@ -1580,7 +1572,7 @@ export default function VehicleDetail() {
           setEndTripOpen(false);
         }}
         footer={
-          <button className="btn" onClick={handleEndTrip}>
+          <button className="btn" type="button" onClick={handleEndTrip}>
             End trip
           </button>
         }
@@ -1627,12 +1619,18 @@ export default function VehicleDetail() {
         title="Add purchase"
         onClose={() => setPurchaseModalOpen(false)}
         footer={
-          <button className="btn btn-primary" onClick={handleAddPurchase}>
+          <button className="btn btn-primary" type="button" onClick={handleAddPurchase}>
             Add purchase
           </button>
         }
       >
-        <form onSubmit={handleAddPurchase} className="grid md:grid-cols-2 gap-2" onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}>
+        <form
+          onSubmit={handleAddPurchase}
+          className="grid md:grid-cols-2 gap-2"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.preventDefault();
+          }}
+        >
           <label className="text-sm">
             Vendor
             <select className="w-full" value={pForm.vendorId} onChange={(e) => setPForm((f) => ({ ...f, vendorId: e.target.value }))}>
@@ -1715,12 +1713,18 @@ export default function VehicleDetail() {
         title="Add logbook entry"
         onClose={() => setLbModalOpen(false)}
         footer={
-          <button className="btn btn-primary" onClick={createLogEntry}>
+          <button className="btn btn-primary" type="button" onClick={createLogEntry}>
             Add entry
           </button>
         }
       >
-        <form onSubmit={createLogEntry} className="grid md:grid-cols-3 gap-2" onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}>
+        <form
+          onSubmit={createLogEntry}
+          className="grid md:grid-cols-3 gap-2"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.preventDefault();
+          }}
+        >
           <label className="text-sm">
             Type
             <select className="w-full" value={lbForm.type} onChange={(e) => setLbForm({ ...lbForm, type: e.target.value })}>
@@ -1764,6 +1768,8 @@ export default function VehicleDetail() {
         onClose={() => {
           setSubViewOpen(false);
           setSubViewIframeUrl("");
+          setSubViewErr("");
+          setSubView(null);
         }}
         title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
         width={980}
@@ -1780,9 +1786,7 @@ export default function VehicleDetail() {
                   <div key={i} className="border rounded p-2">
                     <div className="font-medium">{a?.label || a?.question || `Q${i + 1}`}</div>
                     <div className="text-gray-700 whitespace-pre-wrap">
-                      {typeof a?.value === "string"
-                        ? a.value
-                        : JSON.stringify(a?.value ?? a?.answer ?? "", null, 2)}
+                      {typeof a?.value === "string" ? a.value : JSON.stringify(a?.value ?? a?.answer ?? "", null, 2)}
                     </div>
                   </div>
                 ))}
