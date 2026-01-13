@@ -1268,6 +1268,14 @@ if (navigator.geolocation) {
 
   /* ---------- date filter helpers ---------- */
   const inDateWindow = (iso) => {
+      // ✅ unify what "submission date" means across UI + exports
+  const submissionWhenIso = (s) =>
+    s?.submittedAt ||
+    s?.createdAt ||
+    s?.completedAt ||
+    s?.finishedAt ||
+    s?.updatedAt ||
+    null;
     if (!iso) return false;
     const d = new Date(iso);
     if (isNaN(+d)) return false;
@@ -1282,7 +1290,6 @@ if (navigator.geolocation) {
     (milestones || []).forEach(x => m.set(String(x._id || x.id), x.title || "Milestone"));
     return m;
   }, [milestones]);
-// src/pages/TaskDetail.jsx  (Part 3/3) — continue
 
   if (!task) return <div className="p-4">{err ? err : "Loading…"}</div>;
 
@@ -1956,12 +1963,14 @@ if (navigator.geolocation) {
             <span className="font-semibold">Recent Inspection Submissions</span>
             <div className="flex gap-2">
               <button className="px-2 py-1 border rounded text-xs" onClick={async ()=>{
-                const withCoords = (subs || []).filter((s)=> {
-                  if (!inDateWindow(s?.submittedAt)) return false;
-                  const lat = Number(s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat);
-                  const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
-                  return Number.isFinite(lat) && Number.isFinite(lng);
-                });
+                const withCoords = (subs || []).filter((s) => {
+  const whenIso = submissionWhenIso(s);
+  if ((fltFrom || fltTo) && !inDateWindow(whenIso)) return false;
+
+  const { lat, lng } = resolveSubmissionFields(s);
+  return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+});
+
                 if (!withCoords.length) { setErr("No lat/lng on submissions (in filter window) to export."); return; }
                 const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
 const placemarks = withCoords.map((s) => {
@@ -1970,9 +1979,8 @@ const placemarks = withCoords.map((s) => {
     const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "";
 
-    const when = (s?.submittedAt || s?.createdAt)
-      ? new Date(s?.submittedAt || s?.createdAt).toLocaleString()
-      : "—";
+    const whenIso = submissionWhenIso(s);
+const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
 
     const { outcome, formTitle, inspector } = resolveSubmissionFields(s);
 
@@ -1999,7 +2007,7 @@ const placemarks = withCoords.map((s) => {
             </div>
           </div>
           {subsErr && <div className="text-red-600 text-sm">{subsErr}</div>}
-          {(subs.filter(s => !fltFrom && !fltTo ? true : inDateWindow(s?.submittedAt))).length ? (
+          {(subs.filter(s => !fltFrom && !fltTo ? true : inDateWindow(submissionWhenIso(s)))).length ? (
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50">
@@ -2014,7 +2022,7 @@ const placemarks = withCoords.map((s) => {
               </thead>
                             <tbody>
                 {subs
-                  .filter(s => !fltFrom && !fltTo ? true : inDateWindow(s?.submittedAt || s?.createdAt || s?.updatedAt))
+                  .filter(s => !fltFrom && !fltTo ? true : inDateWindow(submissionWhenIso(s)))
                   .map((s) => {
                     const { submitted, inspector, outcome, formTitle, lat, lng } = resolveSubmissionFields(s);
                     const whenText = submitted ? submitted.toLocaleString() : "—";
