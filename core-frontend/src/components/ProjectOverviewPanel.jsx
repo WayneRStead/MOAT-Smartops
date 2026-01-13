@@ -6,56 +6,71 @@ import { createPortal } from "react-dom";
 /* ------------------------------- helpers -------------------------------- */
 const idOf = (v) => String(v?._id || v?.id || v || "");
 const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "-");
-const isClosedLike = (s) => ["done","closed","complete","completed","cancelled","canceled","void"].includes(norm(s));
-const isPausedLike = (s) => ["paused","paused-problem","on-hold","hold","pause"].includes(norm(s));
+const isClosedLike = (s) =>
+  ["done", "closed", "complete", "completed", "cancelled", "canceled", "void"].includes(norm(s));
+const isPausedLike = (s) =>
+  ["paused", "paused-problem", "on-hold", "hold", "pause"].includes(norm(s));
 
 const startOfTask = (t) => t?.startAt || t?.startDate || t?.begin || t?.createdAt || null;
-const dueOfTask   = (t) => t?.dueAt || t?.dueDate || t?.endAt || t?.endDate || t?.deadlineAt || t?.due || null;
-const isOverdueTask = (t, now=new Date()) => { const d = dueOfTask(t); if (!d) return false; const x = new Date(d); return !isNaN(+x) && x < now && !isClosedLike(t.status); };
+const dueOfTask = (t) => t?.dueAt || t?.dueDate || t?.endAt || t?.endDate || t?.deadlineAt || t?.due || null;
+const isOverdueTask = (t, now = new Date()) => {
+  const d = dueOfTask(t);
+  if (!d) return false;
+  const x = new Date(d);
+  return !isNaN(+x) && x < now && !isClosedLike(t.status);
+};
 
-const clampDay = (d, end=false) => {
-  const x = new Date(d); if (isNaN(+x)) return null;
-  if (end) x.setHours(23,59,59,999); else x.setHours(0,0,0,0);
+const clampDay = (d, end = false) => {
+  const x = new Date(d);
+  if (isNaN(+x)) return null;
+  if (end) x.setHours(23, 59, 59, 999);
+  else x.setHours(0, 0, 0, 0);
   return x;
 };
 const within = (raw, fromAt, toAt) => {
   if (!fromAt && !toAt) return true;
-  const d = raw ? new Date(raw) : null; if (!d || isNaN(+d)) return false;
+  const d = raw ? new Date(raw) : null;
+  if (!d || isNaN(+d)) return false;
   const f = fromAt ? clampDay(fromAt, false) : null;
-  const t = toAt   ? clampDay(toAt, true)   : null;
+  const t = toAt ? clampDay(toAt, true) : null;
   if (f && d < f) return false;
   if (t && d > t) return false;
   return true;
 };
-const dOr = (d, fmt="date") => {
+const dOr = (d, fmt = "date") => {
   if (!d) return "—";
-  const x = new Date(d); if (isNaN(+x)) return "—";
+  const x = new Date(d);
+  if (isNaN(+x)) return "—";
   return fmt === "datetime" ? x.toLocaleString() : x.toLocaleDateString();
 };
 
-function safeArr(v){ return Array.isArray(v) ? v : v ? [v] : []; }
+function safeArr(v) {
+  return Array.isArray(v) ? v : v ? [v] : [];
+}
 
 function extractCommentsFromObj(obj) {
-const pools = []
-  .concat(safeArr(obj?.comments))
-  .concat(safeArr(obj?.notes))
-  .concat(safeArr(obj?.updates))
-  .concat(safeArr(obj?.activity))
-  .concat(safeArr(obj?.history))
-  .concat(safeArr(obj?.logs))
-  .concat(safeArr(obj?.reviews))
-  .concat(safeArr(obj?.approvals))
-  .concat(safeArr(obj?.approvalHistory))
-  .concat(safeArr(obj?.reviewHistory))
-  .concat(safeArr(obj?.auditTrail));
+  const pools = []
+    .concat(safeArr(obj?.comments))
+    .concat(safeArr(obj?.notes))
+    .concat(safeArr(obj?.updates))
+    .concat(safeArr(obj?.activity))
+    .concat(safeArr(obj?.history))
+    .concat(safeArr(obj?.logs))
+    .concat(safeArr(obj?.reviews))
+    .concat(safeArr(obj?.approvals))
+    .concat(safeArr(obj?.approvalHistory))
+    .concat(safeArr(obj?.reviewHistory))
+    .concat(safeArr(obj?.auditTrail));
 
-  return pools.map((c) => ({
-    at: c?.at || c?.date || c?.createdAt || c?.timestamp || c?.updatedAt || c?.when,
-    text: c?.text || c?.note || c?.comment || c?.message || c?.details || "",
-    authorId: idOf(c?.user || c?.userId || c?.authorId || c?.by),
-    authorName: c?.userName || c?.authorName || c?.author || c?.byName || "",
-    authorRole: c?.userRole || c?.authorRole || c?.role || "",
-  })).filter(x => x.at || x.text);
+  return pools
+    .map((c) => ({
+      at: c?.at || c?.date || c?.createdAt || c?.timestamp || c?.updatedAt || c?.when,
+      text: c?.text || c?.note || c?.comment || c?.message || c?.details || "",
+      authorId: idOf(c?.user || c?.userId || c?.authorId || c?.by),
+      authorName: c?.userName || c?.authorName || c?.author || c?.byName || "",
+      authorRole: c?.userRole || c?.authorRole || c?.role || "",
+    }))
+    .filter((x) => x.at || x.text);
 }
 
 function groupIdsOfTask(t) {
@@ -65,47 +80,32 @@ function groupIdsOfTask(t) {
     .concat(safeArr(t.group))
     .concat(safeArr(t.assigneeGroupId));
   const out = new Set();
-  for (const v of pool.flat()) { const s = idOf(v); if (s) out.add(s); }
+  for (const v of pool.flat()) {
+    const s = idOf(v);
+    if (s) out.add(s);
+  }
   return Array.from(out);
 }
 
-function money(n, currency="ZAR") {
+function money(n, currency = "ZAR") {
   const v = Number(n || 0);
-  try { return v.toLocaleString(undefined, { style: "currency", currency }); }
-  catch { return v.toFixed(2); }
+  try {
+    return v.toLocaleString(undefined, { style: "currency", currency });
+  } catch {
+    return v.toFixed(2);
+  }
 }
 
-function deriveInspectionStatus(ins) {
-  // 1) obvious direct fields
-  const direct =
-    ins.overallStatus || ins.summaryStatus || ins.finalStatus ||
-    ins.passFail || ins.result || ins.outcome || ins.status || ins.state;
-
-  if (direct != null && String(direct).trim() !== "") return String(direct);
-
-  // 2) booleans
-  if (ins.passed === true) return "Pass";
-  if (ins.passed === false) return "Fail";
-
-  const overallPassed =
-    ins.overall?.passed ?? ins.summary?.passed ?? ins.stats?.passed ?? ins.totals?.passed;
-  if (overallPassed === true) return "Pass";
-  if (overallPassed === false) return "Fail";
-
-  // 3) counts
-  const failCount =
-    ins.failedCount ?? ins.failCount ?? ins.stats?.failCount ?? ins.summary?.failCount ?? ins.totals?.failCount;
-  if (Number.isFinite(Number(failCount))) return Number(failCount) > 0 ? "Fail" : "Pass";
-
-  // 4) try infer from answers/responses (if present)
-  const answers = ins.responses || ins.answers || ins.items || ins.results || [];
-  if (Array.isArray(answers) && answers.length) {
-    const text = JSON.stringify(answers).toLowerCase();
-    if (text.includes("fail")) return "Fail";
-    if (text.includes("pass")) return "Pass";
+// Used for LAST UPDATED (prefer manager/project notes)
+function pickLatestDate(...cands) {
+  let best = null;
+  for (const raw of cands) {
+    if (!raw) continue;
+    const d = new Date(raw);
+    if (isNaN(+d)) continue;
+    if (!best || d > best) best = d;
   }
-
-  return "";
+  return best ? best.toISOString() : "";
 }
 
 /* --------------------------- filter bridge ------------------------------- */
@@ -133,7 +133,6 @@ function useFiltersBridge() {
 }
 
 /* -------------------------- Lightweight Lightbox ------------------------- */
-/* Uses a portal and injects CSS into the iframe to hide any app chrome (sidebar/header) */
 function Lightbox({ open, title, url, html, json, onClose }) {
   const iframeRef = React.useRef(null);
 
@@ -147,40 +146,27 @@ function Lightbox({ open, title, url, html, json, onClose }) {
         if (!doc) return;
         const style = doc.createElement("style");
         style.textContent = `
-          /* Kill all app chrome inside the embedded route */
           header, nav, footer,
           .navbar, .topnav, .app-nav, .site-header, .AppNavbar,
           aside, .sidebar, .sidenav, .AppSidebar, #sidebar, [data-app-sidebar], [role="complementary"],
-          .layout-sidebar, .left-rail, .left-rail-container, .shell-sidebar {
-            display: none !important;
-          }
+          .layout-sidebar, .left-rail, .left-rail-container, .shell-sidebar { display:none !important; }
 
-          /* Remove any reserved left padding or grid columns used for the sidebar */
           .app-shell, .shell, .layout, .layout-grid, .page, .page-content, .content,
-          #root, #app, main, body, html {
-            margin: 0 !important;
-            padding: 0 !important;
-            inset: auto !important;
-          }
+          #root, #app, main, body, html { margin:0 !important; padding:0 !important; inset:auto !important; }
 
-          /* Common patterns where content area is shifted for a sidebar */
           .has-sidebar, .with-sidebar, [data-has-sidebar], .sidebar-open,
           .content--with-sidebar, .content-shift, .content-wrapper {
-            padding-left: 0 !important;
-            margin-left: 0 !important;
-            grid-template-columns: 1fr !important;
+            padding-left:0 !important; margin-left:0 !important; grid-template-columns:1fr !important;
           }
 
-          /* Ensure full-width usable area */
           html, body, #root, #app, main, .page, .content {
-            width: 100% !important;
-            max-width: 100% !important;
-            box-sizing: border-box !important;
-            background: #fff !important;
+            width:100% !important; max-width:100% !important; box-sizing:border-box !important; background:#fff !important;
           }
         `;
         doc.head?.appendChild(style);
-      } catch { /* cross-origin: ignore safely */ }
+      } catch {
+        /* cross-origin: ignore safely */
+      }
     };
     ifr.addEventListener("load", inject);
     return () => ifr.removeEventListener("load", inject);
@@ -190,23 +176,25 @@ function Lightbox({ open, title, url, html, json, onClose }) {
 
   const content = (
     <div className="lb-wrap" onClick={onClose}>
-      <div className="lb" onClick={(e)=>e.stopPropagation()}>
+      <div className="lb" onClick={(e) => e.stopPropagation()}>
         <div className="lb-head">
           <div className="lb-title">{title || "Preview"}</div>
-          <button className="lb-x" onClick={onClose}>×</button>
+          <button className="lb-x" onClick={onClose}>
+            ×
+          </button>
         </div>
         <div className="lb-body">
           {url ? (
             <iframe
               ref={iframeRef}
               title="preview"
-              src={/\?/.test(url)?`${url}&embed=1`:`${url}?embed=1`}
-              style={{border:0, width:"100%", height:"100%"}}
+              src={/\?/.test(url) ? `${url}&embed=1` : `${url}?embed=1`}
+              style={{ border: 0, width: "100%", height: "100%" }}
             />
           ) : html ? (
             <div dangerouslySetInnerHTML={{ __html: html }} />
           ) : json ? (
-            <pre style={{whiteSpace:"pre-wrap"}}>{JSON.stringify(json, null, 2)}</pre>
+            <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(json, null, 2)}</pre>
           ) : (
             <div className="muted">Nothing to preview.</div>
           )}
@@ -232,9 +220,10 @@ export default function ProjectOverviewPanel() {
   const hasProject = !!focusedProjectId;
 
   const fromAt = dr?.fromAt || dr?.from || "";
-  const toAt   = dr?.toAt   || dr?.to   || "";
+  const toAt = dr?.toAt || dr?.to || "";
 
-  const ragKey = rag === "green" ? "active" : rag === "amber" ? "paused" : rag === "red" ? "overdue" : "";
+  const ragKey =
+    rag === "green" ? "active" : rag === "amber" ? "paused" : rag === "red" ? "overdue" : "";
 
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState("");
@@ -251,41 +240,70 @@ export default function ProjectOverviewPanel() {
   const [clockings, setClockings] = React.useState([]);
 
   // lightbox
-  const [lb, setLb] = React.useState({ open:false, title:"", url:"", html:"", json:null });
-  const openUrl = (title, url) => setLb({ open:true, title, url, html:"", json:null });
-  const openJson = (title, json) => setLb({ open:true, title, url:"", html:"", json });
+  const [lb, setLb] = React.useState({ open: false, title: "", url: "", html: "", json: null });
+  const openUrl = (title, url) => setLb({ open: true, title, url, html: "", json: null });
+  const openJson = (title, json) => setLb({ open: true, title, url: "", html: "", json });
 
   React.useEffect(() => {
     let alive = true;
     async function load() {
       if (!hasProject) return;
-      setLoading(true); setErr("");
+      setLoading(true);
+      setErr("");
 
       const rangeParams = {};
       if (fromAt) rangeParams.start = fromAt;
-      if (toAt)   rangeParams.end   = toAt;
+      if (toAt) rangeParams.end = toAt;
 
       try {
-        const pReq = api.get(`/projects/${focusedProjectId}`, { params: { _ts: Date.now() }, timeout: 12000 }).catch(() => null);
+        const pReq = api
+          .get(`/projects/${focusedProjectId}`, { params: { _ts: Date.now() }, timeout: 12000 })
+          .catch(() => null);
 
         const reqs = [
           api.get("/users", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 }),
-          api.get("/tasks", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }),
+          api.get("/tasks", {
+            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }),
           api.get("/groups", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 }),
-          api.get("/vehicles", { params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() }, timeout: 12000 }),
-          api.get("/assets", { params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() }, timeout: 12000 }),
-          api.get("/invoices", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }),
-          api.get("/inspections", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(()=>null),
-          api.get("/inspection-submissions", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(()=>null),
-          api.get("/inspections/submissions", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(()=>null),
-          api.get("/clockings", { params: { projectId: focusedProjectId, limit: 5000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(()=>null),
+          api.get("/vehicles", {
+            params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() },
+            timeout: 12000,
+          }),
+          api.get("/assets", {
+            params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() },
+            timeout: 12000,
+          }),
+          api.get("/invoices", {
+            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }),
+          api.get("/inspections", {
+            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }).catch(() => null),
+          api.get("/inspection-submissions", {
+            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }).catch(() => null),
+          api.get("/inspections/submissions", {
+            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }).catch(() => null),
+          api.get("/clockings", {
+            params: { projectId: focusedProjectId, limit: 5000, _ts: Date.now(), ...rangeParams },
+            timeout: 12000,
+          }).catch(() => null),
         ];
 
         const [pRes, ...rest] = await Promise.allSettled([pReq, ...reqs]);
         if (!alive) return;
 
-        const list = (r) => (Array.isArray(r?.data) ? r.data : (Array.isArray(r?.data?.rows) ? r.data.rows : []));
-        setProject(pRes.status === "fulfilled" && pRes.value ? (pRes.value.data || null) : null);
+        const list = (r) =>
+          Array.isArray(r?.data) ? r.data : Array.isArray(r?.data?.rows) ? r.data.rows : [];
+
+        setProject(pRes.status === "fulfilled" && pRes.value ? pRes.value.data || null : null);
         setUsers(rest[0].status === "fulfilled" ? list(rest[0].value) : []);
         setTasks(rest[1].status === "fulfilled" ? list(rest[1].value) : []);
         setGroups(rest[2].status === "fulfilled" ? list(rest[2].value) : []);
@@ -299,8 +317,8 @@ export default function ProjectOverviewPanel() {
         setSubmissions(subA.length ? subA : subB);
         setClockings(rest[9].status === "fulfilled" ? list(rest[9].value) : []);
 
-        const fails = [pRes, ...rest].filter(x => x?.status === "rejected").length;
-        if (fails) setErr(`${fails} source${fails>1?"s":""} unavailable (partial data).`);
+        const fails = [pRes, ...rest].filter((x) => x?.status === "rejected").length;
+        if (fails) setErr(`${fails} source${fails > 1 ? "s" : ""} unavailable (partial data).`);
       } catch (e) {
         if (!alive) return;
         setErr(e?.response?.data?.error || String(e));
@@ -309,48 +327,76 @@ export default function ProjectOverviewPanel() {
       }
     }
     load();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [focusedProjectId, fromAt, toAt, hasProject]);
 
   const userNameById = React.useMemo(() => {
-    const m = new Map(users.map(u => [idOf(u), u?.name || u?.displayName || u?.fullName || u?.email || idOf(u)]));
+    const m = new Map(
+      users.map((u) => [idOf(u), u?.name || u?.displayName || u?.fullName || u?.email || idOf(u)])
+    );
     return (id) => m.get(String(id)) || String(id);
   }, [users]);
 
   /* ------------------------ Manager identity & notes ---------------------- */
-/* ------------------------ Manager identity & notes ---------------------- */
-const managerUserId =
-  // common id fields
-  project?.managerUserId || project?.pmUserId || project?.ownerUserId ||
-  project?.projectManagerId || project?.projectManagerUserId ||
-  project?.assignedProjectManagerId || project?.assignedManagerId ||
-  project?.managerId || project?.pmId || project?.ownerId ||
+  const managerUserId =
+    project?.managerUserId ||
+    project?.pmUserId ||
+    project?.ownerUserId ||
+    project?.projectManagerId ||
+    project?.projectManagerUserId ||
+    project?.assignedProjectManagerId ||
+    project?.assignedManagerId ||
+    project?.managerId ||
+    project?.pmId ||
+    project?.ownerId ||
+    project?.manager?._id ||
+    project?.manager?.id ||
+    project?.manager?.userId ||
+    project?.pm?._id ||
+    project?.pm?.id ||
+    project?.pm?.userId ||
+    project?.owner?._id ||
+    project?.owner?.id ||
+    project?.owner?.userId ||
+    project?.projectManager?._id ||
+    project?.projectManager?.id ||
+    project?.projectManager?.userId ||
+    project?.assignedProjectManager?._id ||
+    project?.assignedProjectManager?.id ||
+    project?.assignedProjectManager?.userId ||
+    idOf(project?.projectManager) ||
+    idOf(project?.managerUser) ||
+    idOf(project?.manager) ||
+    "";
 
-  // nested objects
-  project?.manager?._id || project?.manager?.id || project?.manager?.userId ||
-  project?.pm?._id || project?.pm?.id || project?.pm?.userId ||
-  project?.owner?._id || project?.owner?.id || project?.owner?.userId ||
-  project?.projectManager?._id || project?.projectManager?.id || project?.projectManager?.userId ||
-  project?.assignedProjectManager?._id || project?.assignedProjectManager?.id || project?.assignedProjectManager?.userId ||
+  const managerObj =
+    project?.manager ||
+    project?.projectManager ||
+    project?.assignedProjectManager ||
+    project?.pm ||
+    project?.owner ||
+    project?.managerUser ||
+    null;
 
-  // fallback: sometimes project.manager is literally the id
-  idOf(project?.projectManager) || idOf(project?.managerUser) || idOf(project?.manager) || "";
-
-const managerObj =
-  project?.manager || project?.projectManager || project?.assignedProjectManager ||
-  project?.pm || project?.owner || project?.managerUser || null;
-
-const managerName =
-  managerObj?.name || managerObj?.displayName || managerObj?.fullName || managerObj?.email ||
-  project?.managerName || project?.pmName || project?.ownerName || project?.projectManagerName ||
-  (managerUserId ? userNameById(managerUserId) : "");
+  const managerName =
+    managerObj?.name ||
+    managerObj?.displayName ||
+    managerObj?.fullName ||
+    managerObj?.email ||
+    project?.managerName ||
+    project?.pmName ||
+    project?.ownerName ||
+    project?.projectManagerName ||
+    (managerUserId ? userNameById(managerUserId) : "");
 
   const projectComments = React.useMemo(() => {
     const base = extractCommentsFromObj(project || {});
     const addText = project?.managerNote || project?.pmNote || project?.note || "";
     if (addText) {
       base.push({
-        at: project?.updatedAt || project?.modifiedAt || project?.createdAt,
+        at: project?.managerNoteAt || project?.pmNoteAt || project?.updatedAt || project?.modifiedAt || project?.createdAt,
         text: addText,
         authorId: managerUserId,
         authorName: managerName,
@@ -361,8 +407,8 @@ const managerName =
   }, [project, managerUserId, managerName]);
 
   const lastProjectUpdate = React.useMemo(() => {
-    const arr = [...projectComments].filter(x => x.text);
-    arr.sort((a,b) => new Date(b.at||0) - new Date(a.at||0));
+    const arr = [...projectComments].filter((x) => x.text);
+    arr.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
     return arr[0] || null;
   }, [projectComments]);
 
@@ -372,185 +418,78 @@ const managerName =
     const base = tasks.filter((t) => {
       const pid = String(t.projectId || t.project?._id || t.project?.id || "");
       if (pid !== focusedProjectId) return false;
-      const s = startOfTask(t), e = dueOfTask(t);
+      const s = startOfTask(t),
+        e = dueOfTask(t);
       if (!within(s || e, fromAt, toAt)) return false;
       return true;
     });
     if (!ragKey) return base;
     return base.filter((t) => {
-      const paused  = isPausedLike(t.status);
+      const paused = isPausedLike(t.status);
       const overdue = isOverdueTask(t, now);
-      const closed  = isClosedLike(t.status);
-      const active  = !paused && !overdue && !closed;
-      if (ragKey === "active")  return active;
-      if (ragKey === "paused")  return paused;
+      const closed = isClosedLike(t.status);
+      const active = !paused && !overdue && !closed;
+      if (ragKey === "active") return active;
+      if (ragKey === "paused") return paused;
       if (ragKey === "overdue") return overdue;
       return true;
     });
   }, [tasks, focusedProjectId, fromAt, toAt, ragKey]);
 
-  // task manager note
-  const latestMgrNoteForTask = React.useCallback((t) => {
-    const comments = extractCommentsFromObj(t);
-    if (t?.managerNote || t?.pmNote || t?.lastManagerNote) {
-      comments.push({
-        at: t?.managerNoteAt || t?.pmNoteAt || t?.updatedAt || t?.modifiedAt || t?.createdAt,
-        text: t?.managerNote || t?.pmNote || t?.lastManagerNote,
-        authorId: managerUserId,
-        authorName: managerName,
-        authorRole: "manager",
+  const latestMgrNoteForTask = React.useCallback(
+    (t) => {
+      const comments = extractCommentsFromObj(t);
+      if (t?.managerNote || t?.pmNote || t?.lastManagerNote) {
+        comments.push({
+          at: t?.managerNoteAt || t?.pmNoteAt || t?.updatedAt || t?.modifiedAt || t?.createdAt,
+          text: t?.managerNote || t?.pmNote || t?.lastManagerNote,
+          authorId: managerUserId,
+          authorName: managerName,
+          authorRole: "manager",
+        });
+      }
+      const filtered = comments.filter((c) => {
+        if (!c?.text) return false;
+        if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
+        if (norm(c.authorRole).includes("manager")) return true;
+        if (managerName && c.authorName === managerName) return true;
+        return false;
       });
-    }
-    const filtered = comments.filter(c => {
-      if (!c?.text) return false;
-      if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
-      if (norm(c.authorRole).includes("manager")) return true;
-      if (managerName && c.authorName === managerName) return true;
-      return false;
-    });
-    filtered.sort((a,b)=> new Date(b.at||0) - new Date(a.at||0));
-    return filtered[0] || null;
-  }, [managerUserId, managerName]);
+      filtered.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+      return filtered[0] || null;
+    },
+    [managerUserId, managerName]
+  );
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
+  // Updated to understand InspectionSubmission schema:
+  // - overallResult (pass/fail)
+  // - runBy.name
+  // - createdAt/submittedAt/completedAt
+  // - subjectAtRun { type, label } for name matching
   const inspectionIndex = React.useMemo(() => {
     const src = submissions.length ? submissions : inspections;
     const idx = { byTarget: new Map(), byName: new Map(), byId: new Map() };
+
     for (const ins of src) {
-      const targetId =
-        idOf(ins.targetId || ins.assetId || ins.vehicleId || ins.subjectId || ins.itemId || "");
-      const statusRaw = String(ins.status ?? ins.result ?? ins.outcome ?? (ins.passed===true?"Pass":ins.passed===false?"Fail":"")).toLowerCase();
-      const passed = statusRaw.includes("pass") && !statusRaw.includes("fail");
-      const at = ins.date || ins.inspectedAt || ins.completedAt || ins.createdAt || ins.updatedAt;
-      const name = ins.title || ins.type || ins.formName || ins.form?.name || ins.name || "";
-      const inspector =
-        ins.inspectorName ||
-        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
-        (ins.inspectorId ? userNameById(ins.inspectorId) : "");
+      const targetId = idOf(
+        ins.targetId ||
+          ins.assetId ||
+          ins.vehicleId ||
+          ins.subjectId ||
+          ins.itemId ||
+          ""
+      );
 
-      const rec = { id:idOf(ins), at, passed, name, inspector };
+      const at =
+        ins.completedAt ||
+        ins.submittedAt ||
+        ins.inspectedAt ||
+        ins.date ||
+        ins.createdAt ||
+        ins.updatedAt;
 
-      if (targetId) {
-        const prev = idx.byTarget.get(targetId);
-        if (!prev || new Date(rec.at||0) > new Date(prev.at||0)) idx.byTarget.set(targetId, rec);
-      }
-      const label = (ins.assetName || ins.vehicleReg || ins.vehicleName || ins.name || ins.label || name || "").toString();
-      if (label) {
-        const prev = idx.byName.get(label);
-        if (!prev || new Date(rec.at||0) > new Date(prev.at||0)) idx.byName.set(label, rec);
-      }
-      idx.byId.set(idOf(ins), rec);
-    }
-    return idx;
-  }, [submissions, inspections, users]);
-
-  const vRows = React.useMemo(() => {
-    return vehicles
-      .filter(v => String(v.projectId || v.project?._id || v.project?.id || "") === focusedProjectId)
-      .map(v => {
-        const id = idOf(v);
-        const byId = inspectionIndex.byTarget.get(id);
-        const byName = inspectionIndex.byName.get(v.reg || v.registration || v.plate || v.name || "");
-        const last = byId || byName || null;
-        const statusOnSelf = v.lastInspectionResult || v.inspectionStatus || (v.lastInspectionPassed===true?"Passed":v.lastInspectionPassed===false?"Failed":"");
-        return {
-          id,
-          reg: v.reg || v.registration || v.plate || v.name || "—",
-          driver: v.driverName || (v.driverId ? userNameById(v.driverId) : (v.driver ? userNameById(idOf(v.driver)) : "")),
-          status: v.status || "",
-          lastInspectionAt: last?.at || v.lastInspectionAt || v.inspectionAt || "",
-          lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : (statusOnSelf || ""),
-          lastInspectionId: last?.id || null,
-        };
-      });
-  }, [vehicles, focusedProjectId, inspectionIndex, users]);
-
-  const aRows = React.useMemo(() => {
-    return assets
-      .filter(a => String(a.projectId || a.project?._id || a.project?.id || "") === focusedProjectId)
-      .map(a => {
-        const id = idOf(a);
-        const byId = inspectionIndex.byTarget.get(id);
-        const byName = inspectionIndex.byName.get(a.name || a.title || "");
-        const last = byId || byName || null;
-        const statusOnSelf = a.lastInspectionResult || a.inspectionStatus || (a.lastInspectionPassed===true?"Passed":a.lastInspectionPassed===false?"Failed":"");
-        return {
-          id,
-          name: a.name || a.title || "—",
-          lastInspectionAt: last?.at || a.lastInspectionAt || a.inspectionAt || "",
-          lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : (statusOnSelf || ""),
-          lastInspectionId: last?.id || null,
-        };
-      });
-  }, [assets, focusedProjectId, inspectionIndex]);
-
-  /* ----------------------- Invoices + outstanding ------------------------- */
-const invRows = React.useMemo(() => {
-  return invoices
-    .filter(inv => String(inv.projectId || inv.project?._id || inv.project?.id || "") === focusedProjectId)
-    .map(inv => {
-      const amount = Number(inv.total ?? inv.amount ?? inv.value ?? 0);
-      const paid = Number(inv.paid ?? inv.amountPaid ?? inv.paidAmount ?? 0);
-
-      const statusRaw =
-        inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
-
-      const statusNorm = String(statusRaw || "").toLowerCase();
-
-      const paidLike =
-        !!inv.paidAt ||
-        /paid|settled|complete|completed/.test(statusNorm) ||
-        (paid > 0 && paid >= amount);
-
-      const balance =
-        Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? (amount - paid));
-
-      const safeBalance = paidLike ? 0 : (isNaN(balance) ? (amount - paid) : balance);
-
-      return {
-        id: idOf(inv),
-        number: inv.number || inv.ref || inv.reference || inv.code || idOf(inv),
-        submittedAt: inv.submittedAt || inv.issueDate || inv.date || inv.createdAt || "",
-        status: statusRaw,
-        statusNorm,
-        amount,
-        paid,
-        balance: safeBalance,
-        fileUrl: inv.fileUrl || inv.url || inv.documentUrl || inv.attachment?.url || inv.file?.url || "",
-      };
-    });
-}, [invoices, focusedProjectId]);
-
-const outstandingTotal = React.useMemo(() => {
-  return invRows.reduce((sum, r) => sum + (isNaN(r.balance) ? 0 : r.balance), 0);
-}, [invRows]);
-
-  /* --------------------------- Inspections feed --------------------------- */
-const inspRows = React.useMemo(() => {
-  const src = submissions.length ? submissions : inspections;
-
-  return src
-    .map((ins) => {
-      // Title (matches SubmissionView: sub.formTitle)
-      const name =
-        ins.formTitle ||
-        ins.title ||
-        ins.formName ||
-        ins.form?.name ||
-        ins.name ||
-        "";
-
-      // Inspector (matches SubmissionView: sub.runBy?.name)
-      const inspector =
-        ins.runBy?.name ||
-        ins.signoff?.name ||
-        ins.runBy?.email ||
-        ins.inspectorName ||
-        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
-        (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
-        "";
-
-      // Overall status (matches SubmissionView: sub.overallResult => pass/fail)
+      // Determine pass/fail (prefer overallResult)
       const raw = String(
         ins.overallResult ??
           ins.status ??
@@ -558,71 +497,247 @@ const inspRows = React.useMemo(() => {
           ins.outcome ??
           (ins.passed === true ? "pass" : ins.passed === false ? "fail" : "")
       ).toLowerCase();
+      const passed = raw === "pass" || (raw.includes("pass") && !raw.includes("fail"));
 
-      const status =
-        raw === "pass" ? "Passed" :
-        raw === "fail" ? "Failed" :
-        raw ? raw : "";
-
-      // Manager comment (matches SubmissionView: sub.managerComments preferred)
-      let managerComment = "";
-      if (Array.isArray(ins.managerComments) && ins.managerComments.length) {
-        // pick latest by timestamp if present, otherwise last item
-        const sorted = [...ins.managerComments].sort(
-          (a, b) => new Date(b.at || b.createdAt || 0) - new Date(a.at || a.createdAt || 0)
-        );
-        managerComment = sorted[0]?.comment || "";
-      } else if (Array.isArray(ins.comments) && ins.comments.length) {
-        // legacy fallback used in SubmissionView
-        const sorted = [...ins.comments].sort(
-          (a, b) => new Date(b.createdAt || b.at || 0) - new Date(a.createdAt || a.at || 0)
-        );
-        managerComment = sorted[0]?.comment || "";
-      } else {
-        // last-ditch fallback if some endpoints store manager notes directly
-        managerComment =
-          ins.managerNote ||
-          ins.managerComment ||
-          ins.lastManagerNote ||
-          "";
-      }
-
-      const date =
-        ins.completedAt ||
-        ins.submittedAt ||
-        ins.createdAt ||
-        ins.updatedAt ||
-        ins.date ||
+      const name =
+        ins.formTitle ||
+        ins.title ||
+        ins.type ||
+        ins.formName ||
+        ins.form?.name ||
+        ins.name ||
         "";
 
-      const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
+      const inspector =
+        ins.runBy?.name ||
+        ins.signoff?.name ||
+        ins.inspectorName ||
+        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
+        (ins.inspectorId ? userNameById(ins.inspectorId) : "");
 
-      return {
-        id: idOf(ins),
-        date,
-        name,
-        scope,
-        status,
-        inspector,
-        managerComment,
-        isSubmission: Boolean(ins.items || ins.managerComments || ins.overallResult || ins.runBy),
-      };
-    })
-    .filter((x) => within(x.date, fromAt, toAt))
-    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-}, [submissions, inspections, fromAt, toAt, users]);
+      const rec = { id: idOf(ins), at, passed, name, inspector };
+
+      if (targetId) {
+        const prev = idx.byTarget.get(targetId);
+        if (!prev || new Date(rec.at || 0) > new Date(prev.at || 0)) idx.byTarget.set(targetId, rec);
+      }
+
+      // Build a "label" that can match vehicle reg / asset name
+      const label = String(
+        ins.assetName ||
+          ins.vehicleReg ||
+          ins.vehicleName ||
+          ins.subjectAtRun?.label ||
+          ins.label ||
+          ins.name ||
+          ""
+      ).trim();
+
+      if (label) {
+        const prev = idx.byName.get(label);
+        if (!prev || new Date(rec.at || 0) > new Date(prev.at || 0)) idx.byName.set(label, rec);
+      }
+
+      idx.byId.set(idOf(ins), rec);
+    }
+    return idx;
+  }, [submissions, inspections, users, userNameById]);
+
+  const vRows = React.useMemo(() => {
+    return vehicles
+      .filter((v) => String(v.projectId || v.project?._id || v.project?.id || "") === focusedProjectId)
+      .map((v) => {
+        const id = idOf(v);
+        const regKey = String(v.reg || v.registration || v.plate || v.name || "").trim();
+
+        const byId = inspectionIndex.byTarget.get(id);
+        const byName = regKey ? inspectionIndex.byName.get(regKey) : null;
+        const last = byId || byName || null;
+
+        const statusOnSelf =
+          v.lastInspectionResult ||
+          v.inspectionStatus ||
+          (v.lastInspectionPassed === true ? "Passed" : v.lastInspectionPassed === false ? "Failed" : "");
+
+        // ✅ Always show the last inspection date (prefer actual last inspection record)
+        const lastInspectionAt =
+          last?.at ||
+          v.lastInspectionAt ||
+          v.inspectionAt ||
+          v.lastInspectedAt ||
+          v.lastInspectionDate ||
+          "";
+
+        return {
+          id,
+          reg: regKey || "—",
+          driver:
+            v.driverName ||
+            (v.driverId ? userNameById(v.driverId) : v.driver ? userNameById(idOf(v.driver)) : ""),
+          status: v.status || "",
+          lastInspectionAt,
+          lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
+          lastInspectionId: last?.id || null,
+        };
+      });
+  }, [vehicles, focusedProjectId, inspectionIndex, users, userNameById]);
+
+  const aRows = React.useMemo(() => {
+    return assets
+      .filter((a) => String(a.projectId || a.project?._id || a.project?.id || "") === focusedProjectId)
+      .map((a) => {
+        const id = idOf(a);
+        const nameKey = String(a.name || a.title || "").trim();
+
+        const byId = inspectionIndex.byTarget.get(id);
+        const byName = nameKey ? inspectionIndex.byName.get(nameKey) : null;
+        const last = byId || byName || null;
+
+        const statusOnSelf =
+          a.lastInspectionResult ||
+          a.inspectionStatus ||
+          (a.lastInspectionPassed === true ? "Passed" : a.lastInspectionPassed === false ? "Failed" : "");
+
+        // ✅ Always show the last inspection date (prefer actual last inspection record)
+        const lastInspectionAt =
+          last?.at ||
+          a.lastInspectionAt ||
+          a.inspectionAt ||
+          a.lastInspectedAt ||
+          a.lastInspectionDate ||
+          "";
+
+        return {
+          id,
+          name: nameKey || "—",
+          lastInspectionAt,
+          lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
+          lastInspectionId: last?.id || null,
+        };
+      });
+  }, [assets, focusedProjectId, inspectionIndex]);
+
+  /* ----------------------- Invoices + outstanding ------------------------- */
+  const invRows = React.useMemo(() => {
+    return invoices
+      .filter((inv) => String(inv.projectId || inv.project?._id || inv.project?.id || "") === focusedProjectId)
+      .map((inv) => {
+        const amount = Number(inv.total ?? inv.amount ?? inv.value ?? 0);
+        const paid = Number(inv.paid ?? inv.amountPaid ?? inv.paidAmount ?? 0);
+
+        const statusRaw = inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
+        const statusNorm = String(statusRaw || "").toLowerCase();
+
+        const paidLike =
+          !!inv.paidAt ||
+          /paid|settled|complete|completed/.test(statusNorm) ||
+          (paid > 0 && paid >= amount);
+
+        const balance = Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? amount - paid);
+        const safeBalance = paidLike ? 0 : isNaN(balance) ? amount - paid : balance;
+
+        return {
+          id: idOf(inv),
+          number: inv.number || inv.ref || inv.reference || inv.code || idOf(inv),
+          submittedAt: inv.submittedAt || inv.issueDate || inv.date || inv.createdAt || "",
+          status: statusRaw,
+          statusNorm,
+          amount,
+          paid,
+          balance: safeBalance,
+          fileUrl: inv.fileUrl || inv.url || inv.documentUrl || inv.attachment?.url || inv.file?.url || "",
+        };
+      });
+  }, [invoices, focusedProjectId]);
+
+  const outstandingTotal = React.useMemo(() => {
+    return invRows.reduce((sum, r) => sum + (isNaN(r.balance) ? 0 : r.balance), 0);
+  }, [invRows]);
+
+  /* --------------------------- Inspections feed --------------------------- */
+  const inspRows = React.useMemo(() => {
+    const src = submissions.length ? submissions : inspections;
+
+    return src
+      .map((ins) => {
+        const name = ins.formTitle || ins.title || ins.formName || ins.form?.name || ins.name || "";
+
+        const inspector =
+          ins.runBy?.name ||
+          ins.signoff?.name ||
+          ins.runBy?.email ||
+          ins.inspectorName ||
+          (ins.inspector ? ins.inspector.name || userNameById(idOf(ins.inspector)) : "") ||
+          (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
+          "";
+
+        const raw = String(
+          ins.overallResult ??
+            ins.status ??
+            ins.result ??
+            ins.outcome ??
+            (ins.passed === true ? "pass" : ins.passed === false ? "fail" : "")
+        ).toLowerCase();
+
+        const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
+
+        let managerComment = "";
+        if (Array.isArray(ins.managerComments) && ins.managerComments.length) {
+          const sorted = [...ins.managerComments].sort(
+            (a, b) => new Date(b.at || b.createdAt || 0) - new Date(a.at || a.createdAt || 0)
+          );
+          managerComment = sorted[0]?.comment || "";
+        } else if (Array.isArray(ins.comments) && ins.comments.length) {
+          const sorted = [...ins.comments].sort(
+            (a, b) => new Date(b.createdAt || b.at || 0) - new Date(a.createdAt || a.at || 0)
+          );
+          managerComment = sorted[0]?.comment || "";
+        } else {
+          managerComment = ins.managerNote || ins.managerComment || ins.lastManagerNote || "";
+        }
+
+        const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
+
+        const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
+
+        return {
+          id: idOf(ins),
+          date,
+          name,
+          scope,
+          status,
+          inspector,
+          managerComment,
+          isSubmission: Boolean(ins.items || ins.managerComments || ins.overallResult || ins.runBy),
+        };
+      })
+      .filter((x) => within(x.date, fromAt, toAt))
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  }, [submissions, inspections, fromAt, toAt, users, userNameById]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
     const text = [
-      r?.type, r?.status, r?.reason, r?.state, r?.category, r?.label, r?.note, r?.comment, r?.details, r?.message
-    ].map(s => String(s || "").toLowerCase()).join(" ");
+      r?.type,
+      r?.status,
+      r?.reason,
+      r?.state,
+      r?.category,
+      r?.label,
+      r?.note,
+      r?.comment,
+      r?.details,
+      r?.message,
+    ]
+      .map((s) => String(s || "").toLowerCase())
+      .join(" ");
     if (/\biod|injury\s*on\s*duty|injured\b/.test(text)) return "iod";
     if (/\bsick|ill|medical\b/.test(text)) return "sick";
     if (/\b(training|course|induction)\b/.test(text)) return "training";
     if (/\b(present|checked\s*in|clocked\s*in|\bin\b)\b/.test(text)) return "present";
     return "";
   }
+
   const iodRows = React.useMemo(() => {
     const fset = new Map();
     for (const r of clockings) {
@@ -633,23 +748,24 @@ const inspRows = React.useMemo(() => {
       if (clockingType(r) !== "iod") continue;
       const uid = idOf(r.user || r.userId || r.uid);
       if (!uid) continue;
-      const note = r?.note || r?.comment || r?.reason || r?.details || r?.message || r?.description || "";
+      const note =
+        r?.note || r?.comment || r?.reason || r?.details || r?.message || r?.description || "";
       const prev = fset.get(uid);
-      if (!prev || new Date(at||0) < new Date(prev.at||0)) {
+      if (!prev || new Date(at || 0) < new Date(prev.at || 0)) {
         fset.set(uid, { id: idOf(r), user: userNameById(uid), at, note });
       }
     }
-    return Array.from(fset.values()).sort((a,b)=> new Date(b.at||0) - new Date(a.at||0));
-  }, [clockings, focusedProjectId, fromAt, toAt, users]);
+    return Array.from(fset.values()).sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+  }, [clockings, focusedProjectId, fromAt, toAt, users, userNameById]);
 
   /* ---------------------------- click handlers ---------------------------- */
-  const openTask = (t) => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`);
   const openInspection = (row) => {
     const path = row.isSubmission ? `/inspections/submissions/${row.id}` : `/inspections/${row.id}`;
     openUrl(row.name || "Inspection", path);
   };
   const openVehicle = (id) => openUrl("Vehicle", `/vehicles/${id}`);
   const openAsset = (id) => openUrl("Asset", `/assets/${id}`);
+
   const openInvoice = async (inv) => {
     if (inv.fileUrl) return openUrl(`Invoice ${inv.number}`, inv.fileUrl);
     try {
@@ -662,6 +778,7 @@ const inspRows = React.useMemo(() => {
       return openJson(`Invoice ${inv.number}`, inv);
     }
   };
+
   const openClocking = async (row) => {
     try {
       const r = await api.get(`/clockings/${row.id}`, { params: { _ts: Date.now() }, timeout: 10000 });
@@ -672,10 +789,8 @@ const inspRows = React.useMemo(() => {
   };
 
   /* ------------------------------- pills --------------------------------- */
-  const pill = (label, tone="muted") => (
-    <span className={`pill pill--${tone}`}>{label}</span>
-  );
-  const toneForStatus = (s="") => {
+  const pill = (label, tone = "muted") => <span className={`pill pill--${tone}`}>{label}</span>;
+  const toneForStatus = (s = "") => {
     const v = String(s).toLowerCase();
     if (/(pass|paid|complete|completed|done|ok|active)/.test(v)) return "ok";
     if (/(fail|overdue|critical|blocked|void|cancel)/.test(v)) return "bad";
@@ -685,9 +800,16 @@ const inspRows = React.useMemo(() => {
 
   /* -------------------------------- UI ----------------------------------- */
   const start = project?.start || project?.startDate || project?.begin || project?.startAt || "";
-  const end   = project?.end || project?.endDate || project?.due || project?.deadlineAt || project?.finishAt || "";
-  const updatedAt =
-    project?.updatedAt || project?.modifiedAt || project?.lastUpdatedAt || project?.statusAt || "";
+  const end = project?.end || project?.endDate || project?.due || project?.deadlineAt || project?.finishAt || "";
+
+  // ✅ Last Updated prefers PM note/comment timestamp
+  const updatedAt = React.useMemo(() => {
+    const fromLastNote = lastProjectUpdate?.at || "";
+    const fromTopNote = project?.managerNoteAt || project?.pmNoteAt || "";
+    const fromProjectStamp =
+      project?.updatedAt || project?.modifiedAt || project?.lastUpdatedAt || project?.statusAt || "";
+    return pickLatestDate(fromLastNote, fromTopNote) || fromProjectStamp || "";
+  }, [project, lastProjectUpdate]);
 
   return (
     <div>
@@ -717,7 +839,7 @@ const inspRows = React.useMemo(() => {
         <div className="row">
           <div className="h">Project Overview</div>
           {loading && <div className="muted" style={{ fontSize: 12 }}>Loading…</div>}
-          {err && <div style={{ color:"#b91c1c", fontSize:12 }}>{err}</div>}
+          {err && <div style={{ color: "#b91c1c", fontSize: 12 }}>{err}</div>}
 
           {/* Header facts */}
           <div className="kv">
@@ -725,13 +847,15 @@ const inspRows = React.useMemo(() => {
             <div>{managerName || <span className="muted">—</span>}</div>
 
             <div className="muted">Start → End</div>
-            <div>{dOr(start)} → {dOr(end)}</div>
+            <div>
+              {dOr(start)} → {dOr(end)}
+            </div>
 
             <div className="muted">Last Updated</div>
             <div>
               {dOr(updatedAt, "datetime")}
               {lastProjectUpdate?.text ? (
-                <div className="muted" style={{ marginTop:2 }}>
+                <div className="muted" style={{ marginTop: 2 }}>
                   <em>“{lastProjectUpdate.text}”</em>
                   {lastProjectUpdate?.at ? <> — {dOr(lastProjectUpdate.at, "datetime")}</> : null}
                   {lastProjectUpdate?.authorName ? <> · {lastProjectUpdate.authorName}</> : null}
@@ -758,11 +882,17 @@ const inspRows = React.useMemo(() => {
                 <tbody>
                   {scopedTasks.slice(0, 12).map((t) => {
                     const gids = groupIdsOfTask(t);
-                    const groupBits = gids.map(gid => {
-                      const g = groups.find(x => idOf(x) === gid);
+                    const groupBits = gids.map((gid) => {
+                      const g = groups.find((x) => idOf(x) === gid);
                       const leaderId =
-                        g?.leaderUserId || g?.leaderId || g?.groupLeaderUserId || g?.groupLeaderId ||
-                        g?.leader?._id || g?.leader?.id || g?.leader || "";
+                        g?.leaderUserId ||
+                        g?.leaderId ||
+                        g?.groupLeaderUserId ||
+                        g?.groupLeaderId ||
+                        g?.leader?._id ||
+                        g?.leader?.id ||
+                        g?.leader ||
+                        "";
                       const leaderName = leaderId ? userNameById(leaderId) : "";
                       return `${g?.name || gid}${leaderName ? ` — ${leaderName}` : ""}`;
                     });
@@ -773,18 +903,25 @@ const inspRows = React.useMemo(() => {
                     return (
                       <tr key={idOf(t)}>
                         <td>
-                          <span className="linkish" onClick={()=>openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`)}>
+                          <span
+                            className="linkish"
+                            onClick={() => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`)}
+                          >
                             {t.title || t.name || idOf(t)}
                           </span>
                         </td>
                         <td>
                           {pill(status, toneForStatus(status))}
                           {due ? <span> due {dOr(due)}</span> : null}
-                          {overdue ? <> {pill("Overdue","bad")}</> : null}
+                          {overdue ? <> {pill("Overdue", "bad")}</> : null}
                         </td>
                         <td>{groupBits.length ? groupBits.join(", ") : <span className="muted">—</span>}</td>
                         <td>
-                          {latestMgr?.at ? <div className="muted">{dOr(latestMgr.at, "datetime")}</div> : <span className="muted">—</span>}
+                          {latestMgr?.at ? (
+                            <div className="muted">{dOr(latestMgr.at, "datetime")}</div>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
                           {latestMgr?.text ? <div className="muted"><em>“{latestMgr.text}”</em></div> : null}
                         </td>
                       </tr>
@@ -803,22 +940,51 @@ const inspRows = React.useMemo(() => {
                 <div className="muted">None in range</div>
               ) : (
                 <table className="table">
-                  <thead><tr><th>Reg</th><th>Driver</th><th>Status</th><th>Last Inspection</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th>Reg</th>
+                      <th>Driver</th>
+                      <th>Status</th>
+                      <th>Last Inspection</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {vRows.slice(0,12).map(v => (
+                    {vRows.slice(0, 12).map((v) => (
                       <tr key={v.id}>
-                        <td><span className="linkish" onClick={()=>openVehicle(v.id)}>{v.reg}</span></td>
+                        <td>
+                          <span className="linkish" onClick={() => openVehicle(v.id)}>
+                            {v.reg}
+                          </span>
+                        </td>
                         <td>{v.driver || <span className="muted">—</span>}</td>
                         <td>{v.status ? pill(v.status, toneForStatus(v.status)) : <span className="muted">—</span>}</td>
                         <td>
                           {v.lastInspectionAt ? (
                             <>
-                              {dOr(v.lastInspectionAt)} · {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
+                              {dOr(v.lastInspectionAt, "datetime")} ·{" "}
+                              {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
                               {v.lastInspectionId ? (
-                                <> · <span className="linkish" onClick={()=>openInspection({ id:v.lastInspectionId, isSubmission:true, name:`Inspection ${v.reg}` })}>view</span></>
+                                <>
+                                  {" "}
+                                  ·{" "}
+                                  <span
+                                    className="linkish"
+                                    onClick={() =>
+                                      openInspection({
+                                        id: v.lastInspectionId,
+                                        isSubmission: true,
+                                        name: `Inspection ${v.reg}`,
+                                      })
+                                    }
+                                  >
+                                    view
+                                  </span>
+                                </>
                               ) : null}
                             </>
-                          ) : <span className="muted">—</span>}
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -833,20 +999,47 @@ const inspRows = React.useMemo(() => {
                 <div className="muted">None in range</div>
               ) : (
                 <table className="table">
-                  <thead><tr><th>Asset</th><th>Last Inspection</th></tr></thead>
+                  <thead>
+                    <tr>
+                      <th>Asset</th>
+                      <th>Last Inspection</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {aRows.slice(0,12).map(a => (
+                    {aRows.slice(0, 12).map((a) => (
                       <tr key={a.id}>
-                        <td><span className="linkish" onClick={()=>openAsset(a.id)}>{a.name}</span></td>
+                        <td>
+                          <span className="linkish" onClick={() => openAsset(a.id)}>
+                            {a.name}
+                          </span>
+                        </td>
                         <td>
                           {a.lastInspectionAt ? (
                             <>
-                              {dOr(a.lastInspectionAt)} · {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
+                              {dOr(a.lastInspectionAt, "datetime")} ·{" "}
+                              {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
                               {a.lastInspectionId ? (
-                                <> · <span className="linkish" onClick={()=>openInspection({ id:a.lastInspectionId, isSubmission:true, name:`Inspection ${a.name}` })}>view</span></>
+                                <>
+                                  {" "}
+                                  ·{" "}
+                                  <span
+                                    className="linkish"
+                                    onClick={() =>
+                                      openInspection({
+                                        id: a.lastInspectionId,
+                                        isSubmission: true,
+                                        name: `Inspection ${a.name}`,
+                                      })
+                                    }
+                                  >
+                                    view
+                                  </span>
+                                </>
                               ) : null}
                             </>
-                          ) : <span className="muted">—</span>}
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -859,17 +1052,29 @@ const inspRows = React.useMemo(() => {
           {/* Invoices */}
           <div className="block">
             <div className="h">
-              Invoices {invRows.length ? <span className="muted">· Outstanding: {money(outstandingTotal)}</span> : null}
+              Invoices{" "}
+              {invRows.length ? <span className="muted">· Outstanding: {money(outstandingTotal)}</span> : null}
             </div>
             {!invRows.length ? (
               <div className="muted">None in range</div>
             ) : (
               <table className="table">
-                <thead><tr><th>Invoice #</th><th>Submitted</th><th>Status</th><th>Amount</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Invoice #</th>
+                    <th>Submitted</th>
+                    <th>Status</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {invRows.slice(0,12).map(inv => (
+                  {invRows.slice(0, 12).map((inv) => (
                     <tr key={inv.id}>
-                      <td><span className="linkish" onClick={()=>openInvoice(inv)}>{inv.number}</span></td>
+                      <td>
+                        <span className="linkish" onClick={() => openInvoice(inv)}>
+                          {inv.number}
+                        </span>
+                      </td>
                       <td>{dOr(inv.submittedAt)}</td>
                       <td>{pill(inv.status, toneForStatus(inv.status))}</td>
                       <td>{money(inv.amount)}</td>
@@ -887,12 +1092,25 @@ const inspRows = React.useMemo(() => {
               <div className="muted">None in range</div>
             ) : (
               <table className="table">
-                <thead><tr><th>Date</th><th>Inspection</th><th>Scope</th><th>Status</th><th>Inspector</th><th>Manager comment</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Inspection</th>
+                    <th>Scope</th>
+                    <th>Status</th>
+                    <th>Inspector</th>
+                    <th>Manager comment</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {inspRows.slice(0,12).map(x => (
+                  {inspRows.slice(0, 12).map((x) => (
                     <tr key={x.id}>
-                      <td>{dOr(x.date)}</td>
-                      <td><span className="linkish" onClick={()=>openInspection(x)}>{x.name || "—"}</span></td>
+                      <td>{dOr(x.date, "datetime")}</td>
+                      <td>
+                        <span className="linkish" onClick={() => openInspection(x)}>
+                          {x.name || "—"}
+                        </span>
+                      </td>
                       <td>{x.scope}</td>
                       <td>{x.status ? pill(x.status, toneForStatus(x.status)) : "—"}</td>
                       <td>{x.inspector || <span className="muted">—</span>}</td>
@@ -911,19 +1129,29 @@ const inspRows = React.useMemo(() => {
               <div className="muted">No IOD records in range.</div>
             ) : (
               <table className="table">
-                <thead><tr><th>Name</th><th>Date</th><th>Note</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Date</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {iodRows.slice(0,12).map(r => (
+                  {iodRows.slice(0, 12).map((r) => (
                     <tr key={`${r.user}-${r.at}`}>
                       <td>{r.user}</td>
                       <td>{dOr(r.at)}</td>
                       <td>
                         {r.note ? (
                           <>
-                            {pill("IOD","warn")} {" "}
-                            <span className="linkish" onClick={()=>openClocking(r)}>{r.note}</span>
+                            {pill("IOD", "warn")}{" "}
+                            <span className="linkish" onClick={() => openClocking(r)}>
+                              {r.note}
+                            </span>
                           </>
-                        ) : <span className="muted">—</span>}
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -934,13 +1162,13 @@ const inspRows = React.useMemo(() => {
         </div>
       )}
 
-      {/* Lightbox (portal at document.body) */}
+      {/* Lightbox */}
       <Lightbox
         open={lb.open}
         title={lb.title}
         url={lb.url}
         json={lb.json}
-        onClose={()=>setLb({ open:false, title:"", url:"", html:"", json:null })}
+        onClose={() => setLb({ open: false, title: "", url: "", html: "", json: null })}
       />
     </div>
   );
