@@ -958,6 +958,7 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
     lng = Number.isFinite(lngNum) ? lngNum : lng;
 
     return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
+  }
 
   /* ---------- geofence ops ---------- */
   const fallbackCircle =
