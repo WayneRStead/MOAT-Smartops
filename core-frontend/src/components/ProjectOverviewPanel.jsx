@@ -381,6 +381,7 @@ export default function ProjectOverviewPanel() {
   const [inspections, setInspections] = React.useState([]);
   const [submissions, setSubmissions] = React.useState([]);
   const [clockings, setClockings] = React.useState([]);
+  const [inspMgrCommentById, setInspMgrCommentById] = React.useState({});
 
   // lightbox
   const [lb, setLb] = React.useState({ open: false, title: "", url: "", html: "", json: null });
@@ -757,7 +758,9 @@ export default function ProjectOverviewPanel() {
         const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
 
          // ✅ Newest manager comment ONLY (manager-specific, newest wins)
-const managerComment = newestManagerCommentForInspection(ins, managerUserId, managerName);
+const managerComment =
+  inspMgrCommentById[idOf(ins)] ||
+  newestManagerCommentForInspection(ins, managerUserId, managerName);
 
         const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
         const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
@@ -775,7 +778,49 @@ const managerComment = newestManagerCommentForInspection(ins, managerUserId, man
       })
       .filter((x) => within(x.date, fromAt, toAt))
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-  }, [submissions, inspections, fromAt, toAt, users, managerUserId, managerName]);
+  }, [submissions, inspections, fromAt, toAt, users, managerUserId, managerName, inspMgrCommentById]);
+
+  // NEW: lazy-fetch detail objects for top rows to get managerComments (list endpoint may omit them)
+React.useEffect(() => {
+  let alive = true;
+
+  async function hydrate() {
+    // only hydrate what you're actually showing
+    const top = inspRows.slice(0, 12);
+    const missing = top.filter((r) => !inspMgrCommentById[r.id]);
+
+    if (!missing.length) return;
+
+    const results = await Promise.allSettled(
+      missing.map(async (r) => {
+        const path = r.isSubmission ? `/inspections/submissions/${r.id}` : `/inspections/${r.id}`;
+        const res = await api.get(path, { params: { _ts: Date.now() }, timeout: 12000 });
+        const detail = res?.data || {};
+        const text = newestManagerCommentForInspection(detail, managerUserId, managerName);
+        return { id: r.id, text };
+      })
+    );
+
+    if (!alive) return;
+
+    const patch = {};
+    for (const rr of results) {
+      if (rr.status !== "fulfilled") continue;
+      const { id, text } = rr.value || {};
+      if (id && text) patch[id] = text;
+    }
+
+    if (Object.keys(patch).length) {
+      setInspMgrCommentById((prev) => ({ ...prev, ...patch }));
+    }
+  }
+
+  hydrate();
+
+  return () => {
+    alive = false;
+  };
+}, [inspRows, managerUserId, managerName]); // intentionally NOT depending on inspMgrCommentById to avoid loops
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
