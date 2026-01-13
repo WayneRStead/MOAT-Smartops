@@ -774,17 +774,28 @@ export default function TaskDetail({ id: propId, onClose }) {
       setForms([]); setFormsErr(e?.response?.data?.error || "Failed to load forms");
     }
   }
-  async function loadSubs() {
-    try {
-      const params = { limit: 200, taskId: id };
-      if (projectId) params.projectId = projectId;
-      const { data } = await api.get("/inspections/submissions", { params });
-      setSubs(Array.isArray(data) ? data : []);
-      setSubsErr("");
-    } catch (e) {
-      setSubs([]); setSubsErr(e?.response?.data?.error || "Failed to load submissions");
-    }
+async function loadSubs() {
+  try {
+    const params = { limit: 200, taskId: id };
+    if (projectId) params.projectId = projectId;
+
+    const { data } = await api.get("/inspections/submissions", { params });
+
+    // ✅ handle multiple backend shapes
+    const list =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.items) ? data.items :
+      Array.isArray(data?.rows) ? data.rows :
+      Array.isArray(data?.data) ? data.data :
+      [];
+
+    setSubs(list);
+    setSubsErr("");
+  } catch (e) {
+    setSubs([]);
+    setSubsErr(e?.response?.data?.error || "Failed to load submissions");
   }
+}
   useEffect(() => { loadForms(); loadSubs();   }, [id, projectId]);
 
     /* ---------- submission field resolver (robust) ---------- */
