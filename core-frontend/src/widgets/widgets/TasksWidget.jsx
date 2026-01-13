@@ -233,7 +233,8 @@ export default function TasksWidget({ bare }) {
       `}</style>
 
       {err && <div className="mt-1 text-xs text-red-600">{err}</div>}
-  
+      {loading && <div className="mt-1 text-xs text-gray-500">Loading…</div>}
+
       <div className="grid4">
         {[
           { key: "open",    label: "Open",    tone: "green", count: buckets.open },
