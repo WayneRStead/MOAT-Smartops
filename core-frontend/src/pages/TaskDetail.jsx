@@ -344,6 +344,10 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [fltFrom, setFltFrom] = useState(""); // YYYY-MM-DD
   const [fltTo, setFltTo] = useState("");
 
+    // Standalone inspection submissions date filter (independent of global filter)
+  const [inspFrom, setInspFrom] = useState(""); // YYYY-MM-DD
+  const [inspTo, setInspTo] = useState("");     // YYYY-MM-DD
+
   // Overview inline-edit state (mirrors task)
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState("medium");
@@ -1363,6 +1367,26 @@ const inDateWindow = (d) => {
   const toOk   = !fltTo   || dt <= new Date(`${fltTo}T23:59:59.999`);
   return fromOk && toOk;
 };
+// INSPECTIONS: separate date filter (date-only compare to avoid timezone weirdness)
+const isoToLocalDateOnly = (iso) => {
+  if (!iso) return "";
+  const dt = new Date(iso);
+  if (isNaN(+dt)) return "";
+  return toLocalDateOnly(dt); // uses your helper (timezone-adjusted)
+};
+
+const inInspectionWindow = (s) => {
+  // if no inspection filter, show all
+  if (!inspFrom && !inspTo) return true;
+
+  const whenIso = submissionWhenIso(s);
+  const day = isoToLocalDateOnly(whenIso); // "YYYY-MM-DD"
+  if (!day) return false;
+
+  if (inspFrom && day < inspFrom) return false;
+  if (inspTo && day > inspTo) return false;
+  return true;
+};
 
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
@@ -2039,74 +2063,109 @@ const inDateWindow = (d) => {
 
         {/* Recent submissions (filtered) */}
         <div className="space-y-2">
-          <div className="font-medium text-sm bg-gray-50 rounded px-2 py-1 flex items-center justify-between">
-            <span className="font-semibold">Recent Inspection Submissions</span>
-            <div className="flex gap-2">
-              <button
-  className="px-2 py-1 border rounded text-xs"
-  onClick={async () => {
-    setErr(""); setInfo("");
+          <div className="font-medium text-sm bg-gray-50 rounded px-2 py-1 flex items-center justify-between flex-wrap gap-2">
+  <span className="font-semibold">Recent Inspection Submissions</span>
 
-    // 1) filter by date window
-    const filtered = (subs || []).filter(s => inDateWindow(submissionWhenIso(s)));
+  <div className="flex items-end gap-2 text-xs flex-wrap">
+    <label className="block">
+      <div className="text-[11px] text-gray-600">Inspection From</div>
+      <input
+        type="date"
+        className="border p-2 rounded"
+        value={inspFrom}
+        onChange={(e) => setInspFrom(e.target.value)}
+      />
+    </label>
 
-    // 2) then require coords (using the SAME resolver as the table)
-    const withCoords = filtered.filter((s) => {
-      const { lat, lng } = resolveSubmissionFields(s);
-      return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
-    });
+    <label className="block">
+      <div className="text-[11px] text-gray-600">Inspection To</div>
+      <input
+        type="date"
+        className="border p-2 rounded"
+        value={inspTo}
+        onChange={(e) => setInspTo(e.target.value)}
+      />
+    </label>
 
-    if (!withCoords.length) {
-      setErr("No lat/lng on submissions (in filter window) to export.");
-      return;
-    }
+    {(inspFrom || inspTo) && (
+      <button
+        type="button"
+        className="px-2 py-2 border rounded"
+        onClick={() => {
+          setInspFrom("");
+          setInspTo("");
+        }}
+      >
+        Clear
+      </button>
+    )}
 
-    const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
+    <button
+      type="button"
+      className="px-2 py-2 border rounded"
+      onClick={async () => {
+        setErr(""); setInfo("");
 
-    const placemarks = withCoords.map((s) => {
-      const whenIso = submissionWhenIso(s);
-      const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
+        // 1) filter by INSPECTION window (standalone)
+        const filtered = (subs || []).filter(inInspectionWindow);
 
-      // ✅ use resolver values, not raw s.lat/s.lng
-      const { outcome, formTitle, inspector, lat, lng } = resolveSubmissionFields(s);
+        // 2) then require coords (using the SAME resolver as the table)
+        const withCoords = filtered.filter((s) => {
+          const { lat, lng } = resolveSubmissionFields(s);
+          return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+        });
 
-      const latN = Number(lat);
-      const lngN = Number(lng);
-      if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return "";
+        if (!withCoords.length) {
+          setErr("No lat/lng on submissions (in inspection filter window) to export.");
+          return;
+        }
 
-      const desc = escapeXml(
-        `Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`
-      );
+        const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
 
-      return `
+        const placemarks = withCoords.map((s) => {
+          const whenIso = submissionWhenIso(s);
+          const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
+
+          const { outcome, formTitle, inspector, lat, lng } = resolveSubmissionFields(s);
+
+          const latN = Number(lat);
+          const lngN = Number(lng);
+          if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return "";
+
+          const desc = escapeXml(
+            `Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`
+          );
+
+          return `
 <Placemark>
   <name>${escapeXml(formTitle)}</name>
   <description>${desc}</description>
   <Point><coordinates>${r6(lngN)},${r6(latN)},0</coordinates></Point>
 </Placemark>`;
-    }).join("");
+        }).join("");
 
-    if (!placemarks.trim()) {
-      setErr("No valid placemarks could be built (lat/lng were not usable).");
-      return;
-    }
+        if (!placemarks.trim()) {
+          setErr("No valid placemarks could be built (lat/lng were not usable).");
+          return;
+        }
 
-    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+        const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document><name>${escapeXml(title)}</name>${placemarks}</Document>
 </kml>`;
 
-    await downloadKMZ(`${title}.kmz`, kml);
-    setInfo("Exported inspection submissions KMZ.");
-    setTimeout(()=>setInfo(""), 1000);
-  }}
->
-  Export Submissions KMZ
-</button>
-            </div>
-          </div>
+        await downloadKMZ(`${title}.kmz`, kml);
+        setInfo("Exported inspection submissions KMZ.");
+        setTimeout(()=>setInfo(""), 1000);
+      }}
+    >
+      Export Submissions KMZ
+    </button>
+  </div>
+</div>
+
           {subsErr && <div className="text-red-600 text-sm">{subsErr}</div>}
-          {subs.filter(s => inDateWindow(submissionWhenIso(s))).length ? (
+          {subs.filter(inInspectionWindow).length ? (
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50">
@@ -2121,8 +2180,8 @@ const inDateWindow = (d) => {
               </thead>
                             <tbody>
                 {subs
-                  .filter(s => !fltFrom && !fltTo ? true : inDateWindow(submissionWhenIso(s)))
-                  .map((s) => {
+  .filter(inInspectionWindow)
+  .map((s) => {
                     const { submitted, inspector, outcome, formTitle, lat, lng } = resolveSubmissionFields(s);
                     const whenText = submitted ? submitted.toLocaleString() : "—";
                     const latV = Number.isFinite(Number(lat)) ? r6(Number(lat)) : "—";
