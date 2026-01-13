@@ -12,7 +12,8 @@ const isPausedLike = (s) =>
   ["paused", "paused-problem", "on-hold", "hold", "pause"].includes(norm(s));
 
 const startOfTask = (t) => t?.startAt || t?.startDate || t?.begin || t?.createdAt || null;
-const dueOfTask = (t) => t?.dueAt || t?.dueDate || t?.endAt || t?.endDate || t?.deadlineAt || t?.due || null;
+const dueOfTask = (t) =>
+  t?.dueAt || t?.dueDate || t?.endAt || t?.endDate || t?.deadlineAt || t?.due || null;
 const isOverdueTask = (t, now = new Date()) => {
   const d = dueOfTask(t);
   if (!d) return false;
@@ -65,7 +66,7 @@ function extractCommentsFromObj(obj) {
   return pools
     .map((c) => ({
       at: c?.at || c?.date || c?.createdAt || c?.timestamp || c?.updatedAt || c?.when,
-      text: c?.text || c?.note || c?.comment || c?.message || c?.details || "",
+      text: c?.text || c?.note || c?.comment || c?.message || c?.details || c?.remark || c?.reason || "",
       authorId: idOf(c?.user || c?.userId || c?.authorId || c?.by),
       authorName: c?.userName || c?.authorName || c?.author || c?.byName || "",
       authorRole: c?.userRole || c?.authorRole || c?.role || "",
@@ -96,16 +97,43 @@ function money(n, currency = "ZAR") {
   }
 }
 
-// Used for LAST UPDATED (prefer manager/project notes)
-function pickLatestDate(...cands) {
-  let best = null;
-  for (const raw of cands) {
-    if (!raw) continue;
-    const d = new Date(raw);
-    if (isNaN(+d)) continue;
-    if (!best || d > best) best = d;
+// Used elsewhere; kept as-is
+function deriveInspectionStatus(ins) {
+  const direct =
+    ins.overallStatus ||
+    ins.summaryStatus ||
+    ins.finalStatus ||
+    ins.passFail ||
+    ins.result ||
+    ins.outcome ||
+    ins.status ||
+    ins.state;
+
+  if (direct != null && String(direct).trim() !== "") return String(direct);
+
+  if (ins.passed === true) return "Pass";
+  if (ins.passed === false) return "Fail";
+
+  const overallPassed = ins.overall?.passed ?? ins.summary?.passed ?? ins.stats?.passed ?? ins.totals?.passed;
+  if (overallPassed === true) return "Pass";
+  if (overallPassed === false) return "Fail";
+
+  const failCount =
+    ins.failedCount ??
+    ins.failCount ??
+    ins.stats?.failCount ??
+    ins.summary?.failCount ??
+    ins.totals?.failCount;
+  if (Number.isFinite(Number(failCount))) return Number(failCount) > 0 ? "Fail" : "Pass";
+
+  const answers = ins.responses || ins.answers || ins.items || ins.results || [];
+  if (Array.isArray(answers) && answers.length) {
+    const text = JSON.stringify(answers).toLowerCase();
+    if (text.includes("fail")) return "Fail";
+    if (text.includes("pass")) return "Pass";
   }
-  return best ? best.toISOString() : "";
+
+  return "";
 }
 
 /* --------------------------- filter bridge ------------------------------- */
@@ -133,6 +161,7 @@ function useFiltersBridge() {
 }
 
 /* -------------------------- Lightweight Lightbox ------------------------- */
+/* Uses a portal and injects CSS into the iframe to hide any app chrome (sidebar/header) */
 function Lightbox({ open, title, url, html, json, onClose }) {
   const iframeRef = React.useRef(null);
 
@@ -149,18 +178,26 @@ function Lightbox({ open, title, url, html, json, onClose }) {
           header, nav, footer,
           .navbar, .topnav, .app-nav, .site-header, .AppNavbar,
           aside, .sidebar, .sidenav, .AppSidebar, #sidebar, [data-app-sidebar], [role="complementary"],
-          .layout-sidebar, .left-rail, .left-rail-container, .shell-sidebar { display:none !important; }
-
+          .layout-sidebar, .left-rail, .left-rail-container, .shell-sidebar {
+            display: none !important;
+          }
           .app-shell, .shell, .layout, .layout-grid, .page, .page-content, .content,
-          #root, #app, main, body, html { margin:0 !important; padding:0 !important; inset:auto !important; }
-
+          #root, #app, main, body, html {
+            margin: 0 !important;
+            padding: 0 !important;
+            inset: auto !important;
+          }
           .has-sidebar, .with-sidebar, [data-has-sidebar], .sidebar-open,
           .content--with-sidebar, .content-shift, .content-wrapper {
-            padding-left:0 !important; margin-left:0 !important; grid-template-columns:1fr !important;
+            padding-left: 0 !important;
+            margin-left: 0 !important;
+            grid-template-columns: 1fr !important;
           }
-
           html, body, #root, #app, main, .page, .content {
-            width:100% !important; max-width:100% !important; box-sizing:border-box !important; background:#fff !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            background: #fff !important;
           }
         `;
         doc.head?.appendChild(style);
@@ -222,8 +259,7 @@ export default function ProjectOverviewPanel() {
   const fromAt = dr?.fromAt || dr?.from || "";
   const toAt = dr?.toAt || dr?.to || "";
 
-  const ragKey =
-    rag === "green" ? "active" : rag === "amber" ? "paused" : rag === "red" ? "overdue" : "";
+  const ragKey = rag === "green" ? "active" : rag === "amber" ? "paused" : rag === "red" ? "overdue" : "";
 
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState("");
@@ -396,7 +432,7 @@ export default function ProjectOverviewPanel() {
     const addText = project?.managerNote || project?.pmNote || project?.note || "";
     if (addText) {
       base.push({
-        at: project?.managerNoteAt || project?.pmNoteAt || project?.updatedAt || project?.modifiedAt || project?.createdAt,
+        at: project?.updatedAt || project?.modifiedAt || project?.createdAt,
         text: addText,
         authorId: managerUserId,
         authorName: managerName,
@@ -436,6 +472,7 @@ export default function ProjectOverviewPanel() {
     });
   }, [tasks, focusedProjectId, fromAt, toAt, ragKey]);
 
+  // task manager note
   const latestMgrNoteForTask = React.useCallback(
     (t) => {
       const comments = extractCommentsFromObj(t);
@@ -462,57 +499,22 @@ export default function ProjectOverviewPanel() {
   );
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
-  // Updated to understand InspectionSubmission schema:
-  // - overallResult (pass/fail)
-  // - runBy.name
-  // - createdAt/submittedAt/completedAt
-  // - subjectAtRun { type, label } for name matching
   const inspectionIndex = React.useMemo(() => {
     const src = submissions.length ? submissions : inspections;
     const idx = { byTarget: new Map(), byName: new Map(), byId: new Map() };
-
     for (const ins of src) {
-      const targetId = idOf(
-        ins.targetId ||
-          ins.assetId ||
-          ins.vehicleId ||
-          ins.subjectId ||
-          ins.itemId ||
-          ""
-      );
-
-      const at =
-        ins.completedAt ||
-        ins.submittedAt ||
-        ins.inspectedAt ||
-        ins.date ||
-        ins.createdAt ||
-        ins.updatedAt;
-
-      // Determine pass/fail (prefer overallResult)
-      const raw = String(
-        ins.overallResult ??
-          ins.status ??
-          ins.result ??
-          ins.outcome ??
-          (ins.passed === true ? "pass" : ins.passed === false ? "fail" : "")
+      const targetId = idOf(ins.targetId || ins.assetId || ins.vehicleId || ins.subjectId || ins.itemId || "");
+      const statusRaw = String(
+        ins.status ?? ins.result ?? ins.outcome ?? (ins.passed === true ? "Pass" : ins.passed === false ? "Fail" : "")
       ).toLowerCase();
-      const passed = raw === "pass" || (raw.includes("pass") && !raw.includes("fail"));
-
-      const name =
-        ins.formTitle ||
-        ins.title ||
-        ins.type ||
-        ins.formName ||
-        ins.form?.name ||
-        ins.name ||
-        "";
-
+      const passed = statusRaw.includes("pass") && !statusRaw.includes("fail");
+      const at = ins.date || ins.inspectedAt || ins.completedAt || ins.createdAt || ins.updatedAt;
+      const name = ins.title || ins.type || ins.formName || ins.form?.name || ins.name || "";
       const inspector =
         ins.runBy?.name ||
         ins.signoff?.name ||
         ins.inspectorName ||
-        (ins.inspector ? (ins.inspector.name || userNameById(idOf(ins.inspector))) : "") ||
+        (ins.inspector ? ins.inspector.name || userNameById(idOf(ins.inspector)) : "") ||
         (ins.inspectorId ? userNameById(ins.inspectorId) : "");
 
       const rec = { id: idOf(ins), at, passed, name, inspector };
@@ -521,96 +523,58 @@ export default function ProjectOverviewPanel() {
         const prev = idx.byTarget.get(targetId);
         if (!prev || new Date(rec.at || 0) > new Date(prev.at || 0)) idx.byTarget.set(targetId, rec);
       }
-
-      // Build a "label" that can match vehicle reg / asset name
-      const label = String(
-        ins.assetName ||
-          ins.vehicleReg ||
-          ins.vehicleName ||
-          ins.subjectAtRun?.label ||
-          ins.label ||
-          ins.name ||
-          ""
-      ).trim();
-
+      const label = (ins.assetName || ins.vehicleReg || ins.vehicleName || ins.name || ins.label || name || "").toString();
       if (label) {
         const prev = idx.byName.get(label);
         if (!prev || new Date(rec.at || 0) > new Date(prev.at || 0)) idx.byName.set(label, rec);
       }
-
       idx.byId.set(idOf(ins), rec);
     }
     return idx;
-  }, [submissions, inspections, users, userNameById]);
+  }, [submissions, inspections, users]);
 
   const vRows = React.useMemo(() => {
     return vehicles
       .filter((v) => String(v.projectId || v.project?._id || v.project?.id || "") === focusedProjectId)
       .map((v) => {
         const id = idOf(v);
-        const regKey = String(v.reg || v.registration || v.plate || v.name || "").trim();
-
         const byId = inspectionIndex.byTarget.get(id);
-        const byName = regKey ? inspectionIndex.byName.get(regKey) : null;
+        const byName = inspectionIndex.byName.get(v.reg || v.registration || v.plate || v.name || "");
         const last = byId || byName || null;
-
         const statusOnSelf =
           v.lastInspectionResult ||
           v.inspectionStatus ||
           (v.lastInspectionPassed === true ? "Passed" : v.lastInspectionPassed === false ? "Failed" : "");
-
-        // ✅ Always show the last inspection date (prefer actual last inspection record)
-        const lastInspectionAt =
-          last?.at ||
-          v.lastInspectionAt ||
-          v.inspectionAt ||
-          v.lastInspectedAt ||
-          v.lastInspectionDate ||
-          "";
-
         return {
           id,
-          reg: regKey || "—",
+          reg: v.reg || v.registration || v.plate || v.name || "—",
           driver:
             v.driverName ||
             (v.driverId ? userNameById(v.driverId) : v.driver ? userNameById(idOf(v.driver)) : ""),
           status: v.status || "",
-          lastInspectionAt,
+          lastInspectionAt: last?.at || v.lastInspectionAt || v.inspectionAt || "",
           lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
           lastInspectionId: last?.id || null,
         };
       });
-  }, [vehicles, focusedProjectId, inspectionIndex, users, userNameById]);
+  }, [vehicles, focusedProjectId, inspectionIndex, users]);
 
   const aRows = React.useMemo(() => {
     return assets
       .filter((a) => String(a.projectId || a.project?._id || a.project?.id || "") === focusedProjectId)
       .map((a) => {
         const id = idOf(a);
-        const nameKey = String(a.name || a.title || "").trim();
-
         const byId = inspectionIndex.byTarget.get(id);
-        const byName = nameKey ? inspectionIndex.byName.get(nameKey) : null;
+        const byName = inspectionIndex.byName.get(a.name || a.title || "");
         const last = byId || byName || null;
-
         const statusOnSelf =
           a.lastInspectionResult ||
           a.inspectionStatus ||
           (a.lastInspectionPassed === true ? "Passed" : a.lastInspectionPassed === false ? "Failed" : "");
-
-        // ✅ Always show the last inspection date (prefer actual last inspection record)
-        const lastInspectionAt =
-          last?.at ||
-          a.lastInspectionAt ||
-          a.inspectionAt ||
-          a.lastInspectedAt ||
-          a.lastInspectionDate ||
-          "";
-
         return {
           id,
-          name: nameKey || "—",
-          lastInspectionAt,
+          name: a.name || a.title || "—",
+          lastInspectionAt: last?.at || a.lastInspectionAt || a.inspectionAt || "",
           lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
           lastInspectionId: last?.id || null,
         };
@@ -628,10 +592,7 @@ export default function ProjectOverviewPanel() {
         const statusRaw = inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
         const statusNorm = String(statusRaw || "").toLowerCase();
 
-        const paidLike =
-          !!inv.paidAt ||
-          /paid|settled|complete|completed/.test(statusNorm) ||
-          (paid > 0 && paid >= amount);
+        const paidLike = !!inv.paidAt || /paid|settled|complete|completed/.test(statusNorm) || (paid > 0 && paid >= amount);
 
         const balance = Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? amount - paid);
         const safeBalance = paidLike ? 0 : isNaN(balance) ? amount - paid : balance;
@@ -655,24 +616,31 @@ export default function ProjectOverviewPanel() {
   }, [invRows]);
 
   /* --------------------------- Inspections feed --------------------------- */
+  // OPTION A ONLY: Map manager note from whatever list endpoint returns (no extra API calls)
   const inspRows = React.useMemo(() => {
     const src = submissions.length ? submissions : inspections;
 
     return src
       .map((ins) => {
+        // Title
         const name = ins.formTitle || ins.title || ins.formName || ins.form?.name || ins.name || "";
 
+        // Inspector (SubmissionView uses runBy + signoff)
         const inspector =
           ins.runBy?.name ||
           ins.signoff?.name ||
           ins.runBy?.email ||
+          ins.signoff?.email ||
           ins.inspectorName ||
           (ins.inspector ? ins.inspector.name || userNameById(idOf(ins.inspector)) : "") ||
           (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
           "";
 
+        // Status (SubmissionView uses overallResult: pass/fail)
         const raw = String(
           ins.overallResult ??
+            ins.overall?.result ??
+            ins.summary?.result ??
             ins.status ??
             ins.result ??
             ins.outcome ??
@@ -681,23 +649,56 @@ export default function ProjectOverviewPanel() {
 
         const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
 
+        // ✅ Manager comment: support many likely shapes, including managerComments from SubmissionView
         let managerComment = "";
+
+        // 1) canonical: managerComments: [{ comment, at, by:{name} }]
         if (Array.isArray(ins.managerComments) && ins.managerComments.length) {
           const sorted = [...ins.managerComments].sort(
             (a, b) => new Date(b.at || b.createdAt || 0) - new Date(a.at || a.createdAt || 0)
           );
           managerComment = sorted[0]?.comment || "";
-        } else if (Array.isArray(ins.comments) && ins.comments.length) {
+        }
+
+        // 2) sometimes list returns lastManagerComment fields
+        if (!managerComment) {
+          managerComment =
+            ins.lastManagerComment ||
+            ins.lastManagerNote ||
+            ins.lastComment ||
+            ins.managerNote ||
+            ins.managerComment ||
+            ins.review?.managerComment ||
+            ins.review?.managerNote ||
+            ins.approval?.managerNote ||
+            ins.approval?.note ||
+            "";
+        }
+
+        // 3) legacy comments array: [{ comment, createdAt, at, name, by:{name} }]
+        if (!managerComment && Array.isArray(ins.comments) && ins.comments.length) {
           const sorted = [...ins.comments].sort(
-            (a, b) => new Date(b.createdAt || b.at || 0) - new Date(a.createdAt || a.at || 0)
+            (a, b) => new Date(b.createdAt || b.at || b.date || 0) - new Date(a.createdAt || a.at || a.date || 0)
           );
-          managerComment = sorted[0]?.comment || "";
-        } else {
-          managerComment = ins.managerNote || ins.managerComment || ins.lastManagerNote || "";
+          managerComment = sorted[0]?.comment || sorted[0]?.text || "";
+        }
+
+        // 4) audit/history style (if list endpoint provides some trail)
+        if (!managerComment) {
+          const trail = extractCommentsFromObj(ins);
+          const mgr = trail
+            .filter((c) => {
+              const role = norm(c.authorRole);
+              if (role.includes("manager") || role.includes("project-manager") || role.includes("pm")) return true;
+              if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
+              if (managerName && c.authorName === managerName) return true;
+              return false;
+            })
+            .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0))[0];
+          managerComment = mgr?.text || "";
         }
 
         const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
-
         const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
 
         return {
@@ -713,22 +714,11 @@ export default function ProjectOverviewPanel() {
       })
       .filter((x) => within(x.date, fromAt, toAt))
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-  }, [submissions, inspections, fromAt, toAt, users, userNameById]);
+  }, [submissions, inspections, fromAt, toAt, users, managerUserId, managerName]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
-    const text = [
-      r?.type,
-      r?.status,
-      r?.reason,
-      r?.state,
-      r?.category,
-      r?.label,
-      r?.note,
-      r?.comment,
-      r?.details,
-      r?.message,
-    ]
+    const text = [r?.type, r?.status, r?.reason, r?.state, r?.category, r?.label, r?.note, r?.comment, r?.details, r?.message]
       .map((s) => String(s || "").toLowerCase())
       .join(" ");
     if (/\biod|injury\s*on\s*duty|injured\b/.test(text)) return "iod";
@@ -748,24 +738,23 @@ export default function ProjectOverviewPanel() {
       if (clockingType(r) !== "iod") continue;
       const uid = idOf(r.user || r.userId || r.uid);
       if (!uid) continue;
-      const note =
-        r?.note || r?.comment || r?.reason || r?.details || r?.message || r?.description || "";
+      const note = r?.note || r?.comment || r?.reason || r?.details || r?.message || r?.description || "";
       const prev = fset.get(uid);
       if (!prev || new Date(at || 0) < new Date(prev.at || 0)) {
         fset.set(uid, { id: idOf(r), user: userNameById(uid), at, note });
       }
     }
     return Array.from(fset.values()).sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
-  }, [clockings, focusedProjectId, fromAt, toAt, users, userNameById]);
+  }, [clockings, focusedProjectId, fromAt, toAt, users]);
 
   /* ---------------------------- click handlers ---------------------------- */
+  const openTask = (t) => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`);
   const openInspection = (row) => {
     const path = row.isSubmission ? `/inspections/submissions/${row.id}` : `/inspections/${row.id}`;
     openUrl(row.name || "Inspection", path);
   };
   const openVehicle = (id) => openUrl("Vehicle", `/vehicles/${id}`);
   const openAsset = (id) => openUrl("Asset", `/assets/${id}`);
-
   const openInvoice = async (inv) => {
     if (inv.fileUrl) return openUrl(`Invoice ${inv.number}`, inv.fileUrl);
     try {
@@ -778,7 +767,6 @@ export default function ProjectOverviewPanel() {
       return openJson(`Invoice ${inv.number}`, inv);
     }
   };
-
   const openClocking = async (row) => {
     try {
       const r = await api.get(`/clockings/${row.id}`, { params: { _ts: Date.now() }, timeout: 10000 });
@@ -802,14 +790,8 @@ export default function ProjectOverviewPanel() {
   const start = project?.start || project?.startDate || project?.begin || project?.startAt || "";
   const end = project?.end || project?.endDate || project?.due || project?.deadlineAt || project?.finishAt || "";
 
-  // ✅ Last Updated prefers PM note/comment timestamp
-  const updatedAt = React.useMemo(() => {
-    const fromLastNote = lastProjectUpdate?.at || "";
-    const fromTopNote = project?.managerNoteAt || project?.pmNoteAt || "";
-    const fromProjectStamp =
-      project?.updatedAt || project?.modifiedAt || project?.lastUpdatedAt || project?.statusAt || "";
-    return pickLatestDate(fromLastNote, fromTopNote) || fromProjectStamp || "";
-  }, [project, lastProjectUpdate]);
+  // NOTE: left as your original fallback; if you want PM-note-driven "Last Updated", we can switch this next.
+  const updatedAt = project?.updatedAt || project?.modifiedAt || project?.lastUpdatedAt || project?.statusAt || "";
 
   return (
     <div>
@@ -903,10 +885,7 @@ export default function ProjectOverviewPanel() {
                     return (
                       <tr key={idOf(t)}>
                         <td>
-                          <span
-                            className="linkish"
-                            onClick={() => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`)}
-                          >
+                          <span className="linkish" onClick={() => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`)}>
                             {t.title || t.name || idOf(t)}
                           </span>
                         </td>
@@ -917,11 +896,7 @@ export default function ProjectOverviewPanel() {
                         </td>
                         <td>{groupBits.length ? groupBits.join(", ") : <span className="muted">—</span>}</td>
                         <td>
-                          {latestMgr?.at ? (
-                            <div className="muted">{dOr(latestMgr.at, "datetime")}</div>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
+                          {latestMgr?.at ? <div className="muted">{dOr(latestMgr.at, "datetime")}</div> : <span className="muted">—</span>}
                           {latestMgr?.text ? <div className="muted"><em>“{latestMgr.text}”</em></div> : null}
                         </td>
                       </tr>
@@ -961,25 +936,9 @@ export default function ProjectOverviewPanel() {
                         <td>
                           {v.lastInspectionAt ? (
                             <>
-                              {dOr(v.lastInspectionAt, "datetime")} ·{" "}
-                              {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
+                              {dOr(v.lastInspectionAt)} · {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
                               {v.lastInspectionId ? (
-                                <>
-                                  {" "}
-                                  ·{" "}
-                                  <span
-                                    className="linkish"
-                                    onClick={() =>
-                                      openInspection({
-                                        id: v.lastInspectionId,
-                                        isSubmission: true,
-                                        name: `Inspection ${v.reg}`,
-                                      })
-                                    }
-                                  >
-                                    view
-                                  </span>
-                                </>
+                                <> · <span className="linkish" onClick={() => openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })}>view</span></>
                               ) : null}
                             </>
                           ) : (
@@ -1016,25 +975,9 @@ export default function ProjectOverviewPanel() {
                         <td>
                           {a.lastInspectionAt ? (
                             <>
-                              {dOr(a.lastInspectionAt, "datetime")} ·{" "}
-                              {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
+                              {dOr(a.lastInspectionAt)} · {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
                               {a.lastInspectionId ? (
-                                <>
-                                  {" "}
-                                  ·{" "}
-                                  <span
-                                    className="linkish"
-                                    onClick={() =>
-                                      openInspection({
-                                        id: a.lastInspectionId,
-                                        isSubmission: true,
-                                        name: `Inspection ${a.name}`,
-                                      })
-                                    }
-                                  >
-                                    view
-                                  </span>
-                                </>
+                                <> · <span className="linkish" onClick={() => openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })}>view</span></>
                               ) : null}
                             </>
                           ) : (
@@ -1052,8 +995,7 @@ export default function ProjectOverviewPanel() {
           {/* Invoices */}
           <div className="block">
             <div className="h">
-              Invoices{" "}
-              {invRows.length ? <span className="muted">· Outstanding: {money(outstandingTotal)}</span> : null}
+              Invoices {invRows.length ? <span className="muted">· Outstanding: {money(outstandingTotal)}</span> : null}
             </div>
             {!invRows.length ? (
               <div className="muted">None in range</div>
@@ -1105,7 +1047,7 @@ export default function ProjectOverviewPanel() {
                 <tbody>
                   {inspRows.slice(0, 12).map((x) => (
                     <tr key={x.id}>
-                      <td>{dOr(x.date, "datetime")}</td>
+                      <td>{dOr(x.date)}</td>
                       <td>
                         <span className="linkish" onClick={() => openInspection(x)}>
                           {x.name || "—"}
@@ -1162,7 +1104,7 @@ export default function ProjectOverviewPanel() {
         </div>
       )}
 
-      {/* Lightbox */}
+      {/* Lightbox (portal at document.body) */}
       <Lightbox
         open={lb.open}
         title={lb.title}
