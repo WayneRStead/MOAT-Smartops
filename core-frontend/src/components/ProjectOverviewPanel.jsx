@@ -74,6 +74,113 @@ function extractCommentsFromObj(obj) {
     .filter((x) => x.at || x.text);
 }
 
+// NEW: get newest *manager* comment for an inspection/submission
+function newestManagerCommentForInspection(ins, managerUserId, managerName) {
+  const asTime = (v) => {
+    const d = v ? new Date(v) : null;
+    const t = d && !isNaN(+d) ? +d : 0;
+    return t;
+  };
+
+  const readText = (c) =>
+    String(c?.comment ?? c?.text ?? c?.note ?? c?.message ?? c?.details ?? "").trim();
+
+  const readAt = (c) => c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
+
+  const readAuthorId = (c) =>
+    idOf(c?.by || c?.author || c?.user || c?.userId || c?.authorId || c?.createdBy || c?.createdById);
+
+  const readAuthorName = (c) =>
+    String(
+      c?.byName ||
+        c?.authorName ||
+        c?.userName ||
+        c?.name ||
+        c?.by?.name ||
+        c?.author?.name ||
+        c?.user?.name ||
+        c?.by?.email ||
+        c?.author?.email ||
+        c?.user?.email ||
+        ""
+    ).trim();
+
+  const readRole = (c) =>
+    String(
+      c?.role ||
+        c?.authorRole ||
+        c?.userRole ||
+        c?.byRole ||
+        c?.by?.role ||
+        c?.author?.role ||
+        c?.user?.role ||
+        ""
+    ).trim();
+
+  const isManagerish = (c) => {
+    const role = norm(readRole(c));
+    if (role.includes("manager") || role.includes("project-manager") || role.includes("pm")) return true;
+
+    const aid = readAuthorId(c);
+    if (managerUserId && aid && String(aid) === String(managerUserId)) return true;
+
+    const an = readAuthorName(c);
+    if (managerName && an && an === managerName) return true;
+
+    // sometimes the backend flags it
+    if (c?.isManager === true || c?.manager === true) return true;
+
+    return false;
+  };
+
+  // 1) Canonical: managerComments array (TaskDetail uses this)
+  if (Array.isArray(ins?.managerComments) && ins.managerComments.length) {
+    const latest = ins.managerComments
+      .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
+      .filter((x) => x.t || x.text)
+      .sort((a, b) => b.t - a.t)[0];
+
+    if (latest?.text) return latest.text;
+  }
+
+  // 2) Direct "last note" fields (list endpoints sometimes flatten these)
+  const direct =
+    ins?.lastManagerComment ||
+    ins?.lastManagerNote ||
+    ins?.managerNote ||
+    ins?.managerComment ||
+    ins?.review?.managerComment ||
+    ins?.review?.managerNote ||
+    ins?.approval?.managerNote ||
+    ins?.approval?.note ||
+    "";
+
+  if (String(direct || "").trim()) return String(direct).trim();
+
+  // 3) Legacy mixed comments array: take newest that looks manager-ish
+  if (Array.isArray(ins?.comments) && ins.comments.length) {
+    const latestMgr = ins.comments
+      .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
+      .filter((x) => (x.t || x.text) && isManagerish(x.raw))
+      .sort((a, b) => b.t - a.t)[0];
+
+    if (latestMgr?.text) return latestMgr.text;
+  }
+
+  // 4) Audit/history/logs style: use your extractor and filter manager-ish
+  const trail = extractCommentsFromObj(ins || {});
+  const latestTrailMgr = trail
+    .map((c) => ({
+      t: asTime(c?.at),
+      text: String(c?.text || "").trim(),
+      raw: c,
+    }))
+    .filter((x) => (x.t || x.text) && isManagerish(x.raw))
+    .sort((a, b) => b.t - a.t)[0];
+
+  return latestTrailMgr?.text || "";
+}
+
 function groupIdsOfTask(t) {
   const pool = []
     .concat(safeArr(t.groupId))
@@ -649,54 +756,8 @@ export default function ProjectOverviewPanel() {
 
         const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
 
-        // ✅ Manager comment: support many likely shapes, including managerComments from SubmissionView
-        let managerComment = "";
-
-        // 1) canonical: managerComments: [{ comment, at, by:{name} }]
-        if (Array.isArray(ins.managerComments) && ins.managerComments.length) {
-          const sorted = [...ins.managerComments].sort(
-            (a, b) => new Date(b.at || b.createdAt || 0) - new Date(a.at || a.createdAt || 0)
-          );
-          managerComment = sorted[0]?.comment || "";
-        }
-
-        // 2) sometimes list returns lastManagerComment fields
-        if (!managerComment) {
-          managerComment =
-            ins.lastManagerComment ||
-            ins.lastManagerNote ||
-            ins.lastComment ||
-            ins.managerNote ||
-            ins.managerComment ||
-            ins.review?.managerComment ||
-            ins.review?.managerNote ||
-            ins.approval?.managerNote ||
-            ins.approval?.note ||
-            "";
-        }
-
-        // 3) legacy comments array: [{ comment, createdAt, at, name, by:{name} }]
-        if (!managerComment && Array.isArray(ins.comments) && ins.comments.length) {
-          const sorted = [...ins.comments].sort(
-            (a, b) => new Date(b.createdAt || b.at || b.date || 0) - new Date(a.createdAt || a.at || a.date || 0)
-          );
-          managerComment = sorted[0]?.comment || sorted[0]?.text || "";
-        }
-
-        // 4) audit/history style (if list endpoint provides some trail)
-        if (!managerComment) {
-          const trail = extractCommentsFromObj(ins);
-          const mgr = trail
-            .filter((c) => {
-              const role = norm(c.authorRole);
-              if (role.includes("manager") || role.includes("project-manager") || role.includes("pm")) return true;
-              if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
-              if (managerName && c.authorName === managerName) return true;
-              return false;
-            })
-            .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0))[0];
-          managerComment = mgr?.text || "";
-        }
+         // ✅ Newest manager comment ONLY (manager-specific, newest wins)
+const managerComment = newestManagerCommentForInspection(ins, managerUserId, managerName);
 
         const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
         const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
