@@ -891,12 +891,73 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
     const formTitle =
       s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
 
-    // coords
-    const lat = (s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat ?? null);
-    const lng = (s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng ?? null);
+        // coords (robust: supports GeoJSON coordinates + multiple nests)
+    const pickLatLng = (obj) => {
+      if (!obj) return { lat: null, lng: null };
+
+      // Common: GeoJSON Point { type:"Point", coordinates:[lng,lat] }
+      const coords =
+        obj?.coordinates ||
+        obj?.coord ||
+        obj?.coords ||
+        null;
+
+      if (Array.isArray(coords) && coords.length >= 2) {
+        const lng = coords[0];
+        const lat = coords[1];
+        return { lat, lng };
+      }
+
+      // Common: { lat, lng } or { latitude, longitude }
+      const lat =
+        obj?.lat ?? obj?.latitude ?? obj?.y ?? null;
+      const lng =
+        obj?.lng ?? obj?.lon ?? obj?.longitude ?? obj?.x ?? null;
+
+      return { lat, lng };
+    };
+
+    // Try multiple likely sources, first hit wins
+    let lat = null;
+    let lng = null;
+
+    // 1) direct fields
+    if (lat == null && lng == null) {
+      lat = s?.lat ?? s?.latitude ?? null;
+      lng = s?.lng ?? s?.lon ?? s?.longitude ?? null;
+    }
+
+    // 2) location / gps / geo / coords / meta nests
+    const candidates = [
+      s?.location,
+      s?.gps,
+      s?.geo,
+      s?.coords,
+      s?.meta?.location,
+      s?.meta?.coords,
+      s?.meta?.gps,
+      s?.position,
+      s?.where,
+    ];
+
+    if (lat == null || lng == null) {
+      for (const c of candidates) {
+        const got = pickLatLng(c);
+        if (got.lat != null && got.lng != null) {
+          lat = got.lat;
+          lng = got.lng;
+          break;
+        }
+      }
+    }
+
+    // Normalize to numbers if possible (but keep original if not)
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+    lat = Number.isFinite(latNum) ? latNum : lat;
+    lng = Number.isFinite(lngNum) ? lngNum : lng;
 
     return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
-  }
 
   /* ---------- geofence ops ---------- */
   const fallbackCircle =
