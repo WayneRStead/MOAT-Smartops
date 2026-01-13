@@ -1267,22 +1267,29 @@ if (navigator.geolocation) {
   }
 
   /* ---------- date filter helpers ---------- */
-  const inDateWindow = (iso) => {
-      // ✅ unify what "submission date" means across UI + exports
-  const submissionWhenIso = (s) =>
-    s?.submittedAt ||
-    s?.createdAt ||
-    s?.completedAt ||
-    s?.finishedAt ||
-    s?.updatedAt ||
+const submissionWhenIso = (s) =>
+  s?.submittedAt ||
+  s?.createdAt ||
+  s?.completedAt ||
+  s?.finishedAt ||
+  s?.updatedAt ||
+  null;
+
+// accepts ISO string OR Date
+const inDateWindow = (d) => {
+  if (!fltFrom && !fltTo) return true;
+
+  const dt =
+    d instanceof Date ? d :
+    typeof d === "string" || typeof d === "number" ? new Date(d) :
     null;
-    if (!iso) return false;
-    const d = new Date(iso);
-    if (isNaN(+d)) return false;
-    const fromOk = !fltFrom || d >= new Date(`${fltFrom}T00:00:00`);
-    const toOk   = !fltTo   || d <  new Date(`${fltTo}T23:59:59.999`);
-    return fromOk && toOk;
-  };
+
+  if (!dt || isNaN(+dt)) return false;
+
+  const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
+  const toOk   = !fltTo   || dt <= new Date(`${fltTo}T23:59:59.999`);
+  return fromOk && toOk;
+};
 
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
@@ -1962,52 +1969,71 @@ if (navigator.geolocation) {
           <div className="font-medium text-sm bg-gray-50 rounded px-2 py-1 flex items-center justify-between">
             <span className="font-semibold">Recent Inspection Submissions</span>
             <div className="flex gap-2">
-              <button className="px-2 py-1 border rounded text-xs" onClick={async ()=>{
-                const withCoords = (subs || []).filter((s) => {
-  const whenIso = submissionWhenIso(s);
-  if ((fltFrom || fltTo) && !inDateWindow(whenIso)) return false;
+              <button
+  className="px-2 py-1 border rounded text-xs"
+  onClick={async () => {
+    setErr(""); setInfo("");
 
-  const { lat, lng } = resolveSubmissionFields(s);
-  return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
-});
+    // 1) filter by date window
+    const filtered = (subs || []).filter(s => inDateWindow(submissionWhenIso(s)));
 
-                if (!withCoords.length) { setErr("No lat/lng on submissions (in filter window) to export."); return; }
-                const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
-const placemarks = withCoords.map((s) => {
-  try {
-    const lat = Number(s?.lat ?? s?.location?.lat ?? s?.coords?.lat ?? s?.meta?.lat);
-    const lng = Number(s?.lng ?? s?.location?.lng ?? s?.coords?.lng ?? s?.meta?.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "";
+    // 2) then require coords (using the SAME resolver as the table)
+    const withCoords = filtered.filter((s) => {
+      const { lat, lng } = resolveSubmissionFields(s);
+      return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+    });
 
-    const whenIso = submissionWhenIso(s);
-const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
+    if (!withCoords.length) {
+      setErr("No lat/lng on submissions (in filter window) to export.");
+      return;
+    }
 
-    const { outcome, formTitle, inspector } = resolveSubmissionFields(s);
+    const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
 
-    const desc = escapeXml(`Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`);
+    const placemarks = withCoords.map((s) => {
+      const whenIso = submissionWhenIso(s);
+      const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
 
-    return `
+      // ✅ use resolver values, not raw s.lat/s.lng
+      const { outcome, formTitle, inspector, lat, lng } = resolveSubmissionFields(s);
+
+      const latN = Number(lat);
+      const lngN = Number(lng);
+      if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return "";
+
+      const desc = escapeXml(
+        `Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`
+      );
+
+      return `
 <Placemark>
   <name>${escapeXml(formTitle)}</name>
   <description>${desc}</description>
-  <Point><coordinates>${r6(lng)},${r6(lat)},0</coordinates></Point>
+  <Point><coordinates>${r6(lngN)},${r6(latN)},0</coordinates></Point>
 </Placemark>`;
-  } catch (e) {
-    // skip bad row, don't kill export
-    return "";
-  }
-}).join("");
-                const kml = `<?xml version="1.0" encoding="UTF-8"?>
+    }).join("");
+
+    if (!placemarks.trim()) {
+      setErr("No valid placemarks could be built (lat/lng were not usable).");
+      return;
+    }
+
+    const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document><name>${escapeXml(title)}</name>${placemarks}</Document>
 </kml>`;
-                await downloadKMZ(`${title}.kmz`, kml);
-                setInfo("Exported inspection submissions KMZ."); setTimeout(()=>setInfo(""), 1000);
-              }}>Export Submissions KMZ</button>
+
+    await downloadKMZ(`${title}.kmz`, kml);
+    setInfo("Exported inspection submissions KMZ.");
+    setTimeout(()=>setInfo(""), 1000);
+  }}
+>
+  Export Submissions KMZ
+</button>
             </div>
           </div>
           {subsErr && <div className="text-red-600 text-sm">{subsErr}</div>}
-          {(subs.filter(s => !fltFrom && !fltTo ? true : inDateWindow(submissionWhenIso(s)))).length ? (
+          {subs.filter(s => inDateWindow(submissionWhenIso(s))).length ? (
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50">
