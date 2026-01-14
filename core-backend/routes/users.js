@@ -15,7 +15,7 @@ const CANON_ROLES = [
   'project-manager',
   'manager',
   'admin',
-  'superadmin', // <-- org-scoped "superadmin" role; creation gated by global superadmin below
+  'superadmin', // org-scoped "superadmin" role; creation gated by global superadmin below
 ];
 
 function normalizeRole(r) {
@@ -107,6 +107,7 @@ function assertNoGlobalFields(reqBody) {
     throw err;
   }
 }
+
 function forbidSuperadminUnlessGlobal(req, incomingRole) {
   const role = normalizeRole(incomingRole);
   if (role === 'superadmin' && req.user?.isGlobalSuperadmin !== true) {
@@ -116,12 +117,27 @@ function forbidSuperadminUnlessGlobal(req, incomingRole) {
   }
 }
 
+function boolish(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'y' || s === 'on';
+}
+
 /* --------------------------- roles endpoint --------------------------- */
 router.get('/roles', (_req, res) => {
   res.json(CANON_ROLES);
 });
 
 /* ------------------------------- LIST ------------------------------- */
+/**
+ * GET /users
+ * Supports:
+ *  - ?q=...
+ *  - ?status=...
+ *  - ?missingPhoto=true
+ *  - ?includeDeleted=1   (admins/managers/project-managers only)
+ *
+ * NOTE: Non-admin users can only see themselves and never include deleted.
+ */
 router.get('/', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || '200', 10) || 200, 1000);
@@ -130,15 +146,20 @@ router.get('/', async (req, res) => {
     const missingPhoto = String(req.query.missingPhoto || '').toLowerCase() === 'true';
 
     const roleNorm = normalizeRole(req.user?.role);
-    const isAdmin = ['admin','superadmin','manager','project-manager'].includes(roleNorm);
+    const isAdminish = ['admin','superadmin','manager','project-manager'].includes(roleNorm);
+
+    // Only admin-ish may include deleted
+    const includeDeleted = isAdminish && boolish(req.query.includeDeleted);
 
     const scope = orgFilterFromReq(User, req);
-    let find = { ...scope, isDeleted: { $ne: true } };
+    let find = { ...scope, ...(includeDeleted ? {} : { isDeleted: { $ne: true } }) };
 
-    if (!isAdmin && req.user?._id) {
+    // Non-admin users only see themselves (and never deleted)
+    if (!isAdminish && req.user?._id) {
       const myId = asOid(req.user._id);
       if (!myId) return res.status(401).json({ error: 'Unauthorized' });
       find._id = myId;
+      find.isDeleted = { $ne: true };
     }
 
     if (q) {
@@ -172,14 +193,39 @@ router.get('/', async (req, res) => {
 });
 
 /* -------------------------------- READ ------------------------------- */
+/**
+ * GET /users/:id
+ * Supports:
+ *  - ?includeDeleted=1 (admin-ish only)
+ */
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'invalid user id' });
     }
-    const doc = await User.findOne({ _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req) }).lean();
+
+    const roleNorm = normalizeRole(req.user?.role);
+    const isAdminish = ['admin','superadmin','manager','project-manager'].includes(roleNorm);
+    const includeDeleted = isAdminish && boolish(req.query.includeDeleted);
+
+    const where = {
+      _id: new mongoose.Types.ObjectId(id),
+      ...orgFilterFromReq(User, req),
+      ...(includeDeleted ? {} : { isDeleted: { $ne: true } }),
+    };
+
+    // Non-admin users can only read themselves
+    if (!isAdminish) {
+      if (!req.user?._id || String(req.user._id) !== String(id)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      where.isDeleted = { $ne: true };
+    }
+
+    const doc = await User.findOne(where).lean();
     if (!doc) return res.status(404).json({ error: 'Not found' });
+
     res.json(stripSecrets(doc));
   } catch (e) {
     console.error('GET /users/:id error:', e);
@@ -212,6 +258,7 @@ router.post('/', requireRole('project-manager','manager','admin','superadmin'), 
       role: normalizeRole(role),
       active: active !== undefined ? !!active : true,
       biometric: { status: 'pending', lastUpdatedAt: new Date() },
+      isDeleted: false,
     });
 
     if (!ensureOrgOnDoc(User, doc, req)) {
@@ -239,9 +286,14 @@ router.put('/:id', requireRole('project-manager','manager','admin','superadmin')
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'invalid user id' });
     }
+
     const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req) };
     const user = await User.findOne(where);
     if (!user) return res.status(404).json({ error: 'Not found' });
+
+    if (user.isDeleted === true) {
+      return res.status(400).json({ error: 'Cannot update a deleted user. Restore the user first.' });
+    }
 
     const { name, email, username, staffNumber, role, active, password } = req.body || {};
 
@@ -289,7 +341,7 @@ router.post('/:id/reset-password', requireRole('admin','superadmin'), async (req
       return res.status(400).json({ error: 'password required (min 6 chars)' });
     }
 
-    const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req) };
+    const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req), isDeleted: { $ne: true } };
     const user = await User.findOne(where);
     if (!user) return res.status(404).json({ error: 'Not found' });
 
@@ -551,7 +603,12 @@ router.get('/:id/biometric/status', async (req, res) => {
     const user = await User.findOne({ _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req), isDeleted: { $ne: true } }).lean();
     if (!user) return res.status(404).json({ error: 'Not found' });
     const { biometric = { status: 'not-enrolled' } } = user;
-    res.json({ status: biometric.status, templateVersion: biometric.templateVersion, lastLivenessScore: biometric.lastLivenessScore, lastUpdatedAt: biometric.lastUpdatedAt });
+    res.json({
+      status: biometric.status,
+      templateVersion: biometric.templateVersion,
+      lastLivenessScore: biometric.lastLivenessScore,
+      lastUpdatedAt: biometric.lastUpdatedAt
+    });
   } catch (e) {
     console.error('GET /users/:id/biometric/status error:', e);
     res.status(500).json({ error: 'Server error' });
@@ -565,7 +622,7 @@ router.delete('/:id', requireRole('admin','superadmin'), async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'invalid user id' });
     }
-    const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req) };
+    const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req), isDeleted: { $ne: true } };
     const u = await User.findOne(where);
     if (!u) return res.status(404).json({ error: 'Not found' });
 
@@ -582,6 +639,43 @@ router.delete('/:id', requireRole('admin','superadmin'), async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('DELETE /users/:id error:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ------------------------------ RESTORE ------------------------------ */
+/**
+ * POST /users/:id/restore
+ * Restores a soft-deleted user.
+ *
+ * - Sets isDeleted=false
+ * - Sets active=true
+ * - Sets biometric.status to 'pending' (or keep templateVersion if you want, but pending is safest)
+ *
+ * NOTE: Only admin/superadmin (matching delete permission).
+ */
+router.post('/:id/restore', requireRole('admin','superadmin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'invalid user id' });
+    }
+
+    const where = { _id: new mongoose.Types.ObjectId(id), ...orgFilterFromReq(User, req) };
+    const u = await User.findOne(where);
+    if (!u) return res.status(404).json({ error: 'Not found' });
+
+    u.isDeleted = false;
+    u.active = true;
+
+    // Keep templateVersion if present; set status pending so they can re-enroll if needed.
+    u.biometric = { ...(u.biometric || {}), status: 'pending', lastUpdatedAt: new Date() };
+
+    await u.save();
+
+    res.json({ ok: true, user: stripSecrets(u.toObject({ versionKey: false })) });
+  } catch (e) {
+    console.error('POST /users/:id/restore error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -689,6 +783,7 @@ router.post('/bulk-upload', requireRole('project-manager','manager','admin','sup
           role,
           active: true,
           biometric: { status: 'pending', lastUpdatedAt: new Date() },
+          isDeleted: false,
         });
         await doc.save();
         created++;
@@ -715,23 +810,20 @@ router.post('/bulk-upload', requireRole('project-manager','manager','admin','sup
     // Apply group assignments
     const orgIdValue = orgScope.orgId;
     for (const [gname, info] of byGroup.entries()) {
-      // find or create group (org-scoped unique name)
       let g = await Group.findOrCreateByName(orgIdValue, gname, {
         createdBy: req.user?.email || String(req.user?._id || ''),
         updatedBy: req.user?.email || String(req.user?._id || ''),
       });
 
-      // Replace leader if we have one in the batch
       if (info.leaderUserId) {
         g.leaderUserIds = [info.leaderUserId];
       }
 
-      // Merge members
       const set = new Set((g.memberUserIds || []).map(x => String(x)));
       for (const uId of info.memberUserIds) set.add(String(uId));
       g.memberUserIds = Array.from(set)
         .map(s => asOid(s))
-        .filter(Boolean); // <- avoid nulls
+        .filter(Boolean);
 
       g.updatedBy = req.user?.email || String(req.user?._id || '');
       await g.save();
@@ -790,7 +882,7 @@ function upsertGroupAccumulator(map, groupName, userId, role) {
   const info = map.get(key);
   info.memberUserIds.add(userId);
   if (role === 'group-leader') {
-    info.leaderUserId = userId; // single leader semantics
+    info.leaderUserId = userId;
   }
 }
 

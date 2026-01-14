@@ -38,13 +38,13 @@ const ROLE_OPTIONS = [
 ];
 
 const STATUS_OPTIONS = [
-  { value: "",            label: "All biometric statuses" },
-  { value: "not-enrolled",label: "not-enrolled" },
-  { value: "pending",     label: "pending" },
-  { value: "enrolled",    label: "enrolled" },
-  { value: "rejected",    label: "rejected" },
-  { value: "revoked",     label: "revoked" },
-  { value: "expired",     label: "expired" },
+  { value: "",             label: "All biometric statuses" },
+  { value: "not-enrolled", label: "not-enrolled" },
+  { value: "pending",      label: "pending" },
+  { value: "enrolled",     label: "enrolled" },
+  { value: "rejected",     label: "rejected" },
+  { value: "revoked",      label: "revoked" },
+  { value: "expired",      label: "expired" },
 ];
 
 function Pill({ children, tone = "default" }) {
@@ -62,7 +62,7 @@ function Pill({ children, tone = "default" }) {
 const idStr = (v) => {
   if (!v) return "";
   if (typeof v === "string") return v;
-  if (typeof v === "object") return String(v._id || v.id || v); // v might be ObjectId
+  if (typeof v === "object") return String(v._id || v.id || v);
   return String(v);
 };
 
@@ -79,6 +79,9 @@ export default function AdminUsers() {
   const [roleFilter, setRoleFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [missingPhotoOnly, setMissingPhotoOnly] = useState(false);
+
+  // NEW: show deleted toggle (drives includeDeleted=1)
+  const [showDeleted, setShowDeleted] = useState(false);
 
   // reset password modal target
   const [target, setTarget] = useState(null);
@@ -108,7 +111,7 @@ export default function AdminUsers() {
   });
   const [editing, setEditing] = useState(false);
 
-  // Photo + biometric quick modals
+  // Photo + biometric quick modals (kept)
   const [photoModal, setPhotoModal] = useState({ open: false, user: null, objectId: "", url: "" });
   const [enrollModal, setEnrollModal] = useState({ open: false, user: null, token: "", enrollmentId: "", action: "" });
 
@@ -122,12 +125,15 @@ export default function AdminUsers() {
     const params = new URLSearchParams();
     if (statusFilter) params.set("status", statusFilter);
     if (missingPhotoOnly) params.set("missingPhoto", "true");
+    if (showDeleted) params.set("includeDeleted", "1"); // NEW
     const qs = params.toString() ? `?${params.toString()}` : "";
     const { data } = await api.get(`/users${qs}`);
     return Array.isArray(data) ? data : [];
   }
+
   async function loadGroups() {
-    const { data } = await api.get("/groups?limit=1000"); // use same api client
+    // groups are not needed for deleted restore; keep standard list
+    const { data } = await api.get("/groups?limit=1000");
     return Array.isArray(data) ? data : [];
   }
 
@@ -165,14 +171,14 @@ export default function AdminUsers() {
       const [usersData, groupsData] = await Promise.all([loadUsers(), loadGroups()]);
       setRows(usersData);
       setGroups(groupsData);
-      setGroupsByUser(buildGroupsDict(groupsData)); // plain object -> guaranteed rerender
+      setGroupsByUser(buildGroupsDict(groupsData));
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
 
   useEffect(() => { load(); }, []);
-  useEffect(() => { load(); }, [statusFilter, missingPhotoOnly]);
+  useEffect(() => { load(); }, [statusFilter, missingPhotoOnly, showDeleted]);
 
   const filtered = useMemo(() => {
     const needle = qDeb;
@@ -239,7 +245,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       const { data } = await api.post("/users/bulk-upload", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      setInfo(`Uploaded ${data?.count ?? data?.created ?? 0} users.`);
+      setInfo(`Uploaded ${data?.created ?? 0} created, ${data?.updated ?? 0} updated.`);
       setBulkFile(null);
       setShowCreate(false);
       await load();
@@ -268,6 +274,10 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
   async function saveEdit(e) {
     e?.preventDefault?.();
     if (!editUser || editing) return;
+    if (editUser?.isDeleted) {
+      setErr("This user is deleted. Restore them before editing.");
+      return;
+    }
     setErr(""); setInfo(""); setEditing(true);
     try {
       const payload = {
@@ -293,12 +303,42 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
 
   // --- Delete (soft) ---
   async function del(id) {
-    if (!confirm("Delete this user?")) return;
+    if (!confirm("Delete this user? (soft delete)")) return;
     setErr(""); setInfo("");
     try {
       await api.delete(`/users/${id}`);
       await load();
       setInfo("User deleted.");
+      // keep edit modal consistent if currently editing
+      if (editUser && String(editUser._id) === String(id)) {
+        const updated = { ...editUser, isDeleted: true, active: false };
+        setEditUser(updated);
+      }
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
+  }
+
+  // --- Restore (soft restore) ---
+  async function restore(id) {
+    setErr(""); setInfo("");
+    try {
+      const { data } = await api.post(`/users/${id}/restore`);
+      await load();
+      setInfo("User restored.");
+      // update modal user if open
+      if (editUser && String(editUser._id) === String(id)) {
+        const restoredUser = data?.user || { ...editUser, isDeleted: false, active: true };
+        setEditUser(restoredUser);
+        setEditForm({
+          name: restoredUser.name || "",
+          email: restoredUser.email || "",
+          username: restoredUser.username || "",
+          staffNumber: restoredUser.staffNumber || "",
+          role: restoredUser.role || "worker",
+          tempPassword: "",
+        });
+      }
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -383,7 +423,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       {/* Header row */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-semibold">Admin • Users</h1>
-        <div className="flex items-center gap-2">
+
+        <div className="flex items-center gap-2 flex-wrap">
           <input
             className="input input-bordered"
             style={{ minWidth: 260 }}
@@ -391,6 +432,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
+
           <select
             className="select select-bordered"
             value={roleFilter}
@@ -402,6 +444,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               <option key={r.value} value={r.value}>{r.label}</option>
             ))}
           </select>
+
           <select
             className="select select-bordered"
             value={statusFilter}
@@ -412,6 +455,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               <option key={s.value || "all"} value={s.value}>{s.label}</option>
             ))}
           </select>
+
           <label className="inline-flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -420,9 +464,21 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             />
             Missing Photo only
           </label>
+
+          {/* NEW: show deleted */}
+          <label className="inline-flex items-center gap-2 text-sm" title="Include deleted users (admins/managers only)">
+            <input
+              type="checkbox"
+              checked={showDeleted}
+              onChange={(e) => setShowDeleted(e.target.checked)}
+            />
+            Show deleted
+          </label>
+
           <button className="btn btn-sm" onClick={downloadTemplate} title="Download CSV template">
             Download CSV Template
           </button>
+
           <button className="btn btn-sm" onClick={() => { setShowCreate(true); setCreateTab("single"); }}>
             New User
           </button>
@@ -444,7 +500,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               <th>Role</th>
               <th>Groups</th>
               <th>Biometric</th>
-              <th className="text-right">Actions</th>
+              <th>Status</th>
+              <th className="text-right">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -453,6 +510,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                 const photoUrl = u?.photo?.url;
                 const status = u?.biometric?.status || "not-enrolled";
                 const gNames = groupsByUser[idStr(u._id || u.id)] || [];
+                const isDel = !!u?.isDeleted;
+
                 return (
                   <tr key={u._id}>
                     <td className="align-top">
@@ -462,50 +521,42 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                         <div className="w-10 h-10 rounded-full bg-gray-200 grid place-items-center text-xs text-gray-600">—</div>
                       )}
                     </td>
-                    <td className="align-top">{u.name || "—"}</td>
+
+                    <td className="align-top">
+                      <div className="flex items-center gap-2">
+                        <span>{u.name || "—"}</span>
+                        {isDel && <Pill tone="bad">deleted</Pill>}
+                      </div>
+                    </td>
+
                     <td className="align-top">{u.email || u.username || "—"}</td>
                     <td className="align-top">{u.staffNumber || "—"}</td>
                     <td className="align-top">{u.role || "—"}</td>
+
                     <td className="align-top">
                       {gNames.length ? gNames.join(", ") : <span className="text-gray-400">—</span>}
                     </td>
+
                     <td className="align-top">
                       <Pill tone={statusTone(status)}>{status}</Pill>
                     </td>
+
+                    <td className="align-top">
+                      {u?.active === false ? <Pill tone="warn">inactive</Pill> : <Pill tone="ok">active</Pill>}
+                    </td>
+
+                    {/* ✅ ONLY EDIT in the table */}
                     <td className="text-right align-top">
-                      <div className="flex flex-wrap gap-2 justify-end">
-                        <button className="btn btn-sm" onClick={() => setTarget({ ...u, id: u._id })}>
-                          Reset Password
-                        </button>
-                        <button className="btn btn-sm" onClick={() => openEdit(u)}>
-                          Edit
-                        </button>
-                        <button className="btn btn-sm" onClick={() => del(u._id)}>
-                          Delete
-                        </button>
-                        <button className="btn btn-sm" onClick={() => openPhotoModal(u)}>
-                          Set Photo
-                        </button>
-                        <button className="btn btn-sm" onClick={() => startEnrollment(u)}>
-                          Start Enroll
-                        </button>
-                        <button className="btn btn-sm" onClick={() => approveEnrollment(u)}>
-                          Approve
-                        </button>
-                        <button className="btn btn-sm" onClick={() => rejectEnrollment(u)}>
-                          Reject
-                        </button>
-                        <button className="btn btn-sm" onClick={() => revokeEnrollment(u)}>
-                          Revoke
-                        </button>
-                      </div>
+                      <button className="btn btn-sm" onClick={() => openEdit(u)}>
+                        Edit
+                      </button>
                     </td>
                   </tr>
                 );
               })
             ) : (
               <tr>
-                <td className="p-4 text-gray-600" colSpan={8}>No users found.</td>
+                <td className="p-4 text-gray-600" colSpan={9}>No users found.</td>
               </tr>
             )}
           </tbody>
@@ -520,12 +571,14 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             <button
               className={`px-3 py-2 ${createTab === "single" ? "bg-black text-white" : ""}`}
               onClick={() => setCreateTab("single")}
+              type="button"
             >
               Create Individually
             </button>
             <button
               className={`px-3 py-2 ${createTab === "bulk" ? "bg-black text-white" : ""}`}
               onClick={() => setCreateTab("bulk")}
+              type="button"
             >
               Bulk Upload
             </button>
@@ -632,82 +685,158 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         </div>
       </Modal>
 
-      {/* Edit modal */}
-      <Modal open={!!editUser} onClose={closeEdit} title="Edit User">
+      {/* Edit modal (actions live here now) */}
+      <Modal
+        open={!!editUser}
+        onClose={closeEdit}
+        title={
+          editUser
+            ? `Edit User • ${editUser.name || editUser.email || editUser.username || editUser._id}${editUser.isDeleted ? " (DELETED)" : ""}`
+            : "Edit User"
+        }
+        width={860}
+      >
         {editUser && (
-          <form onSubmit={saveEdit} className="grid gap-3 md:grid-cols-2">
-            <label className="text-sm md:col-span-2">Name
-              <input
-                className="border p-2 w-full"
-                value={editForm.name}
-                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                required
-              />
-            </label>
-            <label className="text-sm md:col-span-2">Email
-              <input
-                className="border p-2 w-full"
-                type="email"
-                value={editForm.email}
-                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
-                placeholder="Leave blank to keep unchanged"
-              />
-            </label>
-            <label className="text-sm">Username
-              <input
-                className="border p-2 w-full"
-                value={editForm.username}
-                onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
-                placeholder="Optional"
-              />
-            </label>
-            <label className="text-sm">Staff #
-              <input
-                className="border p-2 w-full"
-                value={editForm.staffNumber}
-                onChange={(e) => setEditForm({ ...editForm, staffNumber: e.target.value })}
-                placeholder="Optional"
-              />
-            </label>
-            <label className="text-sm">Role
-              <select
-                className="border p-2 w-full"
-                value={editForm.role}
-                onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
-              >
-                {ROLE_OPTIONS.map(r => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="text-sm">Temp password (optional)
-              <input
-                className="border p-2 w-full"
-                type="text"
-                placeholder="Set a new temporary password"
-                value={editForm.tempPassword}
-                onChange={(e) => setEditForm({ ...editForm, tempPassword: e.target.value })}
-              />
-            </label>
+          <div className="grid gap-4">
+            {/* Action strip (hidden until edit is open ✅) */}
+            <div className="flex flex-wrap items-center gap-2 border rounded-xl p-3 bg-gray-50">
+              <div className="text-sm text-gray-700 mr-2">Actions:</div>
 
-            <div className="md:col-span-2 flex items-center gap-2 pt-1">
-              <button className="px-3 py-2 bg-black text-white rounded disabled:opacity-60" disabled={editing}>
-                {editing ? "Saving…" : "Save"}
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setTarget({ ...editUser, id: editUser._id })}
+              >
+                Reset Password
               </button>
-              <button type="button" className="px-3 py-2 border rounded" onClick={closeEdit}>
-                Cancel
-              </button>
-              <div className="ml-auto">
-                <button
-                  type="button"
-                  className="px-3 py-2 border rounded"
-                  onClick={() => { setTarget({ ...editUser, id: editUser._id }); }}
-                >
-                  Reset Password
+
+              {!editUser.isDeleted && (
+                <button type="button" className="btn btn-sm" onClick={() => openPhotoModal(editUser)}>
+                  Set Photo
                 </button>
+              )}
+
+              {!editUser.isDeleted && (
+                <>
+                  <button type="button" className="btn btn-sm" onClick={() => startEnrollment(editUser)}>
+                    Start Enroll
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => approveEnrollment(editUser)}>
+                    Approve
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => rejectEnrollment(editUser)}>
+                    Reject
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => revokeEnrollment(editUser)}>
+                    Revoke
+                  </button>
+                </>
+              )}
+
+              <div className="ml-auto flex items-center gap-2">
+                {!editUser.isDeleted ? (
+                  <button type="button" className="btn btn-sm btn-error" onClick={() => del(editUser._id)}>
+                    Delete
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-success"
+                    onClick={() => restore(editUser._id)}
+                    disabled={!showDeleted}
+                    title={!showDeleted ? "Turn on 'Show deleted' in the header first" : "Restore this user"}
+                  >
+                    Restore
+                  </button>
+                )}
               </div>
             </div>
-          </form>
+
+            {editUser.isDeleted && (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-3">
+                This user is currently <strong>deleted</strong>. Restore them to edit details or manage biometrics/photo.
+              </div>
+            )}
+
+            {/* Edit form */}
+            <form onSubmit={saveEdit} className="grid gap-3 md:grid-cols-2">
+              <label className="text-sm md:col-span-2">Name
+                <input
+                  className="border p-2 w-full"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  required
+                  disabled={!!editUser.isDeleted}
+                />
+              </label>
+
+              <label className="text-sm md:col-span-2">Email
+                <input
+                  className="border p-2 w-full"
+                  type="email"
+                  value={editForm.email}
+                  onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                  disabled={!!editUser.isDeleted}
+                />
+              </label>
+
+              <label className="text-sm">Username
+                <input
+                  className="border p-2 w-full"
+                  value={editForm.username}
+                  onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
+                  disabled={!!editUser.isDeleted}
+                />
+              </label>
+
+              <label className="text-sm">Staff #
+                <input
+                  className="border p-2 w-full"
+                  value={editForm.staffNumber}
+                  onChange={(e) => setEditForm({ ...editForm, staffNumber: e.target.value })}
+                  disabled={!!editUser.isDeleted}
+                />
+              </label>
+
+              <label className="text-sm">Role
+                <select
+                  className="border p-2 w-full"
+                  value={editForm.role}
+                  onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}
+                  disabled={!!editUser.isDeleted}
+                >
+                  {ROLE_OPTIONS.map(r => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-sm">Temp password (optional)
+                <input
+                  className="border p-2 w-full"
+                  type="text"
+                  placeholder="Set a new temporary password"
+                  value={editForm.tempPassword}
+                  onChange={(e) => setEditForm({ ...editForm, tempPassword: e.target.value })}
+                  disabled={!!editUser.isDeleted}
+                />
+              </label>
+
+              <div className="md:col-span-2 flex items-center gap-2 pt-1">
+                <button
+                  className="px-3 py-2 bg-black text-white rounded disabled:opacity-60"
+                  disabled={editing || !!editUser.isDeleted}
+                  title={editUser.isDeleted ? "Restore the user first" : "Save changes"}
+                >
+                  {editing ? "Saving…" : "Save"}
+                </button>
+
+                <button type="button" className="px-3 py-2 border rounded" onClick={closeEdit}>
+                  Close
+                </button>
+              </div>
+            </form>
+          </div>
         )}
       </Modal>
 
@@ -740,8 +869,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             />
           </label>
           <div className="flex items-center justify-end gap-2">
-            <button className="px-3 py-2 border rounded" onClick={closePhotoModal}>Cancel</button>
-            <button className="px-3 py-2 bg-black text-white rounded" onClick={confirmPhoto}>Confirm</button>
+            <button className="px-3 py-2 border rounded" onClick={closePhotoModal} type="button">Cancel</button>
+            <button className="px-3 py-2 bg-black text-white rounded" onClick={confirmPhoto} type="button">Confirm</button>
           </div>
         </div>
       </Modal>
@@ -750,13 +879,13 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       <Modal
         open={enrollModal.open}
         onClose={() => setEnrollModal({ open: false, user: null, token: "", enrollmentId: "", action: "" })}
-        title={`Enrollment ${enrollModal.action === "started" ? "Started" : ""}`}
+        title="Enrollment Started"
       >
         <div className="space-y-2 text-sm">
           <div>Use this token in the mobile app to complete self-enrollment:</div>
           <pre className="bg-gray-100 p-2 rounded text-xs overflow-auto">{enrollModal.token || "—"}</pre>
           <div className="text-gray-600">
-            After the mobile submits, approve or reject using the buttons in the table row.
+            After the mobile submits, approve or reject using the buttons inside the Edit modal.
           </div>
         </div>
       </Modal>
