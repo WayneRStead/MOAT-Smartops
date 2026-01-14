@@ -110,7 +110,19 @@ function uniqueSet(arr) {
   return Array.from(new Set(arr.map((x) => String(x)))).map((s) => asOid(s) || s);
 }
 
+function boolish(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'y' || s === 'on';
+}
+
 /* ------------------------------- LIST --------------------------------- */
+/**
+ * GET /groups
+ * Supports:
+ *  - ?q=search
+ *  - ?limit=...
+ *  - ?includeDeleted=1  (admins/superadmins only)
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -119,14 +131,19 @@ router.get('/', requireAuth, async (req, res) => {
     const role = String(req.user?.role || '').toLowerCase();
     const isAdmin = role === 'admin' || role === 'superadmin';
 
-    const filter = { ...orgFilterFromReq(Group, req), isDeleted: { $ne: true } };
+    // Only admins may include deleted
+    const includeDeleted = isAdmin && boolish(req.query.includeDeleted);
+
+    const filter = { ...orgFilterFromReq(Group, req) };
+    if (!includeDeleted) filter.isDeleted = { $ne: true };
     if (q) filter.name = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
-    // Non-admins: show groups they lead OR belong to
+    // Non-admins: show groups they lead OR belong to (and never include deleted)
     if (!isAdmin) {
       const me = asOid(req.user?._id) || req.user?._id;
       if (!me) return res.status(401).json({ error: 'Unauthorized' });
       filter.$or = [{ memberUserIds: me }, { leaderUserIds: me }];
+      filter.isDeleted = { $ne: true };
     }
 
     const rows = await Group.find(filter).sort({ name: 1 }).limit(limit).lean();
@@ -138,20 +155,29 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 /* -------------------------------- READ -------------------------------- */
+/**
+ * GET /groups/:id
+ * Supports:
+ *  - ?includeDeleted=1 (admins/superadmins only)
+ */
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const id = asOid(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid group id' });
 
+    const role = String(req.user?.role || '').toLowerCase();
+    const isAdmin = role === 'admin' || role === 'superadmin';
+    const includeDeleted = isAdmin && boolish(req.query.includeDeleted);
+
     const g = await Group.findOne({
       _id: id,
       ...orgFilterFromReq(Group, req),
-      isDeleted: { $ne: true },
+      ...(includeDeleted ? {} : { isDeleted: { $ne: true } }),
     }).lean();
+
     if (!g) return res.status(404).json({ error: 'Not found' });
 
     // Non-admins must be leaders OR members
-    const isAdmin = ['admin', 'superadmin'].includes(String(req.user?.role || '').toLowerCase());
     const me = asOid(req.user?._id) || req.user?._id;
     if (
       !isAdmin &&
@@ -284,6 +310,33 @@ router.delete('/:id', requireAuth, requireRole('admin', 'superadmin'), async (re
     res.json({ ok: true });
   } catch (e) {
     console.error('DELETE /groups/:id error:', e);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ----------------------------- RESTORE ---------------------------- */
+/**
+ * POST /groups/:id/restore
+ * Restores a soft-deleted group.
+ */
+router.post('/:id/restore', requireAuth, requireRole('admin', 'superadmin'), async (req, res) => {
+  try {
+    const id = asOid(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid group id' });
+
+    const g = await Group.findOne({
+      _id: id,
+      ...orgFilterFromReq(Group, req),
+      // NOTE: allow restore even if deleted
+    });
+    if (!g) return res.status(404).json({ error: 'Not found' });
+
+    g.isDeleted = false;
+    g.updatedBy = req.user?.email || String(req.user?._id || '');
+    await g.save();
+    res.json({ ok: true, group: g });
+  } catch (e) {
+    console.error('POST /groups/:id/restore error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });

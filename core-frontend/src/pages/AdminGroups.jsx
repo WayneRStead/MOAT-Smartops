@@ -1,7 +1,6 @@
-// src/pages/AdminGroups.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useTheme } from "../ThemeContext";
-import { api } from "../lib/api"; // ✅ use shared axios client (adds x-org-id, auth, aliases)
+import { api } from "../lib/api";
 
 /* ----------------------------- helpers ------------------------------------ */
 const normId = (v) => {
@@ -23,7 +22,7 @@ const getLeaderIdFromGroup = (g) =>
   );
 
 const upsertLeaderFields = (userId) => {
-  const v = userId || null; // null clears leader server-side
+  const v = userId || null;
   return {
     leaderUserId: v,
     leaderId: v,
@@ -53,24 +52,10 @@ function getOrgId() {
   }
 }
 
-// NEW: soft-delete detector (covers common shapes)
-function isDeletedGroup(g) {
-  if (!g) return false;
-  if (g.deleted === true || g.isDeleted === true) return true;
-  if (g.deletedAt || g.removedAt) return true;
-  if (String(g.status || "").toLowerCase() === "deleted") return true;
-  return false;
-}
+const isGroupDeleted = (g) => g?.isDeleted === true;
 
 /* ----------------------------- UI bits ------------------------------------ */
-function Chip({ children, tone = "default" }) {
-  const style =
-    tone === "danger"
-      ? { background: "#fee2e2", borderColor: "#fecaca", color: "#991b1b" }
-      : tone === "muted"
-      ? { background: "#f1f5f9", borderColor: "#e2e8f0", color: "#475569" }
-      : { background: "#f8fafc", borderColor: "#e2e8f0", color: "#0f172a" };
-
+function Chip({ children }) {
   return (
     <span
       style={{
@@ -82,7 +67,7 @@ function Chip({ children, tone = "default" }) {
         fontSize: 12,
         marginRight: 6,
         marginBottom: 6,
-        ...style,
+        background: "#f8fafc",
       }}
     >
       {children}
@@ -141,15 +126,13 @@ export default function AdminGroups() {
   const [groups, setGroups] = useState([]);
   const [users, setUsers] = useState([]);
   const [q, setQ] = useState("");
+  const [showDeleted, setShowDeleted] = useState(false); // ✅ toggle
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // NEW: show deleted toggle
-  const [showDeleted, setShowDeleted] = useState(false);
-
   // modal state
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(null); // group doc or null
+  const [editing, setEditing] = useState(null);
 
   // editor fields
   const [name, setName] = useState("");
@@ -171,7 +154,7 @@ export default function AdminGroups() {
     setMemberFilter("");
   }
 
-  async function loadAll(nextShowDeleted = showDeleted) {
+  async function loadAll() {
     setLoading(true);
     setErr("");
     try {
@@ -182,26 +165,17 @@ export default function AdminGroups() {
         return;
       }
 
-      // NOTE:
-      // Backends differ on how they expose soft-deleted data.
-      // We pass a few common flags; unknown params are ignored safely.
-      const groupsParams = {
-        limit: 1000,
-        includeDeleted: nextShowDeleted ? 1 : 0,
-        withDeleted: nextShowDeleted ? 1 : 0,
-        showDeleted: nextShowDeleted ? 1 : 0,
-        deleted: nextShowDeleted ? 1 : 0,
-        _ts: Date.now(),
-      };
-
+      // ✅ includeDeleted=1 only when toggle is enabled
       const [gs, us] = await Promise.all([
-        api.get("/groups", { params: groupsParams }),
-        api.get("/users", { params: { limit: 2000, _ts: Date.now() } }),
+        api.get("/groups", { params: { limit: 1000, includeDeleted: showDeleted ? 1 : 0 } }),
+        api.get("/users", { params: { limit: 2000 } }),
       ]);
 
-      const gRows = Array.isArray(gs.data) ? gs.data : Array.isArray(gs.data?.rows) ? gs.data.rows : [];
+      const gRows = Array.isArray(gs.data) ? gs.data : (Array.isArray(gs.data?.rows) ? gs.data.rows : []);
+      const uRows = Array.isArray(us.data) ? us.data : (Array.isArray(us.data?.rows) ? us.data.rows : []);
+
       setGroups(gRows);
-      setUsers(Array.isArray(us.data) ? us.data : Array.isArray(us.data?.rows) ? us.data.rows : []);
+      setUsers(uRows);
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || "Failed to load data");
       setGroups([]);
@@ -212,16 +186,15 @@ export default function AdminGroups() {
   }
 
   useEffect(() => {
-    loadAll(false);
+    loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [showDeleted]); // ✅ reload when toggle changes
 
   const filtered = useMemo(() => {
-    // Always hide deleted unless toggle is on (even if backend returns them)
-    const base = showDeleted ? groups : groups.filter((g) => !isDeletedGroup(g));
+    // When showDeleted ON, only show deleted groups (matches your “Show deleted” requirement)
+    const base = showDeleted ? groups.filter(isGroupDeleted) : groups.filter((g) => !isGroupDeleted(g));
 
     if (!q.trim()) return base;
-
     const re = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     return base.filter((g) => re.test(g.name) || re.test(g.description || ""));
   }, [groups, q, showDeleted]);
@@ -260,6 +233,7 @@ export default function AdminGroups() {
       return Array.from(s);
     });
   };
+
   const clearFilteredMembers = () => {
     if (!memberFilter.trim()) {
       setMemberUserIds([]);
@@ -276,7 +250,6 @@ export default function AdminGroups() {
     try {
       setErr("");
 
-      // Ensure leader (if set) is in members
       const finalMemberIds = Array.from(
         new Set((memberUserIds || []).concat(leaderUserId ? [leaderUserId] : []).map(String))
       );
@@ -292,13 +265,14 @@ export default function AdminGroups() {
         };
         await api.put(`/groups/${id}`, putPayload);
 
-        // ensure single-leader semantics (best-effort)
         try {
           await api.post(`/groups/${id}/leader`, {
             userId: leaderUserId || null,
             ...upsertLeaderFields(leaderUserId),
           });
         } catch {}
+
+        await loadAll();
       } else {
         const createPayload = {
           name,
@@ -314,9 +288,10 @@ export default function AdminGroups() {
             ...upsertLeaderFields(leaderUserId),
           });
         } catch {}
+
+        await loadAll();
       }
 
-      await loadAll(showDeleted);
       setOpen(false);
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || "Failed to save group");
@@ -327,17 +302,24 @@ export default function AdminGroups() {
     if (!window.confirm("Delete this group? (soft delete)")) return;
     try {
       await api.delete(`/groups/${id}`);
-      // If showing deleted, re-fetch so the now-deleted record can still appear.
-      // If not showing deleted, remove from list for instant feedback.
-      if (showDeleted) await loadAll(true);
-      else setGroups((xs) => xs.filter((g) => String(g._id) !== String(id)));
+      await loadAll();
     } catch (e) {
       alert(e?.response?.data?.error || e?.message || "Failed to delete group");
     }
   }
 
+  // ✅ restore
+  async function restoreGroup(id) {
+    if (!window.confirm("Restore this group?")) return;
+    try {
+      await api.post(`/groups/${id}/restore`);
+      await loadAll();
+    } catch (e) {
+      alert(e?.response?.data?.error || e?.message || "Failed to restore group");
+    }
+  }
+
   const accent = org?.accentColor || "#2a7fff";
-  const deletedCount = useMemo(() => groups.filter(isDeletedGroup).length, [groups]);
 
   return (
     <div className="max-w-7xl mx-auto p-4" style={{ "--accent": accent }}>
@@ -347,7 +329,6 @@ export default function AdminGroups() {
         .btn-sm{padding:6px 10px;border-radius:8px}
         .btn-accent{background:var(--accent,#2a7fff);color:#fff;border-color:var(--accent,#2a7fff)}
         .btn-danger{background:#b91c1c;color:#fff;border-color:#7f1d1d}
-        .btn-muted{background:#f1f5f9;border-color:#e2e8f0;color:#0f172a}
         .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px}
         .muted{color:#64748b}
       `}</style>
@@ -355,7 +336,7 @@ export default function AdminGroups() {
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-semibold">Groups</h1>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
           <input
             className="input input-bordered"
             style={{ minWidth: 240 }}
@@ -364,19 +345,9 @@ export default function AdminGroups() {
             onChange={(e) => setQ(e.target.value)}
           />
 
-          {/* NEW: Show deleted toggle */}
-          <button
-            type="button"
-            className={`btn btn-sm ${showDeleted ? "btn-accent" : "btn-muted"}`}
-            title="Toggle showing soft-deleted groups"
-            onClick={async () => {
-              const next = !showDeleted;
-              setShowDeleted(next);
-              await loadAll(next);
-            }}
-          >
-            {showDeleted ? "Showing deleted" : "Show deleted"}
-            {deletedCount ? <span style={{ marginLeft: 6, opacity: 0.9 }}>({deletedCount})</span> : null}
+          {/* ✅ show deleted toggle */}
+          <button className="btn" onClick={() => setShowDeleted((v) => !v)}>
+            {showDeleted ? "Show active" : "Show deleted"}
           </button>
 
           <button
@@ -385,6 +356,8 @@ export default function AdminGroups() {
               resetEditor(null);
               setOpen(true);
             }}
+            disabled={showDeleted} // optional: prevents creating while viewing deleted
+            title={showDeleted ? "Switch to active groups to create/edit" : "Create a new group"}
           >
             New Group
           </button>
@@ -400,40 +373,37 @@ export default function AdminGroups() {
           {filtered.map((g) => {
             const leaderId = getLeaderIdFromGroup(g);
             const memberCount = (g.memberUserIds || []).length;
-            const deleted = isDeletedGroup(g);
+            const deleted = isGroupDeleted(g);
 
             return (
-              <div
-                key={g._id}
-                className="card"
-                style={{
-                  opacity: deleted ? 0.75 : 1,
-                  borderStyle: deleted ? "dashed" : "solid",
-                }}
-              >
+              <div key={g._id} className="card">
                 <div className="flex items-center gap-2">
                   <h3 className="font-semibold text-lg flex-1 m-0">
-                    {g.name} {deleted ? <Chip tone="danger">Deleted</Chip> : null}
+                    {g.name}{" "}
+                    {deleted ? <span className="muted" style={{ fontSize: 12 }}>(Deleted)</span> : null}
                   </h3>
 
-                  <button
-                    className="btn btn-sm"
-                    onClick={() => {
-                      resetEditor(g);
-                      setOpen(true);
-                    }}
-                    title={deleted ? "You can still view/edit, but it is deleted" : "Edit"}
-                  >
-                    Edit
-                  </button>
+                  {!deleted && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => {
+                        resetEditor(g);
+                        setOpen(true);
+                      }}
+                    >
+                      Edit
+                    </button>
+                  )}
 
-                  <button
-                    className="btn btn-sm btn-danger"
-                    onClick={() => removeGroup(g._id)}
-                    title={deleted ? "Already deleted (will try again)" : "Soft delete"}
-                  >
-                    Delete
-                  </button>
+                  {deleted ? (
+                    <button className="btn btn-sm" onClick={() => restoreGroup(g._id)}>
+                      Restore
+                    </button>
+                  ) : (
+                    <button className="btn btn-sm btn-danger" onClick={() => removeGroup(g._id)}>
+                      Delete
+                    </button>
+                  )}
                 </div>
 
                 {g.description && <p className="mt-2">{g.description}</p>}
@@ -447,23 +417,19 @@ export default function AdminGroups() {
                   <strong>Members ({memberCount}):</strong>
                   <div className="mt-1">
                     {(g.memberUserIds || []).map((uid) => (
-                      <Chip key={normId(uid)} tone={deleted ? "muted" : "default"}>
-                        {userNameById(uid)}
-                      </Chip>
+                      <Chip key={normId(uid)}>{userNameById(uid)}</Chip>
                     ))}
                   </div>
                 </div>
-
-                {deleted ? (
-                  <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-                    This group is soft-deleted. Toggle “Show deleted” to view/hide these.
-                  </div>
-                ) : null}
               </div>
             );
           })}
 
-          {!filtered.length && <div className="mt-3 muted">No groups yet.</div>}
+          {!filtered.length && (
+            <div className="mt-3 muted">
+              {showDeleted ? "No deleted groups yet." : "No groups yet."}
+            </div>
+          )}
         </div>
       )}
 
@@ -511,21 +477,12 @@ export default function AdminGroups() {
                 placeholder="Filter users…"
                 value={leaderFilter}
                 onChange={(e) => setLeaderFilter(e.target.value)}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: "1px solid #e2e8f0",
-                }}
+                style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}
               />
               <select
                 value={leaderUserId || ""}
                 onChange={(e) => setLeaderUserId(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  border: "1px solid #e2e8f0",
-                }}
+                style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #e2e8f0" }}
               >
                 <option value="">(None)</option>
                 {leaderCandidates.map((u) => (
@@ -537,7 +494,7 @@ export default function AdminGroups() {
             </div>
           </div>
 
-          {/* Members (pills in grid + filter) */}
+          {/* Members */}
           <div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <div style={{ fontSize: 12, marginBottom: 6 }}>Members</div>
@@ -587,7 +544,6 @@ export default function AdminGroups() {
             />
 
             <div
-              className="pill-grid"
               style={{
                 maxHeight: 260,
                 overflow: "auto",
@@ -606,7 +562,6 @@ export default function AdminGroups() {
                   <button
                     type="button"
                     key={id}
-                    className={`pill ${active ? "active" : ""}`}
                     onClick={() => toggleMember(id)}
                     title={userDisplay(u)}
                     style={{
@@ -641,7 +596,9 @@ export default function AdminGroups() {
               })}
             </div>
 
-            <div style={{ marginTop: 6, fontSize: 12, color: "#64748b" }}>Selected: {memberUserIds.length}</div>
+            <div style={{ marginTop: 6, fontSize: 12, color: "#64748b" }}>
+              Selected: {memberUserIds.length}
+            </div>
           </div>
 
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
