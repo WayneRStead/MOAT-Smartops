@@ -143,6 +143,120 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     if (latest?.text) return latest.text;
   }
 
+  // NEW: get newest note/update for a task (works with task detail objects)
+function newestManagerNoteForTask(task, managerUserId, managerName) {
+  const asTime = (v) => {
+    const d = v ? new Date(v) : null;
+    return d && !isNaN(+d) ? +d : 0;
+  };
+
+  const readText = (c) =>
+    String(c?.note ?? c?.text ?? c?.comment ?? c?.message ?? c?.details ?? c?.remark ?? "").trim();
+
+  const readAt = (c) => c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
+
+  const readAuthorId = (c) =>
+    idOf(c?.by || c?.author || c?.user || c?.userId || c?.authorId || c?.createdBy || c?.createdById);
+
+  const readAuthorName = (c) =>
+    String(
+      c?.byName ||
+        c?.authorName ||
+        c?.userName ||
+        c?.name ||
+        c?.by?.name ||
+        c?.author?.name ||
+        c?.user?.name ||
+        c?.by?.email ||
+        c?.author?.email ||
+        c?.user?.email ||
+        ""
+    ).trim();
+
+  const readRole = (c) =>
+    String(
+      c?.role ||
+        c?.authorRole ||
+        c?.userRole ||
+        c?.byRole ||
+        c?.by?.role ||
+        c?.author?.role ||
+        c?.user?.role ||
+        ""
+    ).trim();
+
+  const isManagerish = (c) => {
+    const role = norm(readRole(c));
+    if (role.includes("manager") || role.includes("project-manager") || role.includes("pm")) return true;
+
+    const aid = readAuthorId(c);
+    if (managerUserId && aid && String(aid) === String(managerUserId)) return true;
+
+    const an = readAuthorName(c);
+    if (managerName && an && an === managerName) return true;
+
+    if (c?.isManager === true || c?.manager === true) return true;
+
+    return false;
+  };
+
+  // 1) direct flattened fields (if present on list/detail)
+  const direct =
+    task?.lastManagerNote ||
+    task?.managerNote ||
+    task?.pmNote ||
+    task?.lastNote ||
+    task?.latestNote ||
+    "";
+
+  // keep a candidate "record" so we can include time too
+  const candidates = [];
+
+  if (String(direct || "").trim()) {
+    candidates.push({
+      t: asTime(task?.managerNoteAt || task?.pmNoteAt || task?.updatedAt || task?.modifiedAt || task?.createdAt),
+      text: String(direct).trim(),
+      managerish: true,
+    });
+  }
+
+  // 2) common arrays on task detail (we'll be generous)
+  const pools = []
+    .concat(safeArr(task?.managerNotes))
+    .concat(safeArr(task?.managerComments))
+    .concat(safeArr(task?.notes))
+    .concat(safeArr(task?.comments))
+    .concat(safeArr(task?.updates))
+    .concat(safeArr(task?.activity))
+    .concat(safeArr(task?.history))
+    .concat(safeArr(task?.logs))
+    .concat(safeArr(task?.statusHistory))
+    .concat(safeArr(task?.timeline))
+    .concat(safeArr(task?.events));
+
+  for (const c of pools) {
+    const text = readText(c);
+    if (!text) continue;
+    const t = asTime(readAt(c));
+    candidates.push({
+      t,
+      text,
+      managerish: isManagerish(c),
+    });
+  }
+
+  if (!candidates.length) return null;
+
+  // Prefer managerish entries, but if none have author info (common), fall back to newest any
+  const managerOnly = candidates.filter((x) => x.managerish);
+  const pickFrom = managerOnly.length ? managerOnly : candidates;
+
+  pickFrom.sort((a, b) => b.t - a.t);
+  const best = pickFrom[0];
+
+  return best?.text ? { at: best.t ? new Date(best.t).toISOString() : null, text: best.text } : null;
+}
+
   // 2) Direct "last note" fields (list endpoints sometimes flatten these)
   const direct =
     ins?.lastManagerComment ||
@@ -382,6 +496,7 @@ export default function ProjectOverviewPanel() {
   const [submissions, setSubmissions] = React.useState([]);
   const [clockings, setClockings] = React.useState([]);
   const [inspMgrCommentById, setInspMgrCommentById] = React.useState({});
+  const [taskMgrNoteById, setTaskMgrNoteById] = React.useState({});
 
   // lightbox
   const [lb, setLb] = React.useState({ open: false, title: "", url: "", html: "", json: null });
@@ -605,6 +720,48 @@ export default function ProjectOverviewPanel() {
     },
     [managerUserId, managerName]
   );
+
+  // NEW: lazy-fetch task detail objects for top rows to get latest notes (list endpoint may omit them)
+React.useEffect(() => {
+  let alive = true;
+
+  async function hydrateTasks() {
+    const top = scopedTasks.slice(0, 12);
+    const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
+
+    if (!missing.length) return;
+
+    const results = await Promise.allSettled(
+      missing.map(async (t) => {
+        const id = idOf(t);
+        const res = await api.get(`/tasks/${id}`, { params: { _ts: Date.now() }, timeout: 12000 });
+        const detail = res?.data || {};
+        const latest = newestManagerNoteForTask(detail, managerUserId, managerName);
+        return { id, latest };
+      })
+    );
+
+    if (!alive) return;
+
+    const patch = {};
+    for (const rr of results) {
+      if (rr.status !== "fulfilled") continue;
+      const { id, latest } = rr.value || {};
+      if (id && latest?.text) patch[id] = latest; // store {at,text}
+    }
+
+    if (Object.keys(patch).length) {
+      setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
+    }
+  }
+
+  hydrateTasks();
+
+  return () => {
+    alive = false;
+  };
+  // intentionally NOT depending on taskMgrNoteById to avoid loops
+}, [scopedTasks, managerUserId, managerName]);
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
   const inspectionIndex = React.useMemo(() => {
@@ -984,7 +1141,10 @@ React.useEffect(() => {
                       const leaderName = leaderId ? userNameById(leaderId) : "";
                       return `${g?.name || gid}${leaderName ? ` — ${leaderName}` : ""}`;
                     });
-                    const latestMgr = latestMgrNoteForTask(t);
+                    const latestMgr =
+                      taskMgrNoteById[idOf(t)] ||
+                      latestMgrNoteForTask(t) ||
+                      newestManagerNoteForTask(t, managerUserId, managerName);
                     const status = String(t.status || "").trim() || "—";
                     const due = dueOfTask(t);
                     const overdue = isOverdueTask(t, now);
