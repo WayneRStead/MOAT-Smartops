@@ -1070,7 +1070,7 @@ export default function ProjectOverviewPanel() {
       <style>{`
         .row{ display:grid; gap:10px; }
         .block{ display:grid; gap:6px; }
-        .kv{ display:grid; grid-template-columns: 140px 1fr; gap:8px; font-size:12px; }
+        .kv{ display:grid; grid-template-columns: 140px 1fr; gap:8px; font-size:14px; }
         .muted{ color:#6b7280; }
         .h{ font-weight:700; margin-top:6px; }
         .table{ width:100%; border-collapse: collapse; font-size:12px; }
@@ -1206,7 +1206,6 @@ export default function ProjectOverviewPanel() {
                       <th>Reg</th>
                       <th>Driver</th>
                       <th>Status</th>
-                      <th>Last Inspection</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1219,24 +1218,6 @@ export default function ProjectOverviewPanel() {
                         </td>
                         <td>{v.driver || <span className="muted">—</span>}</td>
                         <td>{v.status ? pill(v.status, toneForStatus(v.status)) : <span className="muted">—</span>}</td>
-                        <td>
-                          {v.lastInspectionAt ? (
-                            <>
-                              {dOr(v.lastInspectionAt)} · {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
-                              {v.lastInspectionId ? (
-                                <>
-                                  {" "}
-                                  ·{" "}
-                                  <span className="linkish" onClick={() => openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })}>
-                                    view
-                                  </span>
-                                </>
-                              ) : null}
-                            </>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
-                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1253,35 +1234,22 @@ export default function ProjectOverviewPanel() {
                   <thead>
                     <tr>
                       <th>Asset</th>
-                      <th>Last Inspection</th>
+                      <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {aRows.slice(0, 12).map((a) => (
                       <tr key={a.id}>
-                        <td>
-                          <span className="linkish" onClick={() => openAsset(a.id)}>
-                            {a.name}
-                          </span>
-                        </td>
-                        <td>
-                          {a.lastInspectionAt ? (
-                            <>
-                              {dOr(a.lastInspectionAt)} · {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
-                              {a.lastInspectionId ? (
-                                <>
-                                  {" "}
-                                  ·{" "}
-                                  <span className="linkish" onClick={() => openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })}>
-                                    view
-                                  </span>
-                                </>
-                              ) : null}
-                            </>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
-                        </td>
+                    <td>
+                    <span className="linkish" onClick={() => openAsset(a.id)}>
+                     {a.name}
+                         </span>
+                    </td>
+                       <td>
+                    {a.status
+                         ? pill(a.status, toneForStatus(a.status))
+                         : <span className="muted">—</span>}
+                      </td>
                       </tr>
                     ))}
                   </tbody>
