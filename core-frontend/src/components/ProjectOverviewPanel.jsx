@@ -75,6 +75,20 @@ function extractCommentsFromObj(obj) {
     .filter((x) => x.at || x.text);
 }
 
+function absUrl(u) {
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return s;
+
+  const base = String(api?.defaults?.baseURL || "").replace(/\/+$/, "");
+  const path = s.startsWith("/") ? s : `/${s}`;
+
+  // if api baseURL not set for some reason, fall back to your known Render domain
+  const fallbackBase = "https://moat-smartops.onrender.com";
+
+  return `${base || fallbackBase}${path}`;
+}
+
 /* ----------------- newest manager comment for inspection ----------------- */
 function newestManagerCommentForInspection(ins, managerUserId, managerName) {
   const asTime = (v) => {
@@ -1032,17 +1046,23 @@ const aRows = React.useMemo(() => {
   const openVehicle = (id) => openUrl("Vehicle", `/vehicles/${id}`);
   const openAsset = (id) => openUrl("Asset", `/assets/${id}`);
   const openInvoice = async (inv) => {
-    if (inv.fileUrl) return openUrl(`Invoice ${inv.number}`, inv.fileUrl);
-    try {
-      const r = await api.get(`/invoices/${inv.id}`, { params: { _ts: Date.now() }, timeout: 10000 });
-      const d = r?.data || {};
-      const url = d.fileUrl || d.url || d.documentUrl || d.attachment?.url || d.file?.url || "";
-      if (url) return openUrl(`Invoice ${inv.number}`, url);
-      return openJson(`Invoice ${inv.number}`, d);
-    } catch {
-      return openJson(`Invoice ${inv.number}`, inv);
-    }
-  };
+  // 1) If list payload already has a file url, open it (as absolute)
+  const immediate = absUrl(inv.fileUrl || inv.url || inv.documentUrl || inv.attachment?.url || inv.file?.url);
+  if (immediate) return openUrl(`Invoice ${inv.number}`, immediate);
+
+  // 2) Otherwise fetch invoice detail and try again
+  try {
+    const r = await api.get(`/invoices/${inv.id}`, { params: { _ts: Date.now() }, timeout: 10000 });
+    const d = r?.data || {};
+
+    const url = absUrl(d.fileUrl || d.url || d.documentUrl || d.attachment?.url || d.file?.url);
+    if (url) return openUrl(`Invoice ${inv.number}`, url);
+
+    return openJson(`Invoice ${inv.number}`, d);
+  } catch {
+    return openJson(`Invoice ${inv.number}`, inv);
+  }
+};
   const openClocking = async (row) => {
     try {
       const r = await api.get(`/clockings/${row.id}`, { params: { _ts: Date.now() }, timeout: 10000 });
