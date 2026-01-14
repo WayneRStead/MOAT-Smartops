@@ -7,13 +7,18 @@ function openDetail(kind, id) {
   const payload = { kind, id: String(id) };
   try {
     const lb = require("../widgets/Lightbox");
-    if (lb?.open) { lb.open(payload); return; }
+    if (lb?.open) {
+      lb.open(payload);
+      return;
+    }
   } catch {}
-  try { window.dispatchEvent(new CustomEvent("dashboard:openDetail", { detail: payload })); } catch {}
+  try {
+    window.dispatchEvent(new CustomEvent("dashboard:openDetail", { detail: payload }));
+  } catch {}
 }
-const openProjectDetail  = (p) => openDetail("project", String(p?._id || p?.id || ""));
-const openTaskDetail     = (t) => openDetail("task",    String(t?._id || t?.id || ""));
-const openMilestoneDetail= (m) => openDetail("milestone", String(m?._id || m?.id || ""));
+const openProjectDetail = (p) => openDetail("project", String(p?._id || p?.id || ""));
+const openTaskDetail = (t) => openDetail("task", String(t?._id || t?.id || ""));
+const openMilestoneDetail = (m) => openDetail("milestone", String(m?._id || m?.id || ""));
 
 /* ─────────────────────────── optional FilterContext bridge + window fallback ─────────────────────────── */
 function useOptionalFilters() {
@@ -49,33 +54,57 @@ function useOptionalFilters() {
 
 /* ────────────────────────────────────────── date helpers ────────────────────────────────────────── */
 const DAY = 24 * 60 * 60 * 1000;
-const floorLocal = (d) => { if (!d) return null; const x = new Date(d); x.setHours(0,0,0,0); return x; };
-const addDays = (d, n) => { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; };
+const floorLocal = (d) => {
+  if (!d) return null;
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+const addDays = (d, n) => {
+  const x = new Date(d.getTime());
+  x.setDate(x.getDate() + n);
+  return x;
+};
 const diffDays = (a, b) => Math.round((floorLocal(b) - floorLocal(a)) / DAY);
 const fmt = (d) => (d ? new Date(d).toLocaleDateString() : "—");
+
+// NEW: month helpers (local)
+const startOfMonthLocal = (d) => {
+  const x = new Date(d);
+  x.setDate(1);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+const endOfMonthLocal = (d) => {
+  const x = new Date(d);
+  x.setMonth(x.getMonth() + 1, 0); // last day of month
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
 
 /* ───────────────────────────── status helpers (canon + color mapping) ───────────────────────────── */
 const norm = (s) => String(s || "").toLowerCase();
 function canonStatus(raw) {
   const s = String(raw || "").trim().toLowerCase();
-  if (["finished","complete","completed","closed","done"].includes(s)) return "finished";
-  if (["paused - problem","paused-problem","problem","blocked","block","issue"].includes(s)) return "paused - problem";
-  if (["paused","pause","on hold","on-hold","hold"].includes(s)) return "paused";
-  if (["started","start","in-progress","in progress","open","active","running"].includes(s)) return "started";
+  if (["finished", "complete", "completed", "closed", "done"].includes(s)) return "finished";
+  if (["paused - problem", "paused-problem", "problem", "blocked", "block", "issue"].includes(s))
+    return "paused - problem";
+  if (["paused", "pause", "on hold", "on-hold", "hold"].includes(s)) return "paused";
+  if (["started", "start", "in-progress", "in progress", "open", "active", "running"].includes(s)) return "started";
   return "pending";
 }
 const isClosedLike = (s) => canonStatus(s) === "finished";
 const isPausedLike = (s) => canonStatus(s) === "paused";
 const isActiveLike = (s) => canonStatus(s) === "started";
-const isProblemLike= (s) => canonStatus(s) === "paused - problem";
+const isProblemLike = (s) => canonStatus(s) === "paused - problem";
 
 const STATUS_COLOR = (s) => {
   const cs = canonStatus(s);
-  if (cs === "finished") return "#9ca3af";      // gray
+  if (cs === "finished") return "#9ca3af"; // gray
   if (cs === "paused - problem") return "#ef4444"; // red
-  if (cs === "paused") return "#f59e0b";        // amber
-  if (cs === "started") return "#10b981";       // green
-  return "#60a5fa";                              // blue (pending/other)
+  if (cs === "paused") return "#f59e0b"; // amber
+  if (cs === "started") return "#10b981"; // green
+  return "#60a5fa"; // blue (pending/other)
 };
 const OVERDUE = "#ef4444";
 
@@ -84,40 +113,39 @@ const toId = (x) => String(x?._id || x?.id || "");
 const dateInRange = (start, end, fromAt, toAt) => {
   if (!fromAt && !toAt) return true;
   const s = start ? new Date(start) : null;
-  const e = end   ? new Date(end)   : null;
+  const e = end ? new Date(end) : null;
   const L = fromAt ? new Date(fromAt) : null;
-  const R = toAt   ? new Date(toAt)   : null;
-  const left  = s ? +s : -Infinity;
+  const R = toAt ? new Date(toAt) : null;
+  const left = s ? +s : -Infinity;
   const right = e ? +e : +s || Date.now();
   const LL = L ? +L : -Infinity;
   const RR = R ? +R : +Infinity;
   return left <= RR && right >= LL;
 };
 
-// NEW: consider overdue by dates as “red”
+// consider overdue by dates as “red”
 function isProjectOverdue(p) {
-  const end =
-    p.endDate || p.end || p.endAt || p.due || p.deadlineAt || null;
+  const end = p.endDate || p.end || p.endAt || p.due || p.deadlineAt || null;
   const e = floorLocal(end);
   const today = floorLocal(new Date());
   if (!e || !today) return false;
   return !isClosedLike(p.status) && e < today;
 }
 
-// UPDATED: rag mapping uses project object so red = overdue OR “problem”,
+// rag mapping uses project object so red = overdue OR “problem”,
 // amber = paused, green = active AND NOT overdue.
 function withinRagProject(p, rag) {
   if (!rag) return true;
   if (rag === "green") return isActiveLike(p.status) && !isProjectOverdue(p);
   if (rag === "amber") return isPausedLike(p.status);
-  if (rag === "red")   return isProjectOverdue(p) || isProblemLike(p.status);
+  if (rag === "red") return isProjectOverdue(p) || isProblemLike(p.status);
   return true;
 }
 
 /* ───────────────────────────────────────── layout constants ───────────────────────────────────────── */
-const CELL_W  = 26;
-const ROW_H   = 24;   // << aligned (was 28)
-const HDR_H   = 24;
+const CELL_W = 26;
+const ROW_H = 24;
+const HDR_H = 24;
 const SEPARATOR = "#e5e7eb";
 const LABEL_W = 240;
 
@@ -140,45 +168,50 @@ export default function GanttPane() {
   useEffect(() => {
     let alive = true;
     (async () => {
-      setLoading(true); setErr("");
+      setLoading(true);
+      setErr("");
       try {
         const { data } = await api.get("/projects", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 });
         if (!alive) return;
-        setProjects(Array.isArray(data) ? data : (Array.isArray(data?.rows) ? data.rows : []));
+        setProjects(Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : []);
       } catch (e) {
         if (alive) setErr(e?.response?.data?.error || String(e));
       } finally {
         if (alive) setLoading(false);
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
   /* ───────────────────────────── tasks for opened projects ───────────────────────────── */
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const ids = Array.from(openProjects).filter(pid => !tasksByProject.has(pid));
+      const ids = Array.from(openProjects).filter((pid) => !tasksByProject.has(pid));
       for (const pid of ids) {
         try {
           const { data } = await api.get("/tasks", { params: { projectId: pid, limit: 2000 } });
-          const rows = Array.isArray(data) ? data : (Array.isArray(data?.rows) ? data.rows : []);
+          const rows = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
           if (cancelled) return;
-          setTasksByProject(prev => new Map(prev).set(pid, rows));
+          setTasksByProject((prev) => new Map(prev).set(pid, rows));
         } catch {
           if (cancelled) return;
-          setTasksByProject(prev => new Map(prev).set(pid, []));
+          setTasksByProject((prev) => new Map(prev).set(pid, []));
         }
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [openProjects, tasksByProject]);
 
   /* ───────────────────────────── milestones for opened tasks (normalized) ───────────────────────────── */
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const ids = Array.from(openTasks).filter(tid => !milesByTask.has(tid));
+      const ids = Array.from(openTasks).filter((tid) => !milesByTask.has(tid));
       for (const tid of ids) {
         try {
           let data;
@@ -199,15 +232,17 @@ export default function GanttPane() {
                 m.endPlanned || m.dueAt || m.endAt || m.endDate || m.targetAt || m.targetDate || m.date || null;
               const actualEndAt = m.endActual ?? m.actualEndAt ?? m.completedAt ?? null;
               return {
-                _id: id, id,
-                title: m.title || m.name || m.label || `Milestone ${i+1}`,
-                name:  m.title || m.name || m.label || `Milestone ${i+1}`,
+                _id: id,
+                id,
+                title: m.title || m.name || m.label || `Milestone ${i + 1}`,
+                name: m.title || m.name || m.label || `Milestone ${i + 1}`,
                 status: canonStatus(m.status || (m.completed ? "finished" : "pending")),
                 isRoadblock: !!(m.isRoadblock ?? m.roadblock ?? m.blocker),
-                dependsOn: Array.isArray(m.dependsOn) ? m.dependsOn
-                          : (Array.isArray(m.requires) ? m.requires : []),
+                dependsOn: Array.isArray(m.dependsOn) ? m.dependsOn : Array.isArray(m.requires) ? m.requires : [],
                 blockedBy: Array.isArray(m.blockedBy) ? m.blockedBy : [],
-                startAt, dueAt, actualEndAt,
+                startAt,
+                dueAt,
+                actualEndAt,
                 endPlanned: m.endPlanned || null,
                 endAt: m.endAt || null,
                 targetDate: m.targetDate || null,
@@ -217,21 +252,23 @@ export default function GanttPane() {
 
           const rows = normalize(data);
           if (cancelled) return;
-          setMilesByTask(prev => new Map(prev).set(tid, rows));
+          setMilesByTask((prev) => new Map(prev).set(tid, rows));
         } catch {
           if (cancelled) return;
-          setMilesByTask(prev => new Map(prev).set(tid, []));
+          setMilesByTask((prev) => new Map(prev).set(tid, []));
         }
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [openTasks, milesByTask]);
 
   /* ───────────────────────────── filter projects by rag/date/groups/projectIds ───────────────────────────── */
   const filteredProjects = useMemo(() => {
     const fromAt = dr?.fromAt || dr?.from || "";
-    const toAt   = dr?.toAt   || dr?.to   || "";
-    const wanted = (projectIds || []);
+    const toAt = dr?.toAt || dr?.to || "";
+    const wanted = projectIds || [];
     const restrictIds = wanted.length > 0;
     const wantedGroups = (groups || []).map(String);
     const restrictGroups = wantedGroups.length > 0;
@@ -244,56 +281,36 @@ export default function GanttPane() {
           .concat(p.groups || [])
           .concat(p.group || [])
           .concat(p.teamGroups || []);
-        const pg = new Set(pool.flat().map(x => String(x?._id || x?.id || x || "")));
-        if (![...pg].some(g => wantedGroups.includes(g))) return false;
+        const pg = new Set(pool.flat().map((x) => String(x?._id || x?.id || x || "")));
+        if (![...pg].some((g) => wantedGroups.includes(g))) return false;
       }
-      if (!withinRagProject(p, rag)) return false; // ← updated mapping
+      if (!withinRagProject(p, rag)) return false;
       const s = p.startDate || p.start || p.startAt;
-      const e = p.endDate   || p.end   || p.endAt   || p.due || p.deadlineAt;
+      const e = p.endDate || p.end || p.endAt || p.due || p.deadlineAt;
       if (!dateInRange(s, e, fromAt, toAt)) return false;
       return true;
     });
   }, [projects, projectIds, groups, rag, dr?.fromAt, dr?.toAt, dr?.from, dr?.to]);
 
-  /* ───────────────────────────── calendar domain (ZOOMS to DateRange if set) ───────────────────────────── */
+  /* ───────────────────────────── calendar domain ─────────────────────────────
+     CHANGE: if no date range filter is set, default to “present month window”
+             (with a small buffer), not min/max of data.
+  ─────────────────────────────────────────────────────────────────────────── */
   const cal = useMemo(() => {
     const fromAt = dr?.fromAt || dr?.from || "";
-    const toAt   = dr?.toAt   || dr?.to   || "";
+    const toAt = dr?.toAt || dr?.to || "";
     const today = floorLocal(new Date());
 
     let rangeStart, rangeEnd;
     if (fromAt || toAt) {
-      rangeStart = floorLocal(fromAt || new Date(Date.now() - 30*DAY));
-      rangeEnd   = floorLocal(toAt   || new Date(Date.now() + 60*DAY));
+      rangeStart = floorLocal(fromAt || new Date(Date.now() - 30 * DAY));
+      rangeEnd = floorLocal(toAt || new Date(Date.now() + 60 * DAY));
     } else {
-      const starts = []; const ends = [];
-      filteredProjects.forEach(p => {
-        if (p.startDate || p.start || p.startAt) starts.push(+floorLocal(p.startDate || p.start || p.startAt));
-        if (p.endDate   || p.end   || p.endAt   || p.due || p.deadlineAt) ends.push(+floorLocal(p.endDate || p.end || p.endAt || p.due || p.deadlineAt));
-      });
-      tasksByProject.forEach(ts => {
-        (ts||[]).forEach(t => {
-          if (t.startAt || t.startDate) starts.push(+floorLocal(t.startAt || t.startDate));
-          if (t.dueAt   || t.endAt || t.endDate || t.finishAt) ends.push(+floorLocal(t.dueAt || t.endAt || t.endDate || t.finishAt));
-        });
-      });
-      milesByTask.forEach(ms => {
-        (ms||[]).forEach(m => {
-          const s = m.startAt || null;
-          const e = (m.actualEndAt || m.dueAt || m.endAt || m.endPlanned || m.targetDate || m.date || null);
-          if (s) starts.push(+floorLocal(s));
-          if (e) ends.push(+floorLocal(e));
-        });
-      });
-      if (!starts.length && !ends.length) {
-        rangeStart = floorLocal(new Date(Date.now() - 30*DAY));
-        rangeEnd   = floorLocal(new Date(Date.now() + 60*DAY));
-      } else {
-        const minS = isFinite(Math.min(...starts)) ? Math.min(...starts) : Date.now() - 30*DAY;
-        const maxE = isFinite(Math.max(...ends))   ? Math.max(...ends)   : Date.now() + 60*DAY;
-        rangeStart = floorLocal(new Date(minS));
-        rangeEnd   = floorLocal(new Date(maxE));
-      }
+      // DEFAULT: current month (buffer so you can see a bit before/after)
+      const monthStart = startOfMonthLocal(today);
+      const monthEnd = endOfMonthLocal(today);
+      rangeStart = addDays(monthStart, -15);
+      rangeEnd = addDays(monthEnd, +15);
     }
 
     if (+rangeEnd < +rangeStart) rangeEnd = rangeStart;
@@ -306,7 +323,7 @@ export default function GanttPane() {
         d,
         dom: d.getDate(),
         dow: d.toLocaleDateString(undefined, { weekday: "short" }),
-        isWeekend: (dowNum === 0 || dowNum === 6),
+        isWeekend: dowNum === 0 || dowNum === 6,
       };
     });
 
@@ -314,7 +331,8 @@ export default function GanttPane() {
     let i = 0;
     while (i < days) {
       const d = addDays(rangeStart, i);
-      const m = d.getMonth(), y = d.getFullYear();
+      const m = d.getMonth(),
+        y = d.getFullYear();
       const label = d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
       let span = 0;
       while (i + span < days) {
@@ -349,7 +367,7 @@ export default function GanttPane() {
                 id: toId(m),
                 label: m.title || m.name || toId(m),
                 parentId: tid,
-                item: m
+                item: m,
               })
             );
           }
@@ -360,12 +378,22 @@ export default function GanttPane() {
   }, [filteredProjects, openProjects, openTasks, tasksByProject, milesByTask]);
 
   const headerRows = 3; // Month, Day, Date
-  const HEADER_OFFSET = headerRows * HDR_H; // keep math simple; ROW_H change fixed alignment
+  const HEADER_OFFSET = headerRows * HDR_H;
   const svgHeight = rows.length * ROW_H + 24;
 
   /* ───────────────────────────── toggles ───────────────────────────── */
-  const toggleProject = (pid) => setOpenProjects(prev => { const next = new Set(prev); next.has(pid) ? next.delete(pid) : next.add(pid); return next; });
-  const toggleTask    = (tid) => setOpenTasks(prev => { const next = new Set(prev); next.has(tid) ? next.delete(tid) : next.add(tid); return next; });
+  const toggleProject = (pid) =>
+    setOpenProjects((prev) => {
+      const next = new Set(prev);
+      next.has(pid) ? next.delete(pid) : next.add(pid);
+      return next;
+    });
+  const toggleTask = (tid) =>
+    setOpenTasks((prev) => {
+      const next = new Set(prev);
+      next.has(tid) ? next.delete(tid) : next.add(tid);
+      return next;
+    });
 
   /* ───────────────────────────── “today” scroll helper ───────────────────────────── */
   const scrollToToday = () => {
@@ -374,10 +402,22 @@ export default function GanttPane() {
     const colLeft = cal.todayIdx * CELL_W;
     const viewport = sc.clientWidth || 0;
     const centerTarget = Math.max(0, colLeft - Math.max(0, (viewport - CELL_W) / 2));
-    const fiveBefore   = Math.max(0, (cal.todayIdx - 5) * CELL_W);
+    const fiveBefore = Math.max(0, (cal.todayIdx - 5) * CELL_W);
     const target = viewport ? centerTarget : fiveBefore;
     sc.scrollTo({ left: target, behavior: "smooth" });
   };
+
+  // NEW: auto-center today on mount / when calendar changes
+  useEffect(() => {
+    const sc = scrollerRef.current;
+    if (!sc) return;
+    requestAnimationFrame(() => {
+      const colLeft = cal.todayIdx * CELL_W;
+      const viewport = sc.clientWidth || 0;
+      const centerTarget = Math.max(0, colLeft - Math.max(0, (viewport - CELL_W) / 2));
+      sc.scrollLeft = centerTarget;
+    });
+  }, [cal.todayIdx, cal.dayObjs.length]);
 
   /* ───────────────────────────── dependency elbows (milestone-to-milestone) ───────────────────────────── */
   const edges = useMemo(() => {
@@ -386,10 +426,9 @@ export default function GanttPane() {
       if (r.type !== "milestone") return;
       const m = r.item;
       const whenRaw =
-        (canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)) ? (m.actualEndAt || m.completedAt || m.endActual) :
-        (m.dueAt || m.endAt || m.endPlanned || m.targetDate || m.date) ||
-        (m.startAt || m.startPlanned || m.scheduledAt) ||
-        m.at || m.createdAt || null;
+        canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)
+          ? m.actualEndAt || m.completedAt || m.endActual
+          : m.dueAt || m.endAt || m.endPlanned || m.targetDate || m.date || m.startAt || m.startPlanned || m.scheduledAt || m.at || m.createdAt || null;
       const at = whenRaw ? floorLocal(whenRaw) : null;
       if (!at) return;
       const x = Math.max(0, diffDays(cal.rangeStart, at)) * CELL_W;
@@ -433,33 +472,90 @@ export default function GanttPane() {
 
       {/* legend + today */}
       <div className="g-legend">
-        <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
-          <span className="g-pill"><span className="g-dot" style={{background:"#10b981"}}/>Active</span>
-          <span className="g-pill"><span className="g-dot" style={{background:"#f59e0b"}}/>Paused</span>
-          <span className="g-pill"><span className="g-dot" style={{background:"#ef4444"}}/>Overdue / Blocked</span>
-          <span className="g-pill"><span className="g-dot" style={{background:"#9ca3af"}}/>Closed</span>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <span className="g-pill">
+            <span className="g-dot" style={{ background: "#10b981" }} />
+            Active
+          </span>
+          <span className="g-pill">
+            <span className="g-dot" style={{ background: "#f59e0b" }} />
+            Paused
+          </span>
+          <span className="g-pill">
+            <span className="g-dot" style={{ background: "#ef4444" }} />
+            Overdue / Blocked
+          </span>
+          <span className="g-pill">
+            <span className="g-dot" style={{ background: "#9ca3af" }} />
+            Closed
+          </span>
         </div>
-        <button className="g-pill" onClick={scrollToToday} title="Scroll to today">Today</button>
+        <button className="g-pill" onClick={scrollToToday} title="Scroll to today">
+          Today
+        </button>
       </div>
 
-      <div className="g-row" style={{ height: svgHeight + headerRows*HDR_H }}>
+      <div className="g-row" style={{ height: svgHeight + headerRows * HDR_H }}>
         {/* LEFT: names with expanders */}
         <div className="g-left" aria-label="tree">
           {/* sticky header cells for Month/Day/Date in left column */}
-          <div style={{position:"sticky", top:0, zIndex:3}}>
-            <div style={{boxSizing:"border-box", height:HDR_H, lineHeight:`${HDR_H}px`, padding:"0 8px", background:"#838383ff", color:"#111827", borderBottom:"1px solid #e5e7eb"}}>Month</div>
-            <div style={{boxSizing:"border-box", height:HDR_H, lineHeight:`${HDR_H}px`, padding:"0 8px", background:"#bebebeff", color:"#111827", borderBottom:"1px solid #e5e7eb"}}>Day</div>
-            <div style={{boxSizing:"border-box", height:HDR_H, lineHeight:`${HDR_H}px`, padding:"0 8px", background:"#e2e2e2ff", color:"#111827", borderBottom:"1px solid #e5e7eb"}}>Date</div>
+          <div style={{ position: "sticky", top: 0, zIndex: 3 }}>
+            <div
+              style={{
+                boxSizing: "border-box",
+                height: HDR_H,
+                lineHeight: `${HDR_H}px`,
+                padding: "0 8px",
+                background: "#838383ff",
+                color: "#111827",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              Month
+            </div>
+            <div
+              style={{
+                boxSizing: "border-box",
+                height: HDR_H,
+                lineHeight: `${HDR_H}px`,
+                padding: "0 8px",
+                background: "#bebebeff",
+                color: "#111827",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              Day
+            </div>
+            <div
+              style={{
+                boxSizing: "border-box",
+                height: HDR_H,
+                lineHeight: `${HDR_H}px`,
+                padding: "0 8px",
+                background: "#e2e2e2ff",
+                color: "#111827",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              Date
+            </div>
           </div>
 
           {rows.map((r, i) => {
-            const top = headerRows*HDR_H + i*ROW_H;
-            const zebra = i % 2 === 0 ? "transparent" : "#0000000a"; // << extend zebra to left
+            const top = headerRows * HDR_H + i * ROW_H;
+            const zebra = i % 2 === 0 ? "transparent" : "#0000000a";
             if (r.type === "project") {
-              const pid = r.id; const open = openProjects.has(pid);
+              const pid = r.id;
+              const open = openProjects.has(pid);
               return (
-                <div key={r.type+pid} className="g-tree-line" style={{ top, background: zebra }}>
-                  <div className="g-arrow" onClick={() => toggleProject(pid)}>{open ? "▾" : "▸"}</div>
+                <div key={r.type + pid} className="g-tree-line" style={{ top, background: zebra }}>
+                  <div
+                    className="g-arrow"
+                    title="Click arrow to expand/collapse Gantt"
+                    onClick={() => toggleProject(pid)}
+                  >
+                    {open ? "▾" : "▸"}
+                  </div>
                   <div className="g-lab g-click" title="Open project details" onClick={() => openProjectDetail(r.item)}>
                     {r.label}
                   </div>
@@ -467,10 +563,17 @@ export default function GanttPane() {
               );
             }
             if (r.type === "task") {
-              const tid = r.id; const open = openTasks.has(tid);
+              const tid = r.id;
+              const open = openTasks.has(tid);
               return (
-                <div key={r.type+tid} className="g-tree-line" style={{ top, paddingLeft:16, background: zebra }}>
-                  <div className="g-arrow" onClick={() => toggleTask(tid)}>{open ? "▾" : "▸"}</div>
+                <div key={r.type + tid} className="g-tree-line" style={{ top, paddingLeft: 16, background: zebra }}>
+                  <div
+                    className="g-arrow"
+                    title="Click arrow to expand/collapse Gantt"
+                    onClick={() => toggleTask(tid)}
+                  >
+                    {open ? "▾" : "▸"}
+                  </div>
                   <div className="g-lab g-click" title="Open task details" onClick={() => openTaskDetail(r.item)}>
                     {r.label}
                   </div>
@@ -478,66 +581,105 @@ export default function GanttPane() {
               );
             }
             return (
-              <div key={r.type+r.id} className="g-tree-line" style={{ top, paddingLeft:32, background: zebra }}>
-                <div className="g-lab" title={r.label}>◆ {r.label}</div>
+              <div key={r.type + r.id} className="g-tree-line" style={{ top, paddingLeft: 32, background: zebra }}>
+                <div className="g-lab" title={r.label}>
+                  ◆ {r.label}
+                </div>
               </div>
             );
           })}
         </div>
 
         {/* RIGHT: calendar grid + bars */}
-        <div className="g-chart" ref={scrollerRef} style={{ overflowX:"auto", position:"relative" }}>
+        <div className="g-chart" ref={scrollerRef} style={{ overflowX: "auto", position: "relative" }}>
           <div
             style={{
-              position:"relative",
-              display:"grid",
+              position: "relative",
+              display: "grid",
               gridTemplateColumns: `repeat(${cal.dayObjs.length}, ${CELL_W}px)`,
               gridAutoRows: `${ROW_H}px`,
-              minWidth: cal.dayObjs.length*CELL_W,
+              minWidth: cal.dayObjs.length * CELL_W,
             }}
           >
             {/* Month row */}
             {cal.months.map((m, idx) => (
-              <div key={`m${idx}`} style={{
-                gridColumn: `${m.start + 1} / ${m.start + 1 + m.span}`,
-                gridRow: "1 / 2",
-                height: HDR_H, lineHeight: `${HDR_H}px`,
-                textAlign: "center", fontSize: 12,
-                background: "#838383ff", borderBottom: "1px solid #e5e7eb",
-                position:"sticky", top:0, zIndex:1
-              }}>{m.label}</div>
+              <div
+                key={`m${idx}`}
+                style={{
+                  gridColumn: `${m.start + 1} / ${m.start + 1 + m.span}`,
+                  gridRow: "1 / 2",
+                  height: HDR_H,
+                  lineHeight: `${HDR_H}px`,
+                  textAlign: "center",
+                  fontSize: 12,
+                  background: "#838383ff",
+                  borderBottom: "1px solid #e5e7eb",
+                  position: "sticky",
+                  top: 0,
+                  zIndex: 1,
+                }}
+              >
+                {m.label}
+              </div>
             ))}
             {/* Day-of-week row */}
             {cal.dayObjs.map((o, i) => (
-              <div key={`dow${i}`} style={{
-                gridColumn: `${i + 1} / ${i + 2}`,
-                gridRow: "2 / 3",
-                height: HDR_H, lineHeight: `${HDR_H}px`,
-                textAlign: "center", fontSize: 12,
-                background: "#bebebeff", borderBottom: "1px solid #e5e7eb",
-                position:"sticky", top:HDR_H*1, zIndex:1
-              }}>{o.dow}</div>
+              <div
+                key={`dow${i}`}
+                style={{
+                  gridColumn: `${i + 1} / ${i + 2}`,
+                  gridRow: "2 / 3",
+                  height: HDR_H,
+                  lineHeight: `${HDR_H}px`,
+                  textAlign: "center",
+                  fontSize: 12,
+                  background: "#bebebeff",
+                  borderBottom: "1px solid #e5e7eb",
+                  position: "sticky",
+                  top: HDR_H * 1,
+                  zIndex: 1,
+                }}
+              >
+                {o.dow}
+              </div>
             ))}
             {/* Date row */}
             {cal.dayObjs.map((o, i) => (
-              <div key={`dom${i}`} style={{
-                gridColumn: `${i + 1} / ${i + 2}`,
-                gridRow: "3 / 4",
-                height: HDR_H, lineHeight: `${HDR_H}px`,
-                textAlign: "center", fontSize: 12,
-                background: "#e2e2e2ff", borderBottom: "1px solid #e5e7eb",
-                position:"sticky", top:HDR_H*2, zIndex:1
-              }} title={o.d.toDateString()}>{o.dom}</div>
+              <div
+                key={`dom${i}`}
+                style={{
+                  gridColumn: `${i + 1} / ${i + 2}`,
+                  gridRow: "3 / 4",
+                  height: HDR_H,
+                  lineHeight: `${HDR_H}px`,
+                  textAlign: "center",
+                  fontSize: 12,
+                  background: "#e2e2e2ff",
+                  borderBottom: "1px solid #e5e7eb",
+                  position: "sticky",
+                  top: HDR_H * 2,
+                  zIndex: 1,
+                }}
+                title={o.d.toDateString()}
+              >
+                {o.dom}
+              </div>
             ))}
 
             {/* weekend shading (behind everything) */}
-            {cal.dayObjs.map((o, i) => o.isWeekend ? (
-              <div key={`wk${i}`} style={{
-                gridColumn: `${i + 1} / ${i + 2}`,
-                gridRow: `${headerRows + 1} / ${headerRows + 1 + rows.length}`,
-                background: "#51515230", zIndex: 0,
-              }} />
-            ) : null)}
+            {cal.dayObjs.map((o, i) =>
+              o.isWeekend ? (
+                <div
+                  key={`wk${i}`}
+                  style={{
+                    gridColumn: `${i + 1} / ${i + 2}`,
+                    gridRow: `${headerRows + 1} / ${headerRows + 1 + rows.length}`,
+                    background: "#51515230",
+                    zIndex: 0,
+                  }}
+                />
+              ) : null
+            )}
 
             {/* TODAY line */}
             <div
@@ -545,8 +687,11 @@ export default function GanttPane() {
                 gridColumn: `${cal.todayIdx + 1} / ${cal.todayIdx + 2}`,
                 gridRow: `1 / ${headerRows + 1 + rows.length}`,
                 justifySelf: "center",
-                width: 4, background: "#ef444457",
-                opacity: 0.9, pointerEvents: "none", zIndex: 2
+                width: 4,
+                background: "#ef444457",
+                opacity: 0.9,
+                pointerEvents: "none",
+                zIndex: 2,
               }}
               title="Today"
             />
@@ -556,11 +701,15 @@ export default function GanttPane() {
               const row = headerRows + 1 + i;
               const zebra = i % 2 === 0 ? "transparent" : "#0000000a";
               return (
-                <div key={`zebra-${i}`} style={{
-                  gridColumn: `1 / ${1 + cal.dayObjs.length}`,
-                  gridRow: `${row} / ${row + 1}`,
-                  background: zebra, zIndex: 0,
-                }} />
+                <div
+                  key={`zebra-${i}`}
+                  style={{
+                    gridColumn: `1 / ${1 + cal.dayObjs.length}`,
+                    gridRow: `${row} / ${row + 1}`,
+                    background: zebra,
+                    zIndex: 0,
+                  }}
+                />
               );
             })}
 
@@ -571,7 +720,7 @@ export default function GanttPane() {
               if (r.type === "project") {
                 const p = r.item;
                 const s = floorLocal(p.startDate || p.start || p.startAt);
-                const e = floorLocal(p.endDate   || p.end   || p.endAt   || p.due || p.deadlineAt || s);
+                const e = floorLocal(p.endDate || p.end || p.endAt || p.due || p.deadlineAt || s);
                 if (!s || !e) return null;
                 const sIdx = Math.max(0, diffDays(cal.rangeStart, s));
                 const eIdx = Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, e));
@@ -584,23 +733,34 @@ export default function GanttPane() {
                 const oSpan = overdue ? Math.max(1, oIdx - eIdx) : 0;
 
                 return (
-                  <React.Fragment key={"p"+r.id}>
+                  <React.Fragment key={"p" + r.id}>
                     <div
                       title={`${r.label} (${canonStatus(p.status)}) • ${fmt(s)} → ${fmt(e)}`}
                       onClick={() => openProjectDetail(p)}
                       style={{
                         gridColumn: `${sIdx + 1} / span ${span}`,
                         gridRow: `${row} / ${row + 1}`,
-                        background: col, height: barH, alignSelf:"center", borderRadius:4, opacity:0.85,
-                        cursor: "pointer"
+                        background: col,
+                        height: barH,
+                        alignSelf: "center",
+                        borderRadius: 4,
+                        opacity: 0.85,
+                        cursor: "pointer",
                       }}
                     />
                     {overdue && (
-                      <div style={{
-                        gridColumn: `${eIdx + 1} / span ${oSpan}`,
-                        gridRow: `${row} / ${row + 1}`,
-                        background: OVERDUE, height: barH, alignSelf:"center", borderRadius:4, opacity:0.92,
-                      }} title={`Overdue since ${fmt(e)}`} />
+                      <div
+                        style={{
+                          gridColumn: `${eIdx + 1} / span ${oSpan}`,
+                          gridRow: `${row} / ${row + 1}`,
+                          background: OVERDUE,
+                          height: barH,
+                          alignSelf: "center",
+                          borderRadius: 4,
+                          opacity: 0.92,
+                        }}
+                        title={`Overdue since ${fmt(e)}`}
+                      />
                     )}
                   </React.Fragment>
                 );
@@ -622,23 +782,34 @@ export default function GanttPane() {
                 const oSpan = overdue ? Math.max(1, oIdx - eIdx) : 0;
 
                 return (
-                  <React.Fragment key={"t"+r.id}>
+                  <React.Fragment key={"t" + r.id}>
                     <div
                       title={`${r.label} (${canonStatus(t.status)}) • ${fmt(s)} → ${fmt(e)}`}
                       onClick={() => openTaskDetail(t)}
                       style={{
                         gridColumn: `${sIdx + 1} / span ${span}`,
                         gridRow: `${row} / ${row + 1}`,
-                        background: col, height: barH, alignSelf:"center", borderRadius:3, opacity:0.95,
-                        cursor:"pointer"
+                        background: col,
+                        height: barH,
+                        alignSelf: "center",
+                        borderRadius: 3,
+                        opacity: 0.95,
+                        cursor: "pointer",
                       }}
                     />
                     {overdue && (
-                      <div style={{
-                        gridColumn: `${eIdx + 1} / span ${oSpan}`,
-                        gridRow: `${row} / ${row + 1}`,
-                        background: OVERDUE, height: barH, alignSelf:"center", borderRadius:3, opacity:0.92,
-                      }} title={`Overdue since ${fmt(e)}`} />
+                      <div
+                        style={{
+                          gridColumn: `${eIdx + 1} / span ${oSpan}`,
+                          gridRow: `${row} / ${row + 1}`,
+                          background: OVERDUE,
+                          height: barH,
+                          alignSelf: "center",
+                          borderRadius: 3,
+                          opacity: 0.92,
+                        }}
+                        title={`Overdue since ${fmt(e)}`}
+                      />
                     )}
                   </React.Fragment>
                 );
@@ -647,10 +818,19 @@ export default function GanttPane() {
               // milestone diamond (clickable)
               const m = r.item;
               const whenRaw =
-                (canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)) ? (m.actualEndAt || m.completedAt || m.endActual) :
-                (m.dueAt || m.endAt || m.endPlanned || m.targetDate || m.date) ||
-                (m.startAt || m.startPlanned || m.scheduledAt) ||
-                m.at || m.createdAt || null;
+                canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)
+                  ? m.actualEndAt || m.completedAt || m.endActual
+                  : m.dueAt ||
+                    m.endAt ||
+                    m.endPlanned ||
+                    m.targetDate ||
+                    m.date ||
+                    m.startAt ||
+                    m.startPlanned ||
+                    m.scheduledAt ||
+                    m.at ||
+                    m.createdAt ||
+                    null;
               const at = floorLocal(whenRaw);
               if (!at) return null;
 
@@ -660,15 +840,17 @@ export default function GanttPane() {
 
               return (
                 <div
-                  key={"m"+r.id}
+                  key={"m" + r.id}
                   title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)}`}
                   onClick={() => openMilestoneDetail(m)}
                   style={{
                     gridColumn: `${xIdx + 1} / ${xIdx + 2}`,
                     gridRow: `${row} / ${row + 1}`,
-                    justifySelf:"center", alignSelf:"center",
-                    width:size, height:size,
-                    transform:"rotate(45deg)",
+                    justifySelf: "center",
+                    alignSelf: "center",
+                    width: size,
+                    height: size,
+                    transform: "rotate(45deg)",
                     background: col,
                     border: m.isRoadblock ? "2px dashed #111" : "2px solid #fff",
                     boxShadow: "0 0 0 1px rgba(17,24,39,0.15)",
@@ -680,19 +862,22 @@ export default function GanttPane() {
             })}
 
             {/* dependency elbows */}
-            <svg width={cal.dayObjs.length*CELL_W} height={svgHeight}
-                 style={{ position:"absolute", left:0, top:headerRows*HDR_H, pointerEvents:"none" }}>
+            <svg
+              width={cal.dayObjs.length * CELL_W}
+              height={svgHeight}
+              style={{ position: "absolute", left: 0, top: headerRows * HDR_H, pointerEvents: "none" }}
+            >
               {edges.map((e, idx) => {
-                const y1 = e.from.row * ROW_H + ROW_H/2;
-                const y2 = e.to.row   * ROW_H + ROW_H/2;
-                const x1 = e.from.x + CELL_W/2;
-                const x2 = e.to.x   + CELL_W/2;
+                const y1 = e.from.row * ROW_H + ROW_H / 2;
+                const y2 = e.to.row * ROW_H + ROW_H / 2;
+                const x1 = e.from.x + CELL_W / 2;
+                const x2 = e.to.x + CELL_W / 2;
                 const mid = (x1 + x2) / 2;
                 const path = `M ${x1} ${y1} L ${mid} ${y1} L ${mid} ${y2} L ${x2} ${y2}`;
                 return (
-                  <g key={"edge"+idx} opacity="0.55">
+                  <g key={"edge" + idx} opacity="0.55">
                     <path d={path} stroke="#374151" strokeWidth="1.5" fill="none" />
-                    <polygon points={`${x2},${y2} ${x2-5},${y2-3} ${x2-5},${y2+3}`} fill="#374151" />
+                    <polygon points={`${x2},${y2} ${x2 - 5},${y2 - 3} ${x2 - 5},${y2 + 3}`} fill="#374151" />
                   </g>
                 );
               })}
@@ -701,8 +886,8 @@ export default function GanttPane() {
         </div>
       </div>
 
-      {loading && <div style={{marginTop:6, fontSize:12, color:"#6b7280"}}>Loading…</div>}
-      {err && <div style={{marginTop:6, fontSize:12, color:"#b91c1c"}}>{err}</div>}
+      {loading && <div style={{ marginTop: 6, fontSize: 12, color: "#6b7280" }}>Loading…</div>}
+      {err && <div style={{ marginTop: 6, fontSize: 12, color: "#b91c1c" }}>{err}</div>}
     </div>
   );
 }
