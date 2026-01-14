@@ -89,6 +89,85 @@ function absUrl(u) {
   return `${base || fallbackBase}${path}`;
 }
 
+function clockingNote(r) {
+  const pick = (...vals) => {
+    for (const v of vals) {
+      const s = typeof v === "string" ? v : v == null ? "" : "";
+      if (String(s).trim()) return String(s).trim();
+    }
+    return "";
+  };
+
+  // common flat fields
+  const flat = pick(
+    r?.note,
+    r?.comment,
+    r?.message,
+    r?.description,
+    r?.details,
+    r?.reason
+  );
+  if (flat) return flat;
+
+  // common nested shapes
+  const nested = pick(
+    r?.reason?.note,
+    r?.reason?.text,
+    r?.reason?.details,
+    r?.details?.note,
+    r?.details?.text,
+    r?.details?.description,
+    r?.meta?.note,
+    r?.meta?.reason,
+    r?.meta?.details,
+    r?.iod?.note,
+    r?.iod?.details,
+    r?.injury?.note,
+    r?.injury?.description,
+    r?.payload?.note,
+    r?.payload?.details
+  );
+  if (nested) return nested;
+
+  // last resort: scan nested object for any likely keys
+  try {
+    const obj = r || {};
+    const candidates = [];
+
+    const walk = (o, depth = 0) => {
+      if (!o || depth > 3) return;
+      if (Array.isArray(o)) {
+        for (const it of o) walk(it, depth + 1);
+        return;
+      }
+      if (typeof o !== "object") return;
+
+      for (const [k, v] of Object.entries(o)) {
+        const key = String(k || "").toLowerCase();
+        if (typeof v === "string" && v.trim()) {
+          if (
+            key.includes("note") ||
+            key.includes("reason") ||
+            key.includes("detail") ||
+            key.includes("message") ||
+            key.includes("description") ||
+            key.includes("injur")
+          ) {
+            candidates.push(v.trim());
+          }
+        } else if (typeof v === "object" && v) {
+          walk(v, depth + 1);
+        }
+      }
+    };
+
+    walk(obj);
+    return candidates[0] || "";
+  } catch {
+    return "";
+  }
+}
+
 /* ----------------- newest manager comment for inspection ----------------- */
 function newestManagerCommentForInspection(ins, managerUserId, managerName) {
   const asTime = (v) => {
@@ -1019,24 +1098,33 @@ const aRows = React.useMemo(() => {
     return "";
   }
 
-  const iodRows = React.useMemo(() => {
-    const fset = new Map();
-    for (const r of clockings) {
-      const pid = String(r.projectId || r.project?._id || r.project?.id || "");
-      if (pid && pid !== focusedProjectId) continue;
-      const at = r?.date || r?.day || r?.on || r?.createdAt || r?.time || r?.timestamp || r?.updatedAt;
-      if (!within(at, fromAt, toAt)) continue;
-      if (clockingType(r) !== "iod") continue;
-      const uid = idOf(r.user || r.userId || r.uid);
-      if (!uid) continue;
-      const note = r?.note || r?.comment || r?.reason || r?.details || r?.message || r?.description || "";
-      const prev = fset.get(uid);
-      if (!prev || new Date(at || 0) < new Date(prev.at || 0)) {
-        fset.set(uid, { id: idOf(r), user: userNameById(uid), at, note });
-      }
+const iodRows = React.useMemo(() => {
+  const fset = new Map();
+
+  for (const r of clockings) {
+    const pid = String(r.projectId || r.project?._id || r.project?.id || "");
+    if (pid && pid !== focusedProjectId) continue;
+
+    const at = r?.date || r?.day || r?.on || r?.createdAt || r?.time || r?.timestamp || r?.updatedAt;
+    if (!within(at, fromAt, toAt)) continue;
+
+    if (clockingType(r) !== "iod") continue;
+
+    const uid = idOf(r.user || r.userId || r.uid);
+    if (!uid) continue;
+
+    const note = clockingNote(r); // ✅ improved note extraction
+
+    const prev = fset.get(uid);
+
+    // ✅ keep the latest record per user (not earliest)
+    if (!prev || new Date(at || 0) > new Date(prev.at || 0)) {
+      fset.set(uid, { id: idOf(r), user: userNameById(uid), at, note });
     }
-    return Array.from(fset.values()).sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
-  }, [clockings, focusedProjectId, fromAt, toAt, userNameById]);
+  }
+
+  return Array.from(fset.values()).sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+}, [clockings, focusedProjectId, fromAt, toAt, userNameById]);
 
   /* ---------------------------- click handlers ---------------------------- */
   const openInspection = (row) => {
@@ -1361,8 +1449,8 @@ const aRows = React.useMemo(() => {
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Name</th>
                     <th>Date</th>
+                    <th>Name</th>
                     <th>Note</th>
                   </tr>
                 </thead>
