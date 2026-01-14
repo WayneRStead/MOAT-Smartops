@@ -847,27 +847,29 @@ export default function ProjectOverviewPanel() {
       });
   }, [vehicles, focusedProjectId, inspectionIndex, userNameById]);
 
-  const aRows = React.useMemo(() => {
-    return assets
-      .filter((a) => String(a.projectId || a.project?._id || a.project?.id || "") === focusedProjectId)
-      .map((a) => {
-        const id = idOf(a);
-        const byId = inspectionIndex.byTarget.get(id);
-        const byName = inspectionIndex.byName.get(a.name || a.title || "");
-        const last = byId || byName || null;
-        const statusOnSelf =
-          a.lastInspectionResult ||
-          a.inspectionStatus ||
-          (a.lastInspectionPassed === true ? "Passed" : a.lastInspectionPassed === false ? "Failed" : "");
-        return {
-          id,
-          name: a.name || a.title || "—",
-          lastInspectionAt: last?.at || a.lastInspectionAt || a.inspectionAt || "",
-          lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
-          lastInspectionId: last?.id || null,
-        };
-      });
-  }, [assets, focusedProjectId, inspectionIndex]);
+const aRows = React.useMemo(() => {
+  return assets
+    .filter((a) => String(a.projectId || a.project?._id || a.project?.id || "") === focusedProjectId)
+    .map((a) => {
+      const id = idOf(a);
+      const status =
+        a.status ||
+        a.state ||
+        a.assetStatus ||
+        a.condition ||
+        a.lifecycleStatus ||
+        a.operationalStatus ||
+        a.availability ||
+        a.currentStatus ||
+        "";
+
+      return {
+        id,
+        name: a.name || a.title || "—",
+        status: String(status || "").trim(),
+      };
+    });
+}, [assets, focusedProjectId]);
 
   /* ----------------------- Invoices + outstanding ------------------------- */
   const invRows = React.useMemo(() => {
