@@ -14,6 +14,7 @@ const isPausedLike = (s) =>
 const startOfTask = (t) => t?.startAt || t?.startDate || t?.begin || t?.createdAt || null;
 const dueOfTask = (t) =>
   t?.dueAt || t?.dueDate || t?.endAt || t?.endDate || t?.deadlineAt || t?.due || null;
+
 const isOverdueTask = (t, now = new Date()) => {
   const d = dueOfTask(t);
   if (!d) return false;
@@ -83,7 +84,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
   };
 
   const readText = (c) => String(c?.comment ?? c?.text ?? c?.note ?? c?.message ?? c?.details ?? "").trim();
-
   const readAt = (c) => c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
 
   const readAuthorId = (c) =>
@@ -131,7 +131,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     return false;
   };
 
-  // 1) Canonical: managerComments array
   if (Array.isArray(ins?.managerComments) && ins.managerComments.length) {
     const latest = ins.managerComments
       .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
@@ -140,7 +139,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     if (latest?.text) return latest.text;
   }
 
-  // 2) Direct flattened fields
   const direct =
     ins?.lastManagerComment ||
     ins?.lastManagerNote ||
@@ -154,7 +152,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
 
   if (String(direct || "").trim()) return String(direct).trim();
 
-  // 3) Mixed comments: newest manager-ish
   if (Array.isArray(ins?.comments) && ins.comments.length) {
     const latestMgr = ins.comments
       .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
@@ -163,7 +160,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     if (latestMgr?.text) return latestMgr.text;
   }
 
-  // 4) Audit/history/logs style
   const trail = extractCommentsFromObj(ins || {});
   const latestTrailMgr = trail
     .map((c) => ({ t: asTime(c?.at), text: String(c?.text || "").trim(), raw: c }))
@@ -174,10 +170,6 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
 }
 
 /* ------------------- newest manager note for a task ---------------------- */
-/**
- * Returns { at, text } or null.
- * Permissive: supports many task schemas.
- */
 function newestManagerNoteForTask(task, managerUserId, managerName) {
   const asTime = (v) => {
     const d = v ? new Date(v) : null;
@@ -234,7 +226,6 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     return false;
   };
 
-  // 1) direct flattened fields (if present)
   const direct =
     task?.lastManagerNote ||
     task?.managerNote ||
@@ -253,7 +244,6 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     });
   }
 
-  // 2) common arrays on task objects
   const pools = []
     .concat(safeArr(task?.managerNotes))
     .concat(safeArr(task?.taskNotes))
@@ -274,14 +264,6 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     candidates.push({ t: asTime(readAt(c)), text, managerish: isManagerish(c) });
   }
 
-  // 3) extra possible shapes
-  const pools2 = [].concat(safeArr(task?.noteUpdates)).concat(safeArr(task?.noteHistory)).concat(safeArr(task?.managerActivity));
-  for (const c of pools2) {
-    const text = readText(c);
-    if (!text) continue;
-    candidates.push({ t: asTime(readAt(c)), text, managerish: isManagerish(c) });
-  }
-
   if (!candidates.length) return null;
 
   const managerOnly = candidates.filter((x) => x.managerish);
@@ -293,29 +275,43 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
   return best?.text ? { at: best.t ? new Date(best.t).toISOString() : null, text: best.text } : null;
 }
 
-/* ----------- newest from /tasks/:id/manager-notes payload (key fix) ------- */
+/* ---- parse /tasks/:id/manager-notes response shapes into {at,text} ------- */
 function newestFromManagerNotesPayload(payload) {
-  const rows = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.rows)
-    ? payload.rows
-    : Array.isArray(payload?.data)
-    ? payload.data
-    : Array.isArray(payload?.items)
-    ? payload.items
-    : [];
-
-  if (!rows.length) return null;
+  // Common places arrays might live:
+  const rows =
+    (Array.isArray(payload) && payload) ||
+    (Array.isArray(payload?.rows) && payload.rows) ||
+    (Array.isArray(payload?.items) && payload.items) ||
+    (Array.isArray(payload?.data) && payload.data) ||
+    (Array.isArray(payload?.notes) && payload.notes) ||
+    (Array.isArray(payload?.managerNotes) && payload.managerNotes) ||
+    (payload?.latest ? safeArr(payload.latest) : []);
 
   const asTime = (v) => {
     const d = v ? new Date(v) : null;
     return d && !isNaN(+d) ? +d : 0;
   };
 
+  // If endpoint returns a single object like { note, at } (not an array)
+  if (!rows || !rows.length) {
+    const directText = String(
+      payload?.note ||
+        payload?.text ||
+        payload?.comment ||
+        payload?.message ||
+        payload?.lastManagerNote ||
+        payload?.managerNote ||
+        ""
+    ).trim();
+    const directAt = payload?.at || payload?.createdAt || payload?.updatedAt || null;
+    if (directText) return { at: directAt ? new Date(directAt).toISOString() : null, text: directText };
+    return null;
+  }
+
   const best = rows
     .map((r) => ({
-      t: asTime(r?.at || r?.createdAt || r?.updatedAt),
-      text: String(r?.note || r?.text || r?.comment || r?.message || "").trim(),
+      t: asTime(r?.at || r?.createdAt || r?.updatedAt || r?.date || r?.timestamp),
+      text: String(r?.note || r?.text || r?.comment || r?.message || r?.details || r?.remark || "").trim(),
     }))
     .filter((x) => x.t || x.text)
     .sort((a, b) => b.t - a.t)[0];
@@ -704,7 +700,7 @@ export default function ProjectOverviewPanel() {
     });
   }, [tasks, focusedProjectId, fromAt, toAt, ragKey]);
 
-  // Existing: try to find manager-ish note from what the list endpoint already gave us
+  // From list payload (if present) – keep
   const latestMgrNoteForTaskFromList = React.useCallback(
     (t) => {
       const comments = extractCommentsFromObj(t);
@@ -732,9 +728,31 @@ export default function ProjectOverviewPanel() {
     [managerUserId, managerName]
   );
 
-  // ✅ KEY FIX: hydrate tasks using the confirmed endpoint: /tasks/:id/manager-notes
+  // ✅ Only hydrate using /tasks/:id/manager-notes (NO /task-notes anywhere)
   React.useEffect(() => {
     let alive = true;
+
+    async function fetchLatestTaskManagerNote(taskId) {
+      // 1) canonical endpoint you already have (200): /tasks/:id/manager-notes
+      try {
+        const r = await api.get(`/tasks/${taskId}/manager-notes`, { params: { _ts: Date.now() }, timeout: 12000 });
+        const parsed = newestFromManagerNotesPayload(r?.data);
+        if (parsed?.text) return parsed;
+      } catch {
+        // ignore and fall back
+      }
+
+      // 2) fallback: task detail (some deployments embed notes on the task)
+      try {
+        const r2 = await api.get(`/tasks/${taskId}`, { params: { _ts: Date.now() }, timeout: 12000 });
+        const parsed2 = newestManagerNoteForTask(r2?.data || {}, managerUserId, managerName);
+        if (parsed2?.text) return parsed2;
+      } catch {
+        // ignore
+      }
+
+      return null;
+    }
 
     async function hydrateTasks() {
       const top = scopedTasks.slice(0, 12);
@@ -744,12 +762,7 @@ export default function ProjectOverviewPanel() {
       const results = await Promise.allSettled(
         missing.map(async (t) => {
           const id = idOf(t);
-          const res = await api.get(`/tasks/${id}/manager-notes`, {
-            params: { _ts: Date.now() },
-            timeout: 12000,
-          });
-
-          const latest = newestFromManagerNotesPayload(res?.data);
+          const latest = await fetchLatestTaskManagerNote(id);
           return { id, latest };
         })
       );
@@ -769,12 +782,11 @@ export default function ProjectOverviewPanel() {
     }
 
     hydrateTasks();
-
     return () => {
       alive = false;
     };
-    // intentionally not depending on taskMgrNoteById to avoid loops
-  }, [scopedTasks]);
+    // NOTE: include taskMgrNoteById so we don't keep thinking they're missing
+  }, [scopedTasks, taskMgrNoteById, managerUserId, managerName]);
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
   const inspectionIndex = React.useMemo(() => {
@@ -941,7 +953,6 @@ export default function ProjectOverviewPanel() {
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
   }, [submissions, inspections, fromAt, toAt, userNameById, managerUserId, managerName, inspMgrCommentById]);
 
-  // Lazy-fetch inspection detail for top rows to get managerComments if list omitted them
   React.useEffect(() => {
     let alive = true;
 
@@ -978,8 +989,7 @@ export default function ProjectOverviewPanel() {
     return () => {
       alive = false;
     };
-    // intentionally not depending on inspMgrCommentById to avoid loops
-  }, [inspRows, managerUserId, managerName]);
+  }, [inspRows, managerUserId, managerName, inspMgrCommentById]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
@@ -1087,11 +1097,7 @@ export default function ProjectOverviewPanel() {
               Loading…
             </div>
           )}
-          {err && (
-            <div style={{ color: "#b91c1c", fontSize: 12 }}>
-              {err}
-            </div>
-          )}
+          {err && <div style={{ color: "#b91c1c", fontSize: 12 }}>{err}</div>}
 
           {/* Header facts */}
           <div className="kv">
@@ -1172,11 +1178,7 @@ export default function ProjectOverviewPanel() {
                         </td>
                         <td>{groupBits.length ? groupBits.join(", ") : <span className="muted">—</span>}</td>
                         <td>
-                          {latestMgr?.at ? (
-                            <div className="muted">{dOr(latestMgr.at, "datetime")}</div>
-                          ) : (
-                            <span className="muted">—</span>
-                          )}
+                          {latestMgr?.at ? <div className="muted">{dOr(latestMgr.at, "datetime")}</div> : <span className="muted">—</span>}
                           {latestMgr?.text ? (
                             <div className="muted">
                               <em>“{latestMgr.text}”</em>
@@ -1225,12 +1227,7 @@ export default function ProjectOverviewPanel() {
                                 <>
                                   {" "}
                                   ·{" "}
-                                  <span
-                                    className="linkish"
-                                    onClick={() =>
-                                      openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })
-                                    }
-                                  >
+                                  <span className="linkish" onClick={() => openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })}>
                                     view
                                   </span>
                                 </>
@@ -1275,12 +1272,7 @@ export default function ProjectOverviewPanel() {
                                 <>
                                   {" "}
                                   ·{" "}
-                                  <span
-                                    className="linkish"
-                                    onClick={() =>
-                                      openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })
-                                    }
-                                  >
+                                  <span className="linkish" onClick={() => openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })}>
                                     view
                                   </span>
                                 </>
@@ -1410,8 +1402,13 @@ export default function ProjectOverviewPanel() {
         </div>
       )}
 
-      {/* Lightbox (portal at document.body) */}
-      <Lightbox open={lb.open} title={lb.title} url={lb.url} json={lb.json} onClose={() => setLb({ open: false, title: "", url: "", html: "", json: null })} />
+      <Lightbox
+        open={lb.open}
+        title={lb.title}
+        url={lb.url}
+        json={lb.json}
+        onClose={() => setLb({ open: false, title: "", url: "", html: "", json: null })}
+      />
     </div>
   );
 }
