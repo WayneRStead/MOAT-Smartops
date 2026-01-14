@@ -74,7 +74,7 @@ function extractCommentsFromObj(obj) {
     .filter((x) => x.at || x.text);
 }
 
-// NEW: get newest *manager* comment for an inspection/submission
+/* ----------------- newest manager comment for inspection ----------------- */
 function newestManagerCommentForInspection(ins, managerUserId, managerName) {
   const asTime = (v) => {
     const d = v ? new Date(v) : null;
@@ -85,7 +85,8 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
   const readText = (c) =>
     String(c?.comment ?? c?.text ?? c?.note ?? c?.message ?? c?.details ?? "").trim();
 
-  const readAt = (c) => c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
+  const readAt = (c) =>
+    c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
 
   const readAuthorId = (c) =>
     idOf(c?.by || c?.author || c?.user || c?.userId || c?.authorId || c?.createdBy || c?.createdById);
@@ -127,23 +128,58 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     const an = readAuthorName(c);
     if (managerName && an && an === managerName) return true;
 
-    // sometimes the backend flags it
     if (c?.isManager === true || c?.manager === true) return true;
 
     return false;
   };
 
-  // 1) Canonical: managerComments array (TaskDetail uses this)
+  // 1) Canonical: managerComments array
   if (Array.isArray(ins?.managerComments) && ins.managerComments.length) {
     const latest = ins.managerComments
       .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
       .filter((x) => x.t || x.text)
       .sort((a, b) => b.t - a.t)[0];
-
     if (latest?.text) return latest.text;
   }
 
-  // NEW: get newest note/update for a task (works with task detail objects)
+  // 2) Direct flattened fields
+  const direct =
+    ins?.lastManagerComment ||
+    ins?.lastManagerNote ||
+    ins?.managerNote ||
+    ins?.managerComment ||
+    ins?.review?.managerComment ||
+    ins?.review?.managerNote ||
+    ins?.approval?.managerNote ||
+    ins?.approval?.note ||
+    "";
+
+  if (String(direct || "").trim()) return String(direct).trim();
+
+  // 3) Mixed comments: newest manager-ish
+  if (Array.isArray(ins?.comments) && ins.comments.length) {
+    const latestMgr = ins.comments
+      .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
+      .filter((x) => (x.t || x.text) && isManagerish(x.raw))
+      .sort((a, b) => b.t - a.t)[0];
+    if (latestMgr?.text) return latestMgr.text;
+  }
+
+  // 4) Audit/history/logs style
+  const trail = extractCommentsFromObj(ins || {});
+  const latestTrailMgr = trail
+    .map((c) => ({ t: asTime(c?.at), text: String(c?.text || "").trim(), raw: c }))
+    .filter((x) => (x.t || x.text) && isManagerish(x.raw))
+    .sort((a, b) => b.t - a.t)[0];
+
+  return latestTrailMgr?.text || "";
+}
+
+/* ------------------- newest manager note for a task ---------------------- */
+/**
+ * Returns { at, text } or null.
+ * This is intentionally permissive because task note schemas differ by endpoint.
+ */
 function newestManagerNoteForTask(task, managerUserId, managerName) {
   const asTime = (v) => {
     const d = v ? new Date(v) : null;
@@ -200,7 +236,7 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     return false;
   };
 
-  // 1) direct flattened fields (if present on list/detail)
+  // 1) direct flattened fields (if present)
   const direct =
     task?.lastManagerNote ||
     task?.managerNote ||
@@ -209,7 +245,6 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     task?.latestNote ||
     "";
 
-  // keep a candidate "record" so we can include time too
   const candidates = [];
 
   if (String(direct || "").trim()) {
@@ -220,10 +255,10 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     });
   }
 
-  // 2) common arrays on task detail (we'll be generous)
+  // 2) common arrays on task detail
   const pools = []
     .concat(safeArr(task?.managerNotes))
-    .concat(safeArr(task?.managerComments))
+    .concat(safeArr(task?.taskNotes))
     .concat(safeArr(task?.notes))
     .concat(safeArr(task?.comments))
     .concat(safeArr(task?.updates))
@@ -237,17 +272,22 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
   for (const c of pools) {
     const text = readText(c);
     if (!text) continue;
-    const t = asTime(readAt(c));
-    candidates.push({
-      t,
-      text,
-      managerish: isManagerish(c),
-    });
+    candidates.push({ t: asTime(readAt(c)), text, managerish: isManagerish(c) });
+  }
+
+  // 3) some APIs return notes separately, e.g. task.noteUpdates or similar
+  const pools2 = []
+    .concat(safeArr(task?.noteUpdates))
+    .concat(safeArr(task?.noteHistory))
+    .concat(safeArr(task?.managerActivity));
+  for (const c of pools2) {
+    const text = readText(c);
+    if (!text) continue;
+    candidates.push({ t: asTime(readAt(c)), text, managerish: isManagerish(c) });
   }
 
   if (!candidates.length) return null;
 
-  // Prefer managerish entries, but if none have author info (common), fall back to newest any
   const managerOnly = candidates.filter((x) => x.managerish);
   const pickFrom = managerOnly.length ? managerOnly : candidates;
 
@@ -255,44 +295,6 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
   const best = pickFrom[0];
 
   return best?.text ? { at: best.t ? new Date(best.t).toISOString() : null, text: best.text } : null;
-}
-
-  // 2) Direct "last note" fields (list endpoints sometimes flatten these)
-  const direct =
-    ins?.lastManagerComment ||
-    ins?.lastManagerNote ||
-    ins?.managerNote ||
-    ins?.managerComment ||
-    ins?.review?.managerComment ||
-    ins?.review?.managerNote ||
-    ins?.approval?.managerNote ||
-    ins?.approval?.note ||
-    "";
-
-  if (String(direct || "").trim()) return String(direct).trim();
-
-  // 3) Legacy mixed comments array: take newest that looks manager-ish
-  if (Array.isArray(ins?.comments) && ins.comments.length) {
-    const latestMgr = ins.comments
-      .map((c) => ({ t: asTime(readAt(c)), text: readText(c), raw: c }))
-      .filter((x) => (x.t || x.text) && isManagerish(x.raw))
-      .sort((a, b) => b.t - a.t)[0];
-
-    if (latestMgr?.text) return latestMgr.text;
-  }
-
-  // 4) Audit/history/logs style: use your extractor and filter manager-ish
-  const trail = extractCommentsFromObj(ins || {});
-  const latestTrailMgr = trail
-    .map((c) => ({
-      t: asTime(c?.at),
-      text: String(c?.text || "").trim(),
-      raw: c,
-    }))
-    .filter((x) => (x.t || x.text) && isManagerish(x.raw))
-    .sort((a, b) => b.t - a.t)[0];
-
-  return latestTrailMgr?.text || "";
 }
 
 function groupIdsOfTask(t) {
@@ -382,7 +384,6 @@ function useFiltersBridge() {
 }
 
 /* -------------------------- Lightweight Lightbox ------------------------- */
-/* Uses a portal and injects CSS into the iframe to hide any app chrome (sidebar/header) */
 function Lightbox({ open, title, url, html, json, onClose }) {
   const iframeRef = React.useRef(null);
 
@@ -495,6 +496,8 @@ export default function ProjectOverviewPanel() {
   const [inspections, setInspections] = React.useState([]);
   const [submissions, setSubmissions] = React.useState([]);
   const [clockings, setClockings] = React.useState([]);
+
+  // hydration maps
   const [inspMgrCommentById, setInspMgrCommentById] = React.useState({});
   const [taskMgrNoteById, setTaskMgrNoteById] = React.useState({});
 
@@ -569,11 +572,13 @@ export default function ProjectOverviewPanel() {
         setVehicles(rest[3].status === "fulfilled" ? list(rest[3].value) : []);
         setAssets(rest[4].status === "fulfilled" ? list(rest[4].value) : []);
         setInvoices(rest[5].status === "fulfilled" ? list(rest[5].value) : []);
+
         const insBasic = rest[6].status === "fulfilled" ? list(rest[6].value) : [];
         const subA = rest[7].status === "fulfilled" ? list(rest[7].value) : [];
         const subB = rest[8].status === "fulfilled" ? list(rest[8].value) : [];
         setInspections(insBasic);
         setSubmissions(subA.length ? subA : subB);
+
         setClockings(rest[9].status === "fulfilled" ? list(rest[9].value) : []);
 
         const fails = [pRes, ...rest].filter((x) => x?.status === "rejected").length;
@@ -585,6 +590,7 @@ export default function ProjectOverviewPanel() {
         if (alive) setLoading(false);
       }
     }
+
     load();
     return () => {
       alive = false;
@@ -592,9 +598,7 @@ export default function ProjectOverviewPanel() {
   }, [focusedProjectId, fromAt, toAt, hasProject]);
 
   const userNameById = React.useMemo(() => {
-    const m = new Map(
-      users.map((u) => [idOf(u), u?.name || u?.displayName || u?.fullName || u?.email || idOf(u)])
-    );
+    const m = new Map(users.map((u) => [idOf(u), u?.name || u?.displayName || u?.fullName || u?.email || idOf(u)]));
     return (id) => m.get(String(id)) || String(id);
   }, [users]);
 
@@ -631,13 +635,7 @@ export default function ProjectOverviewPanel() {
     "";
 
   const managerObj =
-    project?.manager ||
-    project?.projectManager ||
-    project?.assignedProjectManager ||
-    project?.pm ||
-    project?.owner ||
-    project?.managerUser ||
-    null;
+    project?.manager || project?.projectManager || project?.assignedProjectManager || project?.pm || project?.owner || project?.managerUser || null;
 
   const managerName =
     managerObj?.name ||
@@ -677,12 +675,14 @@ export default function ProjectOverviewPanel() {
     const base = tasks.filter((t) => {
       const pid = String(t.projectId || t.project?._id || t.project?.id || "");
       if (pid !== focusedProjectId) return false;
-      const s = startOfTask(t),
-        e = dueOfTask(t);
+      const s = startOfTask(t);
+      const e = dueOfTask(t);
       if (!within(s || e, fromAt, toAt)) return false;
       return true;
     });
+
     if (!ragKey) return base;
+
     return base.filter((t) => {
       const paused = isPausedLike(t.status);
       const overdue = isOverdueTask(t, now);
@@ -695,8 +695,8 @@ export default function ProjectOverviewPanel() {
     });
   }, [tasks, focusedProjectId, fromAt, toAt, ragKey]);
 
-  // task manager note
-  const latestMgrNoteForTask = React.useCallback(
+  // Existing: try to find manager-ish note from what the list endpoint already gave us
+  const latestMgrNoteForTaskFromList = React.useCallback(
     (t) => {
       const comments = extractCommentsFromObj(t);
       if (t?.managerNote || t?.pmNote || t?.lastManagerNote) {
@@ -708,6 +708,7 @@ export default function ProjectOverviewPanel() {
           authorRole: "manager",
         });
       }
+
       const filtered = comments.filter((c) => {
         if (!c?.text) return false;
         if (managerUserId && String(c.authorId) === String(managerUserId)) return true;
@@ -715,53 +716,53 @@ export default function ProjectOverviewPanel() {
         if (managerName && c.authorName === managerName) return true;
         return false;
       });
+
       filtered.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
       return filtered[0] || null;
     },
     [managerUserId, managerName]
   );
 
-  // NEW: lazy-fetch task detail objects for top rows to get latest notes (list endpoint may omit them)
-React.useEffect(() => {
-  let alive = true;
+  // NEW: lazy fetch task detail for top rows to get latest notes if list omits them
+  React.useEffect(() => {
+    let alive = true;
 
-  async function hydrateTasks() {
-    const top = scopedTasks.slice(0, 12);
-    const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
+    async function hydrateTasks() {
+      const top = scopedTasks.slice(0, 12);
+      const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
 
-    if (!missing.length) return;
+      if (!missing.length) return;
 
-    const results = await Promise.allSettled(
-      missing.map(async (t) => {
-        const id = idOf(t);
-        const res = await api.get(`/tasks/${id}`, { params: { _ts: Date.now() }, timeout: 12000 });
-        const detail = res?.data || {};
-        const latest = newestManagerNoteForTask(detail, managerUserId, managerName);
-        return { id, latest };
-      })
-    );
+      const results = await Promise.allSettled(
+        missing.map(async (t) => {
+          const id = idOf(t);
+          const res = await api.get(`/tasks/${id}`, { params: { _ts: Date.now() }, timeout: 12000 });
+          const detail = res?.data || {};
+          const latest = newestManagerNoteForTask(detail, managerUserId, managerName);
+          return { id, latest };
+        })
+      );
 
-    if (!alive) return;
+      if (!alive) return;
 
-    const patch = {};
-    for (const rr of results) {
-      if (rr.status !== "fulfilled") continue;
-      const { id, latest } = rr.value || {};
-      if (id && latest?.text) patch[id] = latest; // store {at,text}
+      const patch = {};
+      for (const rr of results) {
+        if (rr.status !== "fulfilled") continue;
+        const { id, latest } = rr.value || {};
+        if (id && latest?.text) patch[id] = latest; // {at,text}
+      }
+
+      if (Object.keys(patch).length) {
+        setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
+      }
     }
 
-    if (Object.keys(patch).length) {
-      setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
-    }
-  }
-
-  hydrateTasks();
-
-  return () => {
-    alive = false;
-  };
-  // intentionally NOT depending on taskMgrNoteById to avoid loops
-}, [scopedTasks, managerUserId, managerName]);
+    hydrateTasks();
+    return () => {
+      alive = false;
+    };
+    // intentionally not depending on taskMgrNoteById to avoid loops
+  }, [scopedTasks, managerUserId, managerName]);
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
   const inspectionIndex = React.useMemo(() => {
@@ -796,7 +797,7 @@ React.useEffect(() => {
       idx.byId.set(idOf(ins), rec);
     }
     return idx;
-  }, [submissions, inspections, users]);
+  }, [submissions, inspections, users, userNameById]);
 
   const vRows = React.useMemo(() => {
     return vehicles
@@ -813,16 +814,14 @@ React.useEffect(() => {
         return {
           id,
           reg: v.reg || v.registration || v.plate || v.name || "—",
-          driver:
-            v.driverName ||
-            (v.driverId ? userNameById(v.driverId) : v.driver ? userNameById(idOf(v.driver)) : ""),
+          driver: v.driverName || (v.driverId ? userNameById(v.driverId) : v.driver ? userNameById(idOf(v.driver)) : ""),
           status: v.status || "",
           lastInspectionAt: last?.at || v.lastInspectionAt || v.inspectionAt || "",
           lastInspectionResult: last ? (last.passed ? "Passed" : "Failed") : statusOnSelf || "",
           lastInspectionId: last?.id || null,
         };
       });
-  }, [vehicles, focusedProjectId, inspectionIndex, users]);
+  }, [vehicles, focusedProjectId, inspectionIndex, userNameById]);
 
   const aRows = React.useMemo(() => {
     return assets
@@ -857,7 +856,8 @@ React.useEffect(() => {
         const statusRaw = inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
         const statusNorm = String(statusRaw || "").toLowerCase();
 
-        const paidLike = !!inv.paidAt || /paid|settled|complete|completed/.test(statusNorm) || (paid > 0 && paid >= amount);
+        const paidLike =
+          !!inv.paidAt || /paid|settled|complete|completed/.test(statusNorm) || (paid > 0 && paid >= amount);
 
         const balance = Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? amount - paid);
         const safeBalance = paidLike ? 0 : isNaN(balance) ? amount - paid : balance;
@@ -881,16 +881,13 @@ React.useEffect(() => {
   }, [invRows]);
 
   /* --------------------------- Inspections feed --------------------------- */
-  // OPTION A ONLY: Map manager note from whatever list endpoint returns (no extra API calls)
   const inspRows = React.useMemo(() => {
     const src = submissions.length ? submissions : inspections;
 
     return src
       .map((ins) => {
-        // Title
         const name = ins.formTitle || ins.title || ins.formName || ins.form?.name || ins.name || "";
 
-        // Inspector (SubmissionView uses runBy + signoff)
         const inspector =
           ins.runBy?.name ||
           ins.signoff?.name ||
@@ -901,7 +898,6 @@ React.useEffect(() => {
           (ins.inspectorId ? userNameById(ins.inspectorId) : "") ||
           "";
 
-        // Status (SubmissionView uses overallResult: pass/fail)
         const raw = String(
           ins.overallResult ??
             ins.overall?.result ??
@@ -914,10 +910,8 @@ React.useEffect(() => {
 
         const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
 
-         // ✅ Newest manager comment ONLY (manager-specific, newest wins)
-const managerComment =
-  inspMgrCommentById[idOf(ins)] ||
-  newestManagerCommentForInspection(ins, managerUserId, managerName);
+        const managerComment =
+          inspMgrCommentById[idOf(ins)] || newestManagerCommentForInspection(ins, managerUserId, managerName);
 
         const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
         const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
@@ -935,53 +929,63 @@ const managerComment =
       })
       .filter((x) => within(x.date, fromAt, toAt))
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-  }, [submissions, inspections, fromAt, toAt, users, managerUserId, managerName, inspMgrCommentById]);
+  }, [submissions, inspections, fromAt, toAt, userNameById, managerUserId, managerName, inspMgrCommentById]);
 
-  // NEW: lazy-fetch detail objects for top rows to get managerComments (list endpoint may omit them)
-React.useEffect(() => {
-  let alive = true;
+  // Lazy-fetch inspection detail for top rows to get managerComments if list omitted them
+  React.useEffect(() => {
+    let alive = true;
 
-  async function hydrate() {
-    // only hydrate what you're actually showing
-    const top = inspRows.slice(0, 12);
-    const missing = top.filter((r) => !inspMgrCommentById[r.id]);
+    async function hydrateInspections() {
+      const top = inspRows.slice(0, 12);
+      const missing = top.filter((r) => !inspMgrCommentById[r.id]);
 
-    if (!missing.length) return;
+      if (!missing.length) return;
 
-    const results = await Promise.allSettled(
-      missing.map(async (r) => {
-        const path = r.isSubmission ? `/inspections/submissions/${r.id}` : `/inspections/${r.id}`;
-        const res = await api.get(path, { params: { _ts: Date.now() }, timeout: 12000 });
-        const detail = res?.data || {};
-        const text = newestManagerCommentForInspection(detail, managerUserId, managerName);
-        return { id: r.id, text };
-      })
-    );
+      const results = await Promise.allSettled(
+        missing.map(async (r) => {
+          const path = r.isSubmission ? `/inspections/submissions/${r.id}` : `/inspections/${r.id}`;
+          const res = await api.get(path, { params: { _ts: Date.now() }, timeout: 12000 });
+          const detail = res?.data || {};
+          const text = newestManagerCommentForInspection(detail, managerUserId, managerName);
+          return { id: r.id, text };
+        })
+      );
 
-    if (!alive) return;
+      if (!alive) return;
 
-    const patch = {};
-    for (const rr of results) {
-      if (rr.status !== "fulfilled") continue;
-      const { id, text } = rr.value || {};
-      if (id && text) patch[id] = text;
+      const patch = {};
+      for (const rr of results) {
+        if (rr.status !== "fulfilled") continue;
+        const { id, text } = rr.value || {};
+        if (id && text) patch[id] = text;
+      }
+
+      if (Object.keys(patch).length) {
+        setInspMgrCommentById((prev) => ({ ...prev, ...patch }));
+      }
     }
 
-    if (Object.keys(patch).length) {
-      setInspMgrCommentById((prev) => ({ ...prev, ...patch }));
-    }
-  }
-
-  hydrate();
-
-  return () => {
-    alive = false;
-  };
-}, [inspRows, managerUserId, managerName]); // intentionally NOT depending on inspMgrCommentById to avoid loops
+    hydrateInspections();
+    return () => {
+      alive = false;
+    };
+    // intentionally not depending on inspMgrCommentById to avoid loops
+  }, [inspRows, managerUserId, managerName]);
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
-    const text = [r?.type, r?.status, r?.reason, r?.state, r?.category, r?.label, r?.note, r?.comment, r?.details, r?.message]
+    const text = [
+      r?.type,
+      r?.status,
+      r?.reason,
+      r?.state,
+      r?.category,
+      r?.label,
+      r?.note,
+      r?.comment,
+      r?.details,
+      r?.message,
+    ]
       .map((s) => String(s || "").toLowerCase())
       .join(" ");
     if (/\biod|injury\s*on\s*duty|injured\b/.test(text)) return "iod";
@@ -1008,10 +1012,9 @@ React.useEffect(() => {
       }
     }
     return Array.from(fset.values()).sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
-  }, [clockings, focusedProjectId, fromAt, toAt, users]);
+  }, [clockings, focusedProjectId, fromAt, toAt, userNameById]);
 
   /* ---------------------------- click handlers ---------------------------- */
-  const openTask = (t) => openUrl(t.title || t.name || "Task", `/tasks/${idOf(t)}`);
   const openInspection = (row) => {
     const path = row.isSubmission ? `/inspections/submissions/${row.id}` : `/inspections/${row.id}`;
     openUrl(row.name || "Inspection", path);
@@ -1052,8 +1055,6 @@ React.useEffect(() => {
   /* -------------------------------- UI ----------------------------------- */
   const start = project?.start || project?.startDate || project?.begin || project?.startAt || "";
   const end = project?.end || project?.endDate || project?.due || project?.deadlineAt || project?.finishAt || "";
-
-  // NOTE: left as your original fallback; if you want PM-note-driven "Last Updated", we can switch this next.
   const updatedAt = project?.updatedAt || project?.modifiedAt || project?.lastUpdatedAt || project?.statusAt || "";
 
   return (
@@ -1083,8 +1084,16 @@ React.useEffect(() => {
       ) : (
         <div className="row">
           <div className="h">Project Overview</div>
-          {loading && <div className="muted" style={{ fontSize: 12 }}>Loading…</div>}
-          {err && <div style={{ color: "#b91c1c", fontSize: 12 }}>{err}</div>}
+          {loading && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              Loading…
+            </div>
+          )}
+          {err && (
+            <div style={{ color: "#b91c1c", fontSize: 12 }}>
+              {err}
+            </div>
+          )}
 
           {/* Header facts */}
           <div className="kv">
@@ -1141,13 +1150,16 @@ React.useEffect(() => {
                       const leaderName = leaderId ? userNameById(leaderId) : "";
                       return `${g?.name || gid}${leaderName ? ` — ${leaderName}` : ""}`;
                     });
+
                     const latestMgr =
                       taskMgrNoteById[idOf(t)] ||
-                      latestMgrNoteForTask(t) ||
+                      latestMgrNoteForTaskFromList(t) ||
                       newestManagerNoteForTask(t, managerUserId, managerName);
+
                     const status = String(t.status || "").trim() || "—";
                     const due = dueOfTask(t);
                     const overdue = isOverdueTask(t, now);
+
                     return (
                       <tr key={idOf(t)}>
                         <td>
@@ -1163,7 +1175,11 @@ React.useEffect(() => {
                         <td>{groupBits.length ? groupBits.join(", ") : <span className="muted">—</span>}</td>
                         <td>
                           {latestMgr?.at ? <div className="muted">{dOr(latestMgr.at, "datetime")}</div> : <span className="muted">—</span>}
-                          {latestMgr?.text ? <div className="muted"><em>“{latestMgr.text}”</em></div> : null}
+                          {latestMgr?.text ? (
+                            <div className="muted">
+                              <em>“{latestMgr.text}”</em>
+                            </div>
+                          ) : null}
                         </td>
                       </tr>
                     );
@@ -1204,7 +1220,18 @@ React.useEffect(() => {
                             <>
                               {dOr(v.lastInspectionAt)} · {pill(v.lastInspectionResult || "—", toneForStatus(v.lastInspectionResult))}
                               {v.lastInspectionId ? (
-                                <> · <span className="linkish" onClick={() => openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })}>view</span></>
+                                <>
+                                  {" "}
+                                  ·{" "}
+                                  <span
+                                    className="linkish"
+                                    onClick={() =>
+                                      openInspection({ id: v.lastInspectionId, isSubmission: true, name: `Inspection ${v.reg}` })
+                                    }
+                                  >
+                                    view
+                                  </span>
+                                </>
                               ) : null}
                             </>
                           ) : (
@@ -1243,7 +1270,18 @@ React.useEffect(() => {
                             <>
                               {dOr(a.lastInspectionAt)} · {pill(a.lastInspectionResult || "—", toneForStatus(a.lastInspectionResult))}
                               {a.lastInspectionId ? (
-                                <> · <span className="linkish" onClick={() => openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })}>view</span></>
+                                <>
+                                  {" "}
+                                  ·{" "}
+                                  <span
+                                    className="linkish"
+                                    onClick={() =>
+                                      openInspection({ id: a.lastInspectionId, isSubmission: true, name: `Inspection ${a.name}` })
+                                    }
+                                  >
+                                    view
+                                  </span>
+                                </>
                               ) : null}
                             </>
                           ) : (
