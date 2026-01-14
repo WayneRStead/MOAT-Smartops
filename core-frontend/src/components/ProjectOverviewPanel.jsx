@@ -82,11 +82,9 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
     return t;
   };
 
-  const readText = (c) =>
-    String(c?.comment ?? c?.text ?? c?.note ?? c?.message ?? c?.details ?? "").trim();
+  const readText = (c) => String(c?.comment ?? c?.text ?? c?.note ?? c?.message ?? c?.details ?? "").trim();
 
-  const readAt = (c) =>
-    c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
+  const readAt = (c) => c?.at || c?.createdAt || c?.date || c?.timestamp || c?.updatedAt || c?.when || null;
 
   const readAuthorId = (c) =>
     idOf(c?.by || c?.author || c?.user || c?.userId || c?.authorId || c?.createdBy || c?.createdById);
@@ -178,7 +176,7 @@ function newestManagerCommentForInspection(ins, managerUserId, managerName) {
 /* ------------------- newest manager note for a task ---------------------- */
 /**
  * Returns { at, text } or null.
- * This is intentionally permissive because task note schemas differ by endpoint.
+ * Permissive: supports many task schemas.
  */
 function newestManagerNoteForTask(task, managerUserId, managerName) {
   const asTime = (v) => {
@@ -255,7 +253,7 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     });
   }
 
-  // 2) common arrays on task detail
+  // 2) common arrays on task objects
   const pools = []
     .concat(safeArr(task?.managerNotes))
     .concat(safeArr(task?.taskNotes))
@@ -267,7 +265,8 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     .concat(safeArr(task?.logs))
     .concat(safeArr(task?.statusHistory))
     .concat(safeArr(task?.timeline))
-    .concat(safeArr(task?.events));
+    .concat(safeArr(task?.events))
+    .concat(safeArr(task?.auditTrail));
 
   for (const c of pools) {
     const text = readText(c);
@@ -275,11 +274,8 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
     candidates.push({ t: asTime(readAt(c)), text, managerish: isManagerish(c) });
   }
 
-  // 3) some APIs return notes separately, e.g. task.noteUpdates or similar
-  const pools2 = []
-    .concat(safeArr(task?.noteUpdates))
-    .concat(safeArr(task?.noteHistory))
-    .concat(safeArr(task?.managerActivity));
+  // 3) extra possible shapes
+  const pools2 = [].concat(safeArr(task?.noteUpdates)).concat(safeArr(task?.noteHistory)).concat(safeArr(task?.managerActivity));
   for (const c of pools2) {
     const text = readText(c);
     if (!text) continue;
@@ -295,6 +291,37 @@ function newestManagerNoteForTask(task, managerUserId, managerName) {
   const best = pickFrom[0];
 
   return best?.text ? { at: best.t ? new Date(best.t).toISOString() : null, text: best.text } : null;
+}
+
+/* ----------- newest from /tasks/:id/manager-notes payload (key fix) ------- */
+function newestFromManagerNotesPayload(payload) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.rows)
+    ? payload.rows
+    : Array.isArray(payload?.data)
+    ? payload.data
+    : Array.isArray(payload?.items)
+    ? payload.items
+    : [];
+
+  if (!rows.length) return null;
+
+  const asTime = (v) => {
+    const d = v ? new Date(v) : null;
+    return d && !isNaN(+d) ? +d : 0;
+  };
+
+  const best = rows
+    .map((r) => ({
+      t: asTime(r?.at || r?.createdAt || r?.updatedAt),
+      text: String(r?.note || r?.text || r?.comment || r?.message || "").trim(),
+    }))
+    .filter((x) => x.t || x.text)
+    .sort((a, b) => b.t - a.t)[0];
+
+  if (!best?.text) return null;
+  return { at: best.t ? new Date(best.t).toISOString() : null, text: best.text };
 }
 
 function groupIdsOfTask(t) {
@@ -518,9 +545,7 @@ export default function ProjectOverviewPanel() {
       if (toAt) rangeParams.end = toAt;
 
       try {
-        const pReq = api
-          .get(`/projects/${focusedProjectId}`, { params: { _ts: Date.now() }, timeout: 12000 })
-          .catch(() => null);
+        const pReq = api.get(`/projects/${focusedProjectId}`, { params: { _ts: Date.now() }, timeout: 12000 }).catch(() => null);
 
         const reqs = [
           api.get("/users", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 }),
@@ -529,41 +554,19 @@ export default function ProjectOverviewPanel() {
             timeout: 12000,
           }),
           api.get("/groups", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 }),
-          api.get("/vehicles", {
-            params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() },
-            timeout: 12000,
-          }),
-          api.get("/assets", {
-            params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() },
-            timeout: 12000,
-          }),
-          api.get("/invoices", {
-            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
-            timeout: 12000,
-          }),
-          api.get("/inspections", {
-            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
-            timeout: 12000,
-          }).catch(() => null),
-          api.get("/inspection-submissions", {
-            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
-            timeout: 12000,
-          }).catch(() => null),
-          api.get("/inspections/submissions", {
-            params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams },
-            timeout: 12000,
-          }).catch(() => null),
-          api.get("/clockings", {
-            params: { projectId: focusedProjectId, limit: 5000, _ts: Date.now(), ...rangeParams },
-            timeout: 12000,
-          }).catch(() => null),
+          api.get("/vehicles", { params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() }, timeout: 12000 }),
+          api.get("/assets", { params: { limit: 2000, projectId: focusedProjectId, _ts: Date.now() }, timeout: 12000 }),
+          api.get("/invoices", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }),
+          api.get("/inspections", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(() => null),
+          api.get("/inspection-submissions", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(() => null),
+          api.get("/inspections/submissions", { params: { projectId: focusedProjectId, limit: 2000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(() => null),
+          api.get("/clockings", { params: { projectId: focusedProjectId, limit: 5000, _ts: Date.now(), ...rangeParams }, timeout: 12000 }).catch(() => null),
         ];
 
         const [pRes, ...rest] = await Promise.allSettled([pReq, ...reqs]);
         if (!alive) return;
 
-        const list = (r) =>
-          Array.isArray(r?.data) ? r.data : Array.isArray(r?.data?.rows) ? r.data.rows : [];
+        const list = (r) => (Array.isArray(r?.data) ? r.data : Array.isArray(r?.data?.rows) ? r.data.rows : []);
 
         setProject(pRes.status === "fulfilled" && pRes.value ? pRes.value.data || null : null);
         setUsers(rest[0].status === "fulfilled" ? list(rest[0].value) : []);
@@ -635,7 +638,13 @@ export default function ProjectOverviewPanel() {
     "";
 
   const managerObj =
-    project?.manager || project?.projectManager || project?.assignedProjectManager || project?.pm || project?.owner || project?.managerUser || null;
+    project?.manager ||
+    project?.projectManager ||
+    project?.assignedProjectManager ||
+    project?.pm ||
+    project?.owner ||
+    project?.managerUser ||
+    null;
 
   const managerName =
     managerObj?.name ||
@@ -723,114 +732,49 @@ export default function ProjectOverviewPanel() {
     [managerUserId, managerName]
   );
 
- // NEW: lazy fetch task "manager note" records for top tasks (notes live in a separate endpoint)
-React.useEffect(() => {
-  let alive = true;
+  // ✅ KEY FIX: hydrate tasks using the confirmed endpoint: /tasks/:id/manager-notes
+  React.useEffect(() => {
+    let alive = true;
 
-  async function fetchLatestTaskNote(taskId) {
-    const _ts = Date.now();
+    async function hydrateTasks() {
+      const top = scopedTasks.slice(0, 12);
+      const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
+      if (!missing.length) return;
 
-    // Try a few likely endpoints safely (first one that returns a usable note wins)
-    const attempts = [
-      // 1) Common: /task-notes?taskId=... (your POST shape strongly suggests this)
-      () =>
-        api.get(`/task-notes`, {
-          params: { taskId, limit: 1, sort: "-at", _ts },
-          timeout: 12000,
-        }),
+      const results = await Promise.allSettled(
+        missing.map(async (t) => {
+          const id = idOf(t);
+          const res = await api.get(`/tasks/${id}/manager-notes`, {
+            params: { _ts: Date.now() },
+            timeout: 12000,
+          });
 
-      // 2) Sometimes named updates
-      () =>
-        api.get(`/task-updates`, {
-          params: { taskId, limit: 1, sort: "-at", _ts },
-          timeout: 12000,
-        }),
+          const latest = newestFromManagerNotesPayload(res?.data);
+          return { id, latest };
+        })
+      );
 
-      // 3) Nested under task
-      () =>
-        api.get(`/tasks/${taskId}/notes`, {
-          params: { limit: 1, sort: "-at", _ts },
-          timeout: 12000,
-        }),
+      if (!alive) return;
 
-      // 4) Fallback: task detail (may not include notes, but harmless)
-      () =>
-        api.get(`/tasks/${taskId}`, {
-          params: { _ts },
-          timeout: 12000,
-        }),
-    ];
+      const patch = {};
+      for (const rr of results) {
+        if (rr.status !== "fulfilled") continue;
+        const { id, latest } = rr.value || {};
+        if (id && latest?.text) patch[id] = latest;
+      }
 
-    for (const run of attempts) {
-      try {
-        const res = await run();
-        const data = res?.data;
-
-        // normalize: data might be array, {rows:[]}, or an object
-        const rows = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.rows)
-          ? data.rows
-          : Array.isArray(data?.data)
-          ? data.data
-          : Array.isArray(data?.items)
-          ? data.items
-          : [];
-
-        // If this endpoint returns the NOTE objects (your POST shape)
-        if (rows.length) {
-          const r0 = rows[0];
-          const text = String(r0?.note || r0?.text || r0?.comment || r0?.message || "").trim();
-          const at = r0?.at || r0?.createdAt || r0?.updatedAt || null;
-          if (text) return { at, text };
-        }
-
-        // If the endpoint returned task detail, try to extract from common fields
-        if (data && !rows.length) {
-          const extracted = newestManagerNoteForTask(data, managerUserId, managerName);
-          if (extracted?.text) return extracted;
-        }
-      } catch {
-        // try next endpoint
+      if (Object.keys(patch).length) {
+        setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
       }
     }
 
-    return null;
-  }
+    hydrateTasks();
 
-  async function hydrateTasks() {
-    const top = scopedTasks.slice(0, 12);
-    const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
-    if (!missing.length) return;
-
-    const results = await Promise.allSettled(
-      missing.map(async (t) => {
-        const id = idOf(t);
-        const latest = await fetchLatestTaskNote(id);
-        return { id, latest };
-      })
-    );
-
-    if (!alive) return;
-
-    const patch = {};
-    for (const rr of results) {
-      if (rr.status !== "fulfilled") continue;
-      const { id, latest } = rr.value || {};
-      if (id && latest?.text) patch[id] = latest;
-    }
-
-    if (Object.keys(patch).length) {
-      setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
-    }
-  }
-
-  hydrateTasks();
-  return () => {
-    alive = false;
-  };
-  // intentionally NOT depending on taskMgrNoteById to avoid loops
-}, [scopedTasks, managerUserId, managerName]);
+    return () => {
+      alive = false;
+    };
+    // intentionally not depending on taskMgrNoteById to avoid loops
+  }, [scopedTasks]);
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
   const inspectionIndex = React.useMemo(() => {
@@ -865,7 +809,7 @@ React.useEffect(() => {
       idx.byId.set(idOf(ins), rec);
     }
     return idx;
-  }, [submissions, inspections, users, userNameById]);
+  }, [submissions, inspections, userNameById]);
 
   const vRows = React.useMemo(() => {
     return vehicles
@@ -924,8 +868,7 @@ React.useEffect(() => {
         const statusRaw = inv.paymentStatus || inv.status || inv.state || (inv.paidAt ? "paid" : "unpaid");
         const statusNorm = String(statusRaw || "").toLowerCase();
 
-        const paidLike =
-          !!inv.paidAt || /paid|settled|complete|completed/.test(statusNorm) || (paid > 0 && paid >= amount);
+        const paidLike = !!inv.paidAt || /paid|settled|complete|completed/.test(statusNorm) || (paid > 0 && paid >= amount);
 
         const balance = Number(inv.balanceDue ?? inv.balance ?? inv.outstanding ?? amount - paid);
         const safeBalance = paidLike ? 0 : isNaN(balance) ? amount - paid : balance;
@@ -978,8 +921,7 @@ React.useEffect(() => {
 
         const status = raw === "pass" ? "Passed" : raw === "fail" ? "Failed" : raw ? raw : "";
 
-        const managerComment =
-          inspMgrCommentById[idOf(ins)] || newestManagerCommentForInspection(ins, managerUserId, managerName);
+        const managerComment = inspMgrCommentById[idOf(ins)] || newestManagerCommentForInspection(ins, managerUserId, managerName);
 
         const date = ins.completedAt || ins.submittedAt || ins.createdAt || ins.updatedAt || ins.date || "";
         const scope = ins.assetId ? "Asset" : ins.vehicleId ? "Vehicle" : "Project";
@@ -1006,7 +948,6 @@ React.useEffect(() => {
     async function hydrateInspections() {
       const top = inspRows.slice(0, 12);
       const missing = top.filter((r) => !inspMgrCommentById[r.id]);
-
       if (!missing.length) return;
 
       const results = await Promise.allSettled(
@@ -1042,18 +983,7 @@ React.useEffect(() => {
 
   /* ----------------------------- IODs list -------------------------------- */
   function clockingType(r) {
-    const text = [
-      r?.type,
-      r?.status,
-      r?.reason,
-      r?.state,
-      r?.category,
-      r?.label,
-      r?.note,
-      r?.comment,
-      r?.details,
-      r?.message,
-    ]
+    const text = [r?.type, r?.status, r?.reason, r?.state, r?.category, r?.label, r?.note, r?.comment, r?.details, r?.message]
       .map((s) => String(s || "").toLowerCase())
       .join(" ");
     if (/\biod|injury\s*on\s*duty|injured\b/.test(text)) return "iod";
@@ -1242,7 +1172,11 @@ React.useEffect(() => {
                         </td>
                         <td>{groupBits.length ? groupBits.join(", ") : <span className="muted">—</span>}</td>
                         <td>
-                          {latestMgr?.at ? <div className="muted">{dOr(latestMgr.at, "datetime")}</div> : <span className="muted">—</span>}
+                          {latestMgr?.at ? (
+                            <div className="muted">{dOr(latestMgr.at, "datetime")}</div>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
                           {latestMgr?.text ? (
                             <div className="muted">
                               <em>“{latestMgr.text}”</em>
@@ -1477,13 +1411,7 @@ React.useEffect(() => {
       )}
 
       {/* Lightbox (portal at document.body) */}
-      <Lightbox
-        open={lb.open}
-        title={lb.title}
-        url={lb.url}
-        json={lb.json}
-        onClose={() => setLb({ open: false, title: "", url: "", html: "", json: null })}
-      />
+      <Lightbox open={lb.open} title={lb.title} url={lb.url} json={lb.json} onClose={() => setLb({ open: false, title: "", url: "", html: "", json: null })} />
     </div>
   );
 }
