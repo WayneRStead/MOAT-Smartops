@@ -723,46 +723,114 @@ export default function ProjectOverviewPanel() {
     [managerUserId, managerName]
   );
 
-  // NEW: lazy fetch task detail for top rows to get latest notes if list omits them
-  React.useEffect(() => {
-    let alive = true;
+ // NEW: lazy fetch task "manager note" records for top tasks (notes live in a separate endpoint)
+React.useEffect(() => {
+  let alive = true;
 
-    async function hydrateTasks() {
-      const top = scopedTasks.slice(0, 12);
-      const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
+  async function fetchLatestTaskNote(taskId) {
+    const _ts = Date.now();
 
-      if (!missing.length) return;
+    // Try a few likely endpoints safely (first one that returns a usable note wins)
+    const attempts = [
+      // 1) Common: /task-notes?taskId=... (your POST shape strongly suggests this)
+      () =>
+        api.get(`/task-notes`, {
+          params: { taskId, limit: 1, sort: "-at", _ts },
+          timeout: 12000,
+        }),
 
-      const results = await Promise.allSettled(
-        missing.map(async (t) => {
-          const id = idOf(t);
-          const res = await api.get(`/tasks/${id}`, { params: { _ts: Date.now() }, timeout: 12000 });
-          const detail = res?.data || {};
-          const latest = newestManagerNoteForTask(detail, managerUserId, managerName);
-          return { id, latest };
-        })
-      );
+      // 2) Sometimes named updates
+      () =>
+        api.get(`/task-updates`, {
+          params: { taskId, limit: 1, sort: "-at", _ts },
+          timeout: 12000,
+        }),
 
-      if (!alive) return;
+      // 3) Nested under task
+      () =>
+        api.get(`/tasks/${taskId}/notes`, {
+          params: { limit: 1, sort: "-at", _ts },
+          timeout: 12000,
+        }),
 
-      const patch = {};
-      for (const rr of results) {
-        if (rr.status !== "fulfilled") continue;
-        const { id, latest } = rr.value || {};
-        if (id && latest?.text) patch[id] = latest; // {at,text}
-      }
+      // 4) Fallback: task detail (may not include notes, but harmless)
+      () =>
+        api.get(`/tasks/${taskId}`, {
+          params: { _ts },
+          timeout: 12000,
+        }),
+    ];
 
-      if (Object.keys(patch).length) {
-        setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
+    for (const run of attempts) {
+      try {
+        const res = await run();
+        const data = res?.data;
+
+        // normalize: data might be array, {rows:[]}, or an object
+        const rows = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.rows)
+          ? data.rows
+          : Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data?.items)
+          ? data.items
+          : [];
+
+        // If this endpoint returns the NOTE objects (your POST shape)
+        if (rows.length) {
+          const r0 = rows[0];
+          const text = String(r0?.note || r0?.text || r0?.comment || r0?.message || "").trim();
+          const at = r0?.at || r0?.createdAt || r0?.updatedAt || null;
+          if (text) return { at, text };
+        }
+
+        // If the endpoint returned task detail, try to extract from common fields
+        if (data && !rows.length) {
+          const extracted = newestManagerNoteForTask(data, managerUserId, managerName);
+          if (extracted?.text) return extracted;
+        }
+      } catch {
+        // try next endpoint
       }
     }
 
-    hydrateTasks();
-    return () => {
-      alive = false;
-    };
-    // intentionally not depending on taskMgrNoteById to avoid loops
-  }, [scopedTasks, managerUserId, managerName]);
+    return null;
+  }
+
+  async function hydrateTasks() {
+    const top = scopedTasks.slice(0, 12);
+    const missing = top.filter((t) => !taskMgrNoteById[idOf(t)]);
+    if (!missing.length) return;
+
+    const results = await Promise.allSettled(
+      missing.map(async (t) => {
+        const id = idOf(t);
+        const latest = await fetchLatestTaskNote(id);
+        return { id, latest };
+      })
+    );
+
+    if (!alive) return;
+
+    const patch = {};
+    for (const rr of results) {
+      if (rr.status !== "fulfilled") continue;
+      const { id, latest } = rr.value || {};
+      if (id && latest?.text) patch[id] = latest;
+    }
+
+    if (Object.keys(patch).length) {
+      setTaskMgrNoteById((prev) => ({ ...prev, ...patch }));
+    }
+  }
+
+  hydrateTasks();
+  return () => {
+    alive = false;
+  };
+  // intentionally NOT depending on taskMgrNoteById to avoid loops
+}, [scopedTasks, managerUserId, managerName]);
 
   /* ----------------- Inspections index (vehicles & assets) ---------------- */
   const inspectionIndex = React.useMemo(() => {
