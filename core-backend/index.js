@@ -167,14 +167,6 @@ app.use("/public", publicAuthRouter);
 app.use("/api/public", publicAuthRouter);
 
 /* -------------------- GridFS fallback for vehicle trip photos -------------------- */
-/**
- * Why this exists:
- * - /files/* is currently served from disk (Render filesystem is ephemeral)
- * - Your MongoDB shows files stored in GridFS bucket: vehicleTrips.files / vehicleTrips.chunks
- * - Trip docs point to URLs like /files/vehicle-trips/<filename>
- *
- * This handler makes those URLs work by streaming from GridFS if the file isn't on disk.
- */
 function getTripsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -218,11 +210,6 @@ app.get("/files/vehicle-trips/:filename", serveVehicleTripFile);
 app.get("/api/files/vehicle-trips/:filename", serveVehicleTripFile);
 
 /* -------------------- GridFS serving for Vault/Documents -------------------- */
-/**
- * This is ONLY for documents once we store them in GridFS (ephemeral disk on Render).
- * It serves URLs like: /files/documents/<fileId>
- * Bucket must be: documents.files + documents.chunks
- */
 function getDocumentsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -261,11 +248,6 @@ app.get("/documents/files/:fileId", serveDocumentFile);
 app.get("/api/documents/files/:fileId", serveDocumentFile);
 
 /* -------------------- GridFS for org logos (NEW) -------------------- */
-/**
- * Streams from GridFS bucket: org.files / org.chunks
- * Stable URL:
- *   /files/org/<orgId>/logo
- */
 function getOrgBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -314,10 +296,6 @@ app.get("/files/org/:org/logo", serveOrgLogo);
 app.get("/api/files/org/:org/logo", serveOrgLogo);
 
 /* -------------------- GridFS for asset attachments -------------------- */
-/**
- * Streams from GridFS bucket: assets.files / assets.chunks
- * Public route so <img src="/files/assets/:fileId"> works without Authorization header.
- */
 function getAssetsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -352,13 +330,6 @@ app.get("/files/assets/:fileId", serveAssetFile);
 app.get("/api/files/assets/:fileId", serveAssetFile);
 
 /* -------------------- GridFS for invoice files (NEW) -------------------- */
-/**
- * Streams from GridFS bucket: invoices.files / invoices.chunks
- * Frontend expects URLs like:
- *   /files/invoices/<orgId>/<filename>
- *
- * We verify org by GridFS metadata.orgId that was set at upload time.
- */
 function getInvoicesBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -391,7 +362,7 @@ async function serveInvoiceFile(req, res, next) {
     if (!f?._id) return res.status(404).json({ error: "File not found" });
 
     if (f?.contentType) res.setHeader("Content-Type", f.contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day; adjust if you want longer
+    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day
 
     const stream = bucket.openDownloadStream(f._id);
     stream.on("error", (err) => next(err));
@@ -406,17 +377,9 @@ app.get("/files/invoices/:org/:filename", serveInvoiceFile);
 app.get("/api/files/invoices/:org/:filename", serveInvoiceFile);
 
 /* -------------------- GridFS for task attachments (NEW) -------------------- */
-/**
- * Streams from GridFS bucket for task attachments.
- * tasks.js stores URLs like:
- *   /files/tasks/<fileId>
- *
- * This handler makes those URLs work reliably even if routes/files doesn't include it.
- */
 function getTasksBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
-  // If your lib/gridfs.js uses a different bucketName, change "tasks" to match it.
   return new GridFSBucket(db, { bucketName: "tasks" });
 }
 
@@ -462,7 +425,6 @@ const uploadsRoot = path.join(__dirname, "uploads");
   "coverage",
   "coverage/tasks",
   "vehicle-trips",
-  // (optional legacy folder for invoices if you still want it to exist)
   "invoices",
 ].forEach((sub) => {
   try {
@@ -572,6 +534,37 @@ app.use(
   projectsGeofencesRouter
 );
 
+/* =======================================================================
+   ✅ CRITICAL FIX: mount the BASE tasks router BEFORE any other /tasks routers
+   This prevents other sub-routers (coverage/fences/notes/milestones) from
+   shadowing GET /tasks and returning "projectId required".
+======================================================================== */
+if (tasksRouter) {
+  app.use(
+    "/tasks",
+    requireAuth,
+    resolveOrgContext,
+    requireOrg,
+    enforceTrial,
+    touchOrgActivity,
+    computeAccessibleUserIds,
+    tasksRouter
+  );
+  app.use(
+    "/api/tasks",
+    requireAuth,
+    resolveOrgContext,
+    requireOrg,
+    enforceTrial,
+    touchOrgActivity,
+    computeAccessibleUserIds,
+    tasksRouter
+  );
+}
+
+/* --------- Task-related sub-routers AFTER base tasks router --------- */
+
+// task fences router
 app.use("/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, taskFencesRouter);
 app.use("/api/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, taskFencesRouter);
 
@@ -600,6 +593,8 @@ if (managerNotesRouter) {
   app.use("/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, managerNotesRouter);
   app.use("/api/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, managerNotesRouter);
 }
+
+/* -------------------- Project Manager Notes -------------------- */
 if (projectsManagerNotesRouter) {
   app.use(
     "/projects",
@@ -668,32 +663,10 @@ if (groupsRouter) {
   );
 }
 
+/* -------------------- Task Milestones AFTER base tasks router -------------------- */
 if (taskMilestonesRouter) {
   app.use("/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, taskMilestonesRouter);
   app.use("/api/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, taskMilestonesRouter);
-}
-
-if (tasksRouter) {
-  app.use(
-    "/tasks",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    tasksRouter
-  );
-  app.use(
-    "/api/tasks",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    tasksRouter
-  );
 }
 
 /* ------------------------ Inspections ----------------------- */
@@ -762,6 +735,7 @@ if (assetsRouter) {
   app.use("/assets", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, assetsRouter);
   app.use("/api/assets", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, assetsRouter);
 }
+
 if (vehiclesRouter) {
   app.use(
     "/vehicles",
@@ -784,22 +758,27 @@ if (vehiclesRouter) {
     vehiclesRouter
   );
 }
+
 if (logbookRouter) {
   app.use("/", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
   app.use("/api", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, logbookRouter);
 }
+
 if (vendorsRouter) {
   app.use("/vendors", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, vendorsRouter);
   app.use("/api/vendors", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, vendorsRouter);
 }
+
 if (purchasesRouter) {
   app.use("/purchases", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, purchasesRouter);
   app.use("/api/purchases", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, purchasesRouter);
 }
+
 if (invoicesRouter) {
   app.use("/invoices", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, invoicesRouter);
   app.use("/api/invoices", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, invoicesRouter);
 }
+
 if (documentsRouter) {
   app.use("/documents", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, documentsRouter);
   app.use("/api/documents", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, documentsRouter);
@@ -827,6 +806,7 @@ if (vehicleTripsRouter) {
     vehicleTripsRouter
   );
 }
+
 if (vehicleTripAliases) {
   app.use(
     "/",
