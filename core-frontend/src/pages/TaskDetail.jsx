@@ -2612,7 +2612,7 @@ const inInspectionWindow = (s) => {
       >
         <div className="grid gap-3 md:grid-cols-2">
           <label className="text-sm md:col-span-2">Title
-            <input className="border p-2 w-full rounded mt-1" value={msForm.title} onChange={e=>setMsForm({...msForm, title:e.target.value})} placeholder="deliverable Title" />
+            <input className="border p-2 w-full rounded mt-1" value={msForm.title} onChange={e=>setMsForm({...msForm, title:e.target.value})} placeholder="Deliverable Title" />
           </label>
           <label className="text-sm">Start date
             <input className="border p-2 w-full rounded mt-1" type="date" value={msForm.startAt} onChange={e=>setMsForm({...msForm, startAt:e.target.value})} />
