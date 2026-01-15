@@ -574,7 +574,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       setMilestones(list);
     } catch (e) {
       setMilestones([]);
-      setMErr(e?.response?.data?.error || "Failed to load milestones");
+      setMErr(e?.response?.data?.error || "Failed to load deliverables");
     }
   }
   useEffect(() => { loadMilestones();   }, [id]);
@@ -656,7 +656,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       setMsForm({ title: "", startAt: "", endAt: "", status: "pending", isRoadblock: false });
       await loadMilestones();
       setMReloadKey((k) => k + 1);
-      setMInfo("Milestone added."); setTimeout(() => setMInfo(""), 1000);
+      setMInfo("Deliverable Added."); setTimeout(() => setMInfo(""), 1000);
     } catch (e) {
       setMErr(e?.response?.data?.error || String(e));
     }
@@ -1391,7 +1391,7 @@ const inInspectionWindow = (s) => {
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
     const m = new Map();
-    (milestones || []).forEach(x => m.set(String(x._id || x.id), x.title || "Milestone"));
+    (milestones || []).forEach(x => m.set(String(x._id || x.id), x.title || "Deliverables"));
     return m;
   }, [milestones]);
 
@@ -1882,7 +1882,7 @@ const inInspectionWindow = (s) => {
       {/* Milestones list */}
       <div className="border rounded-2xl p-4 mt-4 bg-white space-y-3">
         <div className="flex items-center justify-between">
-          <div className="font-semibold">Milestones</div>
+          <div className="font-semibold">Deliverables</div>
           <button className="px-3 py-2 border rounded" onClick={()=>setMsModalOpen(true)}>Add milestone</button>
         </div>
         {mErr && <div className="text-red-600 text-sm">{mErr}</div>}
@@ -2013,7 +2013,7 @@ const inInspectionWindow = (s) => {
                     </tr>
                   );
                 })}
-              {!milestones.length && <tr><td className="p-4 text-center" colSpan={8}>No milestones yet</td></tr>}
+              {!milestones.length && <tr><td className="p-4 text-center" colSpan={8}>No deliverables yet</td></tr>}
             </tbody>
           </table>
         </div>
