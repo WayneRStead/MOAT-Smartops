@@ -155,7 +155,7 @@ export default function MilestonesBlock({ taskId, taskStartAt, taskEndAt, taskDu
         setMilestones(list);
       }
     } catch (e) {
-      setErr(e?.response?.data?.error || e?.message || "Failed to load milestones");
+      setErr(e?.response?.data?.error || e?.message || "Failed to load deliverables");
       setMilestones([]);
     } finally {
       setLoading(false);
@@ -237,7 +237,7 @@ export default function MilestonesBlock({ taskId, taskStartAt, taskEndAt, taskDu
   return (
     <div className="border rounded p-3 space-y-3">
       <div className="flex items-center justify-between">
-        <div className="font-semibold">Milestones</div>
+        <div className="font-semibold">Deliverables</div>
         <div className="flex items-center gap-3">
           <div className="text-xs text-gray-600">
             Calendar-style Gantt (month/day/date, weekend shading, red “today”, early/late overlays).
@@ -247,7 +247,7 @@ export default function MilestonesBlock({ taskId, taskStartAt, taskEndAt, taskDu
       </div>
 
       {err && <div className="text-red-600 text-sm">{err}</div>}
-      {loading && <div className="text-sm text-gray-600">Loading milestones…</div>}
+      {loading && <div className="text-sm text-gray-600">Loading deliverables…</div>}
 
       {/* ---- Chart ---- */}
       <div
