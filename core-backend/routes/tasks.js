@@ -273,9 +273,9 @@ function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
 
 function applyAssignees(taskDoc, objIdArray) {
   const arr = Array.isArray(objIdArray) ? objIdArray.filter(Boolean) : [];
-  taskDoc.assignedTo = [...arr];        // legacy
-  taskDoc.assignedUserIds = [...arr];   // new
-  taskDoc.assignee = arr[0] || null;    // singular mirror
+  taskDoc.assignedTo = [...arr]; // legacy
+  taskDoc.assignedUserIds = [...arr]; // new
+  taskDoc.assignee = arr[0] || null; // singular mirror
 }
 
 /* ---------------- Planning field handling (NEW) ---------------- */
@@ -489,17 +489,6 @@ router.get("/planning", requireAuth, async (req, res) => {
 /**
  * PUT /tasks/planning?projectId=...
  * Bulk-save planning edits coming from Gantt.
- *
- * Body:
- * {
- *   tasks: [
- *     { _id, title?, plannedStartAt?, plannedEndAt?, rowOrder?, laneOrder?, workstreamName?, wbs?, phase?, discipline? }
- *   ]
- * }
- *
- * Notes:
- * - Only updates fields present on each item
- * - Does NOT require changing normal task editing flows
  */
 router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
   const session = await mongoose.startSession();
@@ -511,7 +500,6 @@ router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"
     const items = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
     if (!items.length) return res.status(400).json({ error: "tasks[] required" });
 
-    // Ensure project exists and org matches (basic guard)
     const proj = await Project.findOne({ _id: pid, ...orgScope(Project, req) }).session(session);
     if (!proj) return res.status(404).json({ error: "Project not found" });
 
@@ -521,21 +509,17 @@ router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"
       const tid = OID(it._id || it.id);
       if (!tid) continue;
 
-      // Visibility: you can edit only if you can see the task OR admin
       const canSee = await assertCanSeeTaskOrAdmin(req, tid);
       if (!canSee) continue;
 
       const t = await Task.findOne({ _id: tid, projectId: pid, ...orgScope(Task, req) }).session(session);
       if (!t) continue;
 
-      // Standard editable fields (optional)
       if ("title" in it && it.title != null) t.title = String(it.title).trim();
       if ("description" in it && it.description != null) t.description = String(it.description);
 
-      // Planning fields (NEW)
       applyPlanningFields(t, it);
 
-      // also allow legacy start/due if sent by a Gantt lib
       if ("startDate" in it || "startAt" in it) {
         t.startDate = parseDate(it.startDate ?? it.startAt) || t.startDate;
       }
@@ -547,15 +531,11 @@ router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"
         }
       }
 
-      // If they used plan dates, set createdFromPlan on first save
       if ((t.plannedStartAt || t.plannedEndAt) && t.createdFromPlan !== true) {
         if ("createdFromPlan" in it) t.createdFromPlan = !!it.createdFromPlan;
       }
 
-      if (!ensureOrgOnDoc(Task, t, req)) {
-        // skip bad org token
-        continue;
-      }
+      if (!ensureOrgOnDoc(Task, t, req)) continue;
 
       await t.save({ session });
       updatedIds.push(t._id);
@@ -578,18 +558,48 @@ router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"
 });
 
 /* ---------------------------- LIST ---------------------------- */
+/**
+ * ✅ IMPORTANT FIX:
+ * This endpoint must allow listing tasks WITHOUT projectId
+ * because the Tasks module calls:
+ *   GET /tasks?limit=500&orgId=...
+ */
 router.get("/", requireAuth, async (req, res) => {
   try {
     const {
-      q, status, userId, groupId, projectId, tag, priority,
-      dueFrom, dueTo, startFrom, startTo, sort, limit,
+      q,
+      status,
+      userId,
+      groupId,
+      projectId,
+      tag,
+      priority,
+      dueFrom,
+      dueTo,
+      startFrom,
+      startTo,
+      sort,
+      limit,
       // NEW: planning time filters
-      planFrom, planTo,
+      planFrom,
+      planTo,
       // NEW: includeDeleted
       includeDeleted,
     } = req.query;
 
+    // ✅ FIXED: orgScope signature must be orgScope(Task, req)
     const base = { ...orgScope(Task, req) };
+
+    // Validate projectId/groupId if provided (no longer required)
+    if (projectId && !isId(projectId)) {
+      return res.status(400).json({ error: "bad projectId" });
+    }
+    if (groupId && !isId(groupId)) {
+      return res.status(400).json({ error: "bad groupId" });
+    }
+    if (userId && !isId(userId)) {
+      return res.status(400).json({ error: "bad userId" });
+    }
 
     // Soft delete filter (default: hide)
     if (!isAdmin(req)) {
@@ -606,17 +616,17 @@ router.get("/", requireAuth, async (req, res) => {
     if (status) base.status = normalizeStatus(status);
     if (priority) base.priority = String(priority).toLowerCase();
 
-    if (userId && isId(userId)) {
+    if (userId) {
       const uid = new mongoose.Types.ObjectId(userId);
       base.$and = (base.$and || []).concat([{ $or: [{ assignedUserIds: uid }, { assignedTo: uid }] }]);
     }
 
-    if (groupId && isId(groupId)) {
+    if (groupId) {
       const gid = new mongoose.Types.ObjectId(groupId);
       base.$and = (base.$and || []).concat([{ $or: [{ assignedGroupIds: gid }, { groupId: gid }] }]);
     }
 
-    if (projectId && isId(projectId)) base.projectId = new mongoose.Types.ObjectId(projectId);
+    if (projectId) base.projectId = new mongoose.Types.ObjectId(projectId);
     if (tag) base.tags = tag;
 
     // due range (legacy)
@@ -646,7 +656,6 @@ router.get("/", requireAuth, async (req, res) => {
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
     const filter = andFilters(base, buildVisibilityFilter(req));
 
-    // Sorting
     const useTimelineSort = sort === "timeline" || !!startFrom || !!startTo || !!planFrom || !!planTo;
     const sortSpec = useTimelineSort
       ? { rowOrder: 1, laneOrder: 1, plannedStartAt: 1, startDate: 1, plannedEndAt: 1, dueAt: 1, updatedAt: -1 }
@@ -690,23 +699,23 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
     const body = req.body || {};
     if (!body.title) return res.status(400).json({ error: "title required" });
 
-    // assignee/assignedTo aliases
     let assignedTo = [];
     if (Array.isArray(body.assignedTo)) {
       assignedTo = body.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
     } else {
-      const one = extractId(body.assignee || body.assigneeId || (Array.isArray(body.assignedTo) ? body.assignedTo[0] : undefined));
+      const one = extractId(
+        body.assignee ||
+          body.assigneeId ||
+          (Array.isArray(body.assignedTo) ? body.assignedTo[0] : undefined)
+      );
       if (one) assignedTo = [one];
     }
 
-    // legacy start date
     const startDate = body.startDate ? new Date(body.startDate) : body.startAt ? new Date(body.startAt) : undefined;
 
-    // due date aliases
     const rawDue = body.dueAt ?? body.dueDate ?? body.deadline ?? body.deadlineAt ?? undefined;
     const dueDate = rawDue ? new Date(rawDue) : undefined;
 
-    // Visibility fields
     let visibility = {};
     try {
       visibility = sanitizeVisibilityInput(body, isAdmin(req));
@@ -721,7 +730,6 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       status: normalizeStatus(body.status) || "pending",
       tags: Array.isArray(body.tags) ? body.tags : [],
 
-      // ✅ keep assignee + assignedTo + assignedUserIds aligned at create
       assignedTo,
       assignee: assignedTo[0] || null,
       assignedUserIds: [...assignedTo],
@@ -729,7 +737,6 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
       projectId: OID(body.projectId),
       groupId: OID(body.groupId),
 
-      // legacy timeline fields
       startDate,
       dueDate,
       dueAt: dueDate,
@@ -746,19 +753,20 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
 
       estimatedDuration: body.estimatedDuration != null ? Number(body.estimatedDuration) : undefined,
 
-      // New visibility fields
       ...visibility,
     });
 
-    // NEW: allow creating tasks directly from gantt planning
     applyPlanningFields(doc, body);
 
-    // Ensure mirror alignment if caller used assignedUserIds etc.
     const createIncoming =
-      Object.prototype.hasOwnProperty.call(body, "assignedUserIds") ? coerceObjectIdArray(body.assignedUserIds)
-      : Object.prototype.hasOwnProperty.call(body, "assignedTo") ? coerceObjectIdArray(body.assignedTo)
-      : (Object.prototype.hasOwnProperty.call(body, "assignee") || Object.prototype.hasOwnProperty.call(body, "assigneeId"))
-        ? (extractId(body.assignee || body.assigneeId) ? [extractId(body.assignee || body.assigneeId)] : [])
+      Object.prototype.hasOwnProperty.call(body, "assignedUserIds")
+        ? coerceObjectIdArray(body.assignedUserIds)
+        : Object.prototype.hasOwnProperty.call(body, "assignedTo")
+        ? coerceObjectIdArray(body.assignedTo)
+        : Object.prototype.hasOwnProperty.call(body, "assignee") || Object.prototype.hasOwnProperty.call(body, "assigneeId")
+        ? extractId(body.assignee || body.assigneeId)
+          ? [extractId(body.assignee || body.assigneeId)]
+          : []
         : null;
 
     if (createIncoming != null) {
@@ -794,12 +802,10 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
     if (b.status != null) t.status = normalizeStatus(b.status);
 
-    // legacy startDate / startAt
     if ("startDate" in b || "startAt" in b) {
       t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
     }
 
-    // due date aliases
     if ("dueDate" in b || "dueAt" in b || "deadline" in b || "deadlineAt" in b) {
       const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
       const d = rawDue ? new Date(rawDue) : undefined;
@@ -807,14 +813,11 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       t.dueAt = d;
     }
 
-    // NEW: planning fields
     applyPlanningFields(t, b);
 
-    // project/group
     if (b.projectId !== undefined) t.projectId = OID(b.projectId);
     if (b.groupId !== undefined) t.groupId = OID(b.groupId);
 
-    // ✅ assignee updates
     let incomingAssignees = null;
 
     if (Object.prototype.hasOwnProperty.call(b, "assignedUserIds")) {
@@ -842,7 +845,6 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
-    // Visibility updates
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
@@ -859,7 +861,6 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
     }
 
-    // ✅ Apply assignees LAST
     if (incomingAssignees != null) {
       applyAssignees(t, incomingAssignees);
     }
@@ -900,7 +901,6 @@ router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), 
       t.dueAt = d;
     }
 
-    // NEW: planning fields
     applyPlanningFields(t, b);
 
     if (b.projectId !== undefined) t.projectId = OID(b.projectId);
@@ -979,7 +979,6 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
     if (!canSee && !adminOverride) return res.status(403).json({ error: "Forbidden" });
 
-    // Dependencies
     if (action === "start" || action === "resume") {
       const done = await Task.countDocuments({ _id: { $in: t.dependentTaskIds }, status: "completed" });
       if (done !== (t.dependentTaskIds?.length || 0) && !adminOverride) {
@@ -987,7 +986,6 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       }
     }
 
-    // Enforcement (QR + geo)
     if ((action === "start" || action === "resume") && !adminOverride) {
       if (t.enforceQRScan) {
         if (!qrToken) return res.status(400).json({ error: "QR required" });
@@ -1033,7 +1031,10 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     setStatusFromLog(t);
     await t.save();
 
-    const fresh = await Task.findById(t._id).populate("assignedTo", "name email").populate("actualDurationLog.userId", "name email").lean();
+    const fresh = await Task.findById(t._id)
+      .populate("assignedTo", "name email")
+      .populate("actualDurationLog.userId", "name email")
+      .lean();
     res.json(normalizeOut(fresh));
   } catch (e) {
     console.error("POST /tasks/:id/action error:", e);
@@ -1190,7 +1191,9 @@ router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "s
 
 const uploadsRoot = path.join(__dirname, "..", "uploads");
 const taskDir = path.join(uploadsRoot, "tasks");
-try { fs.mkdirSync(taskDir, { recursive: true }); } catch {}
+try {
+  fs.mkdirSync(taskDir, { recursive: true });
+} catch {}
 
 function cleanFilename(name) {
   return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
@@ -1254,8 +1257,10 @@ router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (re
     }
 
     const note = String(req.body?.note || "");
-    const lat = req.body?.lat, lng = req.body?.lng;
-    const nLat = Number(lat), nLng = Number(lng);
+    const lat = req.body?.lat,
+      lng = req.body?.lng;
+    const nLat = Number(lat),
+      nLng = Number(lng);
 
     const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
 
@@ -1343,9 +1348,6 @@ router.delete("/:id/attachments/:attId", requireAuth, allowRoles("manager", "adm
 });
 
 /* --------------------------- GEOFENCES (unchanged) --------------------------- */
-// ... your existing geofence endpoints unchanged ...
-// (Keeping them out here to avoid duplicating your entire file length twice)
-// NOTE: If you want, paste again and I will return a single fully-expanded file.
 
 router.post("/:id/geofences/upload", requireAuth, allowRoles("manager", "admin", "superadmin"), memUpload.single("file"), async (req, res) => {
   try {
@@ -1504,7 +1506,7 @@ router.delete("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"),
   }
 });
 
-router.get("/_ping", (req, res) => res.json({ ok: true }));
-router.post("/_ping", (req, res) => res.json({ ok: true }));
+router.get("/_ping", (_req, res) => res.json({ ok: true }));
+router.post("/_ping", (_req, res) => res.json({ ok: true }));
 
 module.exports = router;
