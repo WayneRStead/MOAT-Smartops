@@ -405,6 +405,48 @@ async function serveInvoiceFile(req, res, next) {
 app.get("/files/invoices/:org/:filename", serveInvoiceFile);
 app.get("/api/files/invoices/:org/:filename", serveInvoiceFile);
 
+/* -------------------- GridFS for task attachments (NEW) -------------------- */
+/**
+ * Streams from GridFS bucket for task attachments.
+ * tasks.js stores URLs like:
+ *   /files/tasks/<fileId>
+ *
+ * This handler makes those URLs work reliably even if routes/files doesn't include it.
+ */
+function getTasksBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  // If your lib/gridfs.js uses a different bucketName, change "tasks" to match it.
+  return new GridFSBucket(db, { bucketName: "tasks" });
+}
+
+async function serveTaskAttachmentFile(req, res, next) {
+  try {
+    const fileId = toObjectIdOrNull(req.params.fileId);
+    if (!fileId) return res.status(400).json({ error: "Invalid file id" });
+
+    const bucket = getTasksBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const files = await bucket.find({ _id: fileId }).limit(1).toArray();
+    if (!files || files.length === 0) return res.status(404).json({ error: "File not found" });
+
+    const f = files[0];
+    if (f?.contentType) res.setHeader("Content-Type", f.contentType);
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+
+    const stream = bucket.openDownloadStream(fileId);
+    stream.on("error", (err) => next(err));
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// IMPORTANT: mount BEFORE express.static("/files")
+app.get("/files/tasks/:fileId", serveTaskAttachmentFile);
+app.get("/api/files/tasks/:fileId", serveTaskAttachmentFile);
+
 /* ---------------------------- Static /files ---------------------------- */
 const uploadsRoot = path.join(__dirname, "uploads");
 [
