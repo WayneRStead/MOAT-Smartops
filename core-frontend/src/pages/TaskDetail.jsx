@@ -1930,7 +1930,7 @@ const inInspectionWindow = (s) => {
                   return (
                     <tr key={mid}>
                       <td className="border-t p-2" style={{minWidth:220}}>
-                        <input className="border p-2 w-full rounded" defaultValue={ms.title || ""} onBlur={(e)=>{ const v=(e.target.value||"").trim(); if (v !== (ms.title||"")) saveWrap({ title: v }); }} placeholder="Milestone title" />
+                        <input className="border p-2 w-full rounded" defaultValue={ms.title || ""} onBlur={(e)=>{ const v=(e.target.value||"").trim(); if (v !== (ms.title||"")) saveWrap({ title: v }); }} placeholder="Deliverable Title" />
                       </td>
                       <td className="border-t p-2" style={{minWidth:150}}>
                         <input className="border p-2 rounded" type="date" defaultValue={toLocalDateOnly(ms.startAt)} onBlur={(e)=>{ const v=e.target.value; if (toLocalDateOnly(ms.startAt)!==v) saveWrap({ startAt: fromLocalDateOnly(v) }); }} />
@@ -2612,7 +2612,7 @@ const inInspectionWindow = (s) => {
       >
         <div className="grid gap-3 md:grid-cols-2">
           <label className="text-sm md:col-span-2">Title
-            <input className="border p-2 w-full rounded mt-1" value={msForm.title} onChange={e=>setMsForm({...msForm, title:e.target.value})} placeholder="Milestone title" />
+            <input className="border p-2 w-full rounded mt-1" value={msForm.title} onChange={e=>setMsForm({...msForm, title:e.target.value})} placeholder="deliverable Title" />
           </label>
           <label className="text-sm">Start date
             <input className="border p-2 w-full rounded mt-1" type="date" value={msForm.startAt} onChange={e=>setMsForm({...msForm, startAt:e.target.value})} />
