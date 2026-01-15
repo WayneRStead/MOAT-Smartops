@@ -1883,7 +1883,7 @@ const inInspectionWindow = (s) => {
       <div className="border rounded-2xl p-4 mt-4 bg-white space-y-3">
         <div className="flex items-center justify-between">
           <div className="font-semibold">Deliverables</div>
-          <button className="px-3 py-2 border rounded" onClick={()=>setMsModalOpen(true)}>Add milestone</button>
+          <button className="px-3 py-2 border rounded" onClick={()=>setMsModalOpen(true)}>Add Deliverable</button>
         </div>
         {mErr && <div className="text-red-600 text-sm">{mErr}</div>}
         {mInfo && <div className="text-green-700 text-sm">{mInfo}</div>}
@@ -2601,7 +2601,7 @@ const inInspectionWindow = (s) => {
       {/* Add milestone modal */}
       <Modal
         open={msModalOpen}
-        title="Add Milestone"
+        title="Add Deliverable"
         onClose={()=>setMsModalOpen(false)}
         footer={
           <>
