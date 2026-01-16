@@ -57,6 +57,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const floorLocal = (d) => {
   if (!d) return null;
   const x = new Date(d);
+  if (Number.isNaN(x.getTime())) return null;
   x.setHours(0, 0, 0, 0);
   return x;
 };
@@ -68,7 +69,7 @@ const addDays = (d, n) => {
 const diffDays = (a, b) => Math.round((floorLocal(b) - floorLocal(a)) / DAY);
 const fmt = (d) => (d ? new Date(d).toLocaleDateString() : "—");
 
-// NEW: month helpers (local)
+// month helpers (local)
 const startOfMonthLocal = (d) => {
   const x = new Date(d);
   x.setDate(1);
@@ -83,12 +84,10 @@ const endOfMonthLocal = (d) => {
 };
 
 /* ───────────────────────────── status helpers (canon + color mapping) ───────────────────────────── */
-const norm = (s) => String(s || "").toLowerCase();
 function canonStatus(raw) {
   const s = String(raw || "").trim().toLowerCase();
   if (["finished", "complete", "completed", "closed", "done"].includes(s)) return "finished";
-  if (["paused - problem", "paused-problem", "problem", "blocked", "block", "issue"].includes(s))
-    return "paused - problem";
+  if (["paused - problem", "paused-problem", "problem", "blocked", "block", "issue"].includes(s)) return "paused - problem";
   if (["paused", "pause", "on hold", "on-hold", "hold"].includes(s)) return "paused";
   if (["started", "start", "in-progress", "in progress", "open", "active", "running"].includes(s)) return "started";
   return "pending";
@@ -123,7 +122,7 @@ const dateInRange = (start, end, fromAt, toAt) => {
   return left <= RR && right >= LL;
 };
 
-// consider overdue by dates as “red”
+// overdue by dates = “red”
 function isProjectOverdue(p) {
   const end = p.endDate || p.end || p.endAt || p.due || p.deadlineAt || null;
   const e = floorLocal(end);
@@ -132,8 +131,7 @@ function isProjectOverdue(p) {
   return !isClosedLike(p.status) && e < today;
 }
 
-// rag mapping uses project object so red = overdue OR “problem”,
-// amber = paused, green = active AND NOT overdue.
+// rag mapping: red = overdue OR “problem”, amber = paused, green = active AND NOT overdue.
 function withinRagProject(p, rag) {
   if (!rag) return true;
   if (rag === "green") return isActiveLike(p.status) && !isProjectOverdue(p);
@@ -146,16 +144,116 @@ function withinRagProject(p, rag) {
 const CELL_W = 26;
 const ROW_H = 24;
 const HDR_H = 24;
-const SEPARATOR = "#e5e7eb";
 const LABEL_W = 240;
 
-/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */
-export default function GanttPane() {
-  const { rag, dr, projectIds, groups } = useOptionalFilters();
+/* ───────────────────────────────────────── safe parsing ───────────────────────────────────────── */
+const parseDate = (v) => {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const safeObj = (x) => (x && typeof x === "object" ? x : {});
+const first = (...vals) => {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === "string" && v.trim() === "") continue;
+    return v;
+  }
+  return null;
+};
+
+function normalizeMilestones(data) {
+  const arr = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : Array.isArray(data?.items) ? data.items : [];
+  return arr.map((m, i) => {
+    const id = m._id || m.id || `m_${i}`;
+    const startAt = first(m.startPlanned, m.startAt, m.startDate, m.plannedStartAt, m.beginAt, m.start) || null;
+    const dueAt =
+      first(
+        m.endPlanned,
+        m.dueAt,
+        m.dueDate,
+        m.endAt,
+        m.endDate,
+        m.plannedEndAt,
+        m.targetAt,
+        m.targetDate,
+        m.date
+      ) || null;
+
+    const actualEndAt = first(m.actualEndAt, m.endActual, m.completedAt, m.finishedAt, m.actualEnd, m.actualEndDate) || null;
+
+    const title = m.title || m.name || m.label || `Milestone ${i + 1}`;
+    const statusRaw = first(m.status, m.state, m.progressStatus) || (m.completed ? "finished" : "pending");
+    const status = canonStatus(statusRaw);
+
+    const rb = m.isRoadblock ?? m.roadblock ?? m.blocker ?? m.isRoadBlock;
+
+    const dependsOn = Array.isArray(m.dependsOn) ? m.dependsOn : Array.isArray(m.requires) ? m.requires : Array.isArray(m.dependencies) ? m.dependencies : [];
+    const blockedBy = Array.isArray(m.blockedBy) ? m.blockedBy : [];
+
+    return {
+      _id: id,
+      id,
+      title,
+      name: title,
+      kind: String(m.kind || m.type || "milestone"),
+      status,
+      isRoadblock: !!rb,
+      dependsOn: dependsOn.map(String).filter(Boolean),
+      blockedBy: blockedBy.map(String).filter(Boolean),
+      startAt,
+      dueAt,
+      actualEndAt,
+      createdAt: m.createdAt || null,
+      taskId: m.taskId || null,
+      projectId: m.projectId || null,
+    };
+  });
+}
+
+function normalizeTasks(data) {
+  const arr = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : Array.isArray(data?.items) ? data.items : [];
+  return arr.map((t, i) => {
+    const id = t._id || t.id || `t_${i}`;
+    const title = t.title || t.name || `Task ${i + 1}`;
+    const start = first(t.startDate, t.startAt, t.start) || t.createdAt || null;
+    const due = first(t.dueAt, t.dueDate, t.endDate, t.endAt, t.finishAt, t.deadlineAt) || start || null;
+    return {
+      ...t,
+      _id: id,
+      id,
+      title,
+      startAt: t.startAt || t.startDate || t.start || start,
+      dueAt: t.dueAt || t.dueDate || t.endAt || t.endDate || due,
+      status: t.status || "pending",
+      projectId: t.projectId || t.project || t.project_id || null,
+    };
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════════
+   GanttPane (DROP-IN) — supports:
+   - Dashboard mode (filters + all projects)
+   - Embedded mode for a single project: <GanttPane projectId="..." embedded />
+   - Project-scoped milestone loading via: GET /task-milestones?projectId=...
+   - Per-task milestone loading fallback: GET /tasks/:id/milestones
+══════════════════════════════════════════════════════════════════════════════════════════════════════ */
+export default function GanttPane({ projectId = null, embedded = false }) {
+  const dashFilters = useOptionalFilters();
+  const useDashFilters = !projectId; // if a projectId is passed, we ignore dashboard filters and scope strictly to that project
+
+  const rag = useDashFilters ? dashFilters.rag : "";
+  const dr = useDashFilters ? dashFilters.dr : {};
+  const projectIds = useDashFilters ? dashFilters.projectIds : [];
+  const groups = useDashFilters ? dashFilters.groups : [];
 
   const [projects, setProjects] = useState([]);
   const [tasksByProject, setTasksByProject] = useState(new Map());
   const [milesByTask, setMilesByTask] = useState(new Map());
+
+  // NEW: project-scoped milestone cache (for embedded project gantt)
+  const [projectMilestones, setProjectMilestones] = useState(new Map()); // pid -> milestone[]
+
   const [openProjects, setOpenProjects] = useState(new Set());
   const [openTasks, setOpenTasks] = useState(new Set());
   const [err, setErr] = useState("");
@@ -171,9 +269,19 @@ export default function GanttPane() {
       setLoading(true);
       setErr("");
       try {
-        const { data } = await api.get("/projects", { params: { limit: 2000, _ts: Date.now() }, timeout: 12000 });
+        const params = { limit: 2000, _ts: Date.now() };
+        // Project-scoped embed: still call /projects but then filter to the one record.
+        const { data } = await api.get("/projects", { params, timeout: 12000 });
         if (!alive) return;
-        setProjects(Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : []);
+        const rows = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
+        if (projectId) {
+          const pid = String(projectId);
+          setProjects(rows.filter((p) => String(p?._id || p?.id || "") === pid));
+          // auto expand the project in embedded mode
+          setOpenProjects(new Set([pid]));
+        } else {
+          setProjects(rows);
+        }
       } catch (e) {
         if (alive) setErr(e?.response?.data?.error || String(e));
       } finally {
@@ -183,7 +291,7 @@ export default function GanttPane() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [projectId]);
 
   /* ───────────────────────────── tasks for opened projects ───────────────────────────── */
   useEffect(() => {
@@ -192,10 +300,11 @@ export default function GanttPane() {
       const ids = Array.from(openProjects).filter((pid) => !tasksByProject.has(pid));
       for (const pid of ids) {
         try {
-          const { data } = await api.get("/tasks", { params: { projectId: pid, limit: 2000 } });
-          const rows = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
+          const { data } = await api.get("/tasks", { params: { projectId: pid, limit: 2000, _ts: Date.now() } });
+          const rows = normalizeTasks(data);
           if (cancelled) return;
           setTasksByProject((prev) => new Map(prev).set(pid, rows));
+          // In embedded mode, auto-expand tasks list is optional; keep collapsed by default.
         } catch {
           if (cancelled) return;
           setTasksByProject((prev) => new Map(prev).set(pid, []));
@@ -207,50 +316,55 @@ export default function GanttPane() {
     };
   }, [openProjects, tasksByProject]);
 
-  /* ───────────────────────────── milestones for opened tasks (normalized) ───────────────────────────── */
+  /* ───────────────────────────── project-level milestones (preferred for embedded gantt) ───────────────────────────── */
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    (async () => {
+      const pid = String(projectId);
+      if (projectMilestones.has(pid)) return;
+
+      try {
+        const { data } = await api.get("/task-milestones", { params: { projectId: pid, limit: 5000, _ts: Date.now() } });
+        const ms = normalizeMilestones(data);
+        if (cancelled) return;
+        setProjectMilestones((prev) => new Map(prev).set(pid, ms));
+
+        // also seed milesByTask so expanding tasks doesn't refetch
+        const byTask = new Map();
+        ms.forEach((m) => {
+          const tid = String(m.taskId || "");
+          if (!tid) return;
+          if (!byTask.has(tid)) byTask.set(tid, []);
+          byTask.get(tid).push(m);
+        });
+        setMilesByTask((prev) => {
+          const next = new Map(prev);
+          for (const [tid, list] of byTask.entries()) {
+            if (!next.has(tid)) next.set(tid, list);
+          }
+          return next;
+        });
+      } catch (e) {
+        // don't hard-fail embedded gantt; tasks + per-task milestones still work
+        if (cancelled) return;
+        setProjectMilestones((prev) => new Map(prev).set(pid, []));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, projectMilestones]);
+
+  /* ───────────────────────────── milestones for opened tasks (fallback) ───────────────────────────── */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const ids = Array.from(openTasks).filter((tid) => !milesByTask.has(tid));
       for (const tid of ids) {
         try {
-          let data;
-          try {
-            const res = await api.get(`/tasks/${tid}/milestones`, { params: { limit: 2000, _ts: Date.now() } });
-            data = res.data;
-          } catch {
-            const res = await api.get(`/milestones`, { params: { taskId: tid, limit: 2000, _ts: Date.now() } });
-            data = res.data;
-          }
-
-          const normalize = (arr) =>
-            (Array.isArray(arr) ? arr : []).map((m, i) => {
-              const id = m._id || m.id || `m_${i}`;
-              const startAt =
-                m.startPlanned || m.startAt || m.startDate || m.scheduledAt || m.beginAt || m.start || null;
-              const dueAt =
-                m.endPlanned || m.dueAt || m.endAt || m.endDate || m.targetAt || m.targetDate || m.date || null;
-              const actualEndAt = m.endActual ?? m.actualEndAt ?? m.completedAt ?? null;
-              return {
-                _id: id,
-                id,
-                title: m.title || m.name || m.label || `Milestone ${i + 1}`,
-                name: m.title || m.name || m.label || `Milestone ${i + 1}`,
-                status: canonStatus(m.status || (m.completed ? "finished" : "pending")),
-                isRoadblock: !!(m.isRoadblock ?? m.roadblock ?? m.blocker),
-                dependsOn: Array.isArray(m.dependsOn) ? m.dependsOn : Array.isArray(m.requires) ? m.requires : [],
-                blockedBy: Array.isArray(m.blockedBy) ? m.blockedBy : [],
-                startAt,
-                dueAt,
-                actualEndAt,
-                endPlanned: m.endPlanned || null,
-                endAt: m.endAt || null,
-                targetDate: m.targetDate || null,
-                createdAt: m.createdAt || null,
-              };
-            });
-
-          const rows = normalize(data);
+          const res = await api.get(`/tasks/${tid}/milestones`, { params: { limit: 2000, _ts: Date.now() } });
+          const rows = normalizeMilestones(res.data);
           if (cancelled) return;
           setMilesByTask((prev) => new Map(prev).set(tid, rows));
         } catch {
@@ -266,6 +380,8 @@ export default function GanttPane() {
 
   /* ───────────────────────────── filter projects by rag/date/groups/projectIds ───────────────────────────── */
   const filteredProjects = useMemo(() => {
+    if (projectId) return projects; // hard scope for embedded mode
+
     const fromAt = dr?.fromAt || dr?.from || "";
     const toAt = dr?.toAt || dr?.to || "";
     const wanted = projectIds || [];
@@ -275,6 +391,7 @@ export default function GanttPane() {
 
     return projects.filter((p) => {
       if (restrictIds && !wanted.includes(toId(p))) return false;
+
       if (restrictGroups) {
         const pool = []
           .concat(p.groupId || [])
@@ -284,33 +401,49 @@ export default function GanttPane() {
         const pg = new Set(pool.flat().map((x) => String(x?._id || x?.id || x || "")));
         if (![...pg].some((g) => wantedGroups.includes(g))) return false;
       }
+
       if (!withinRagProject(p, rag)) return false;
+
       const s = p.startDate || p.start || p.startAt;
       const e = p.endDate || p.end || p.endAt || p.due || p.deadlineAt;
       if (!dateInRange(s, e, fromAt, toAt)) return false;
+
       return true;
     });
-  }, [projects, projectIds, groups, rag, dr?.fromAt, dr?.toAt, dr?.from, dr?.to]);
+  }, [projects, projectIds, groups, rag, dr?.fromAt, dr?.toAt, dr?.from, dr?.to, projectId]);
 
-  /* ───────────────────────────── calendar domain ─────────────────────────────
-     CHANGE: if no date range filter is set, default to “present month window”
-             (with a small buffer), not min/max of data.
-  ─────────────────────────────────────────────────────────────────────────── */
+  /* ───────────────────────────── calendar domain ───────────────────────────── */
   const cal = useMemo(() => {
-    const fromAt = dr?.fromAt || dr?.from || "";
-    const toAt = dr?.toAt || dr?.to || "";
+    const fromAt = (projectId ? "" : (dr?.fromAt || dr?.from || "")) || "";
+    const toAt = (projectId ? "" : (dr?.toAt || dr?.to || "")) || "";
     const today = floorLocal(new Date());
 
     let rangeStart, rangeEnd;
+
     if (fromAt || toAt) {
       rangeStart = floorLocal(fromAt || new Date(Date.now() - 30 * DAY));
       rangeEnd = floorLocal(toAt || new Date(Date.now() + 60 * DAY));
     } else {
-      // DEFAULT: current month (buffer so you can see a bit before/after)
-      const monthStart = startOfMonthLocal(today);
-      const monthEnd = endOfMonthLocal(today);
-      rangeStart = addDays(monthStart, -15);
-      rangeEnd = addDays(monthEnd, +15);
+      // embedded mode: try to align to the project itself if it has dates, else month window
+      if (projectId && filteredProjects?.[0]) {
+        const p = filteredProjects[0];
+        const ps = floorLocal(p.startDate || p.start || p.startAt);
+        const pe = floorLocal(p.endDate || p.end || p.endAt || p.due || p.deadlineAt);
+        if (ps && pe) {
+          rangeStart = addDays(ps, -15);
+          rangeEnd = addDays(pe, +15);
+        } else {
+          const monthStart = startOfMonthLocal(today);
+          const monthEnd = endOfMonthLocal(today);
+          rangeStart = addDays(monthStart, -15);
+          rangeEnd = addDays(monthEnd, +15);
+        }
+      } else {
+        const monthStart = startOfMonthLocal(today);
+        const monthEnd = endOfMonthLocal(today);
+        rangeStart = addDays(monthStart, -15);
+        rangeEnd = addDays(monthEnd, +15);
+      }
     }
 
     if (+rangeEnd < +rangeStart) rangeEnd = rangeStart;
@@ -346,7 +479,7 @@ export default function GanttPane() {
 
     const todayIdx = Math.max(0, Math.min(days - 1, diffDays(rangeStart, today)));
     return { rangeStart, rangeEnd, dayObjs, months, todayIdx };
-  }, [filteredProjects, tasksByProject, milesByTask, dr?.fromAt, dr?.toAt, dr?.from, dr?.to]);
+  }, [filteredProjects, dr?.fromAt, dr?.toAt, dr?.from, dr?.to, projectId]);
 
   /* ───────────────────────────── flatten rows (tree) ───────────────────────────── */
   const rows = useMemo(() => {
@@ -354,11 +487,13 @@ export default function GanttPane() {
     filteredProjects.forEach((p) => {
       const pid = toId(p);
       out.push({ type: "project", id: pid, label: p.name || pid, item: p });
+
       if (openProjects.has(pid)) {
         const tasks = tasksByProject.get(pid) || [];
         tasks.forEach((t) => {
           const tid = toId(t);
           out.push({ type: "task", id: tid, label: t.title || tid, parentId: pid, item: t });
+
           if (openTasks.has(tid)) {
             const ms = milesByTask.get(tid) || [];
             ms.forEach((m) =>
@@ -378,7 +513,6 @@ export default function GanttPane() {
   }, [filteredProjects, openProjects, openTasks, tasksByProject, milesByTask]);
 
   const headerRows = 3; // Month, Day, Date
-  const HEADER_OFFSET = headerRows * HDR_H;
   const svgHeight = rows.length * ROW_H + 24;
 
   /* ───────────────────────────── toggles ───────────────────────────── */
@@ -402,12 +536,10 @@ export default function GanttPane() {
     const colLeft = cal.todayIdx * CELL_W;
     const viewport = sc.clientWidth || 0;
     const centerTarget = Math.max(0, colLeft - Math.max(0, (viewport - CELL_W) / 2));
-    const fiveBefore = Math.max(0, (cal.todayIdx - 5) * CELL_W);
-    const target = viewport ? centerTarget : fiveBefore;
-    sc.scrollTo({ left: target, behavior: "smooth" });
+    sc.scrollTo({ left: centerTarget, behavior: "smooth" });
   };
 
-  // NEW: auto-center today on mount / when calendar changes
+  // auto-center today on mount / when calendar changes
   useEffect(() => {
     const sc = scrollerRef.current;
     if (!sc) return;
@@ -424,33 +556,48 @@ export default function GanttPane() {
     const idx = new Map();
     rows.forEach((r, i) => {
       if (r.type !== "milestone") return;
-      const m = r.item;
+      const m = safeObj(r.item);
       const whenRaw =
         canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)
           ? m.actualEndAt || m.completedAt || m.endActual
-          : m.dueAt || m.endAt || m.endPlanned || m.targetDate || m.date || m.startAt || m.startPlanned || m.scheduledAt || m.at || m.createdAt || null;
-      const at = whenRaw ? floorLocal(whenRaw) : null;
+          : m.dueAt ||
+            m.endAt ||
+            m.endPlanned ||
+            m.targetDate ||
+            m.date ||
+            m.startAt ||
+            m.startPlanned ||
+            m.scheduledAt ||
+            m.at ||
+            m.createdAt ||
+            null;
+      const at = floorLocal(whenRaw);
       if (!at) return;
       const x = Math.max(0, diffDays(cal.rangeStart, at)) * CELL_W;
-      idx.set(r.id, { row: i, x });
+      idx.set(String(r.id), { row: i, x });
     });
+
     const out = [];
     rows.forEach((r) => {
       if (r.type !== "milestone") return;
-      const m = r.item;
+      const m = safeObj(r.item);
       const deps = []
         .concat(Array.isArray(m.dependsOn) ? m.dependsOn : [])
         .concat(Array.isArray(m.blockedBy) ? m.blockedBy : [])
         .map(String)
         .filter(Boolean);
+
       deps.forEach((did) => {
-        const A = idx.get(did);
-        const B = idx.get(r.id);
+        const A = idx.get(String(did));
+        const B = idx.get(String(r.id));
         if (A && B) out.push({ from: A, to: B });
       });
     });
+
     return out;
   }, [rows, cal.rangeStart]);
+
+  const showLegend = !embedded; // embedded view is cleaner by default
 
   /* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */
   return (
@@ -458,7 +605,7 @@ export default function GanttPane() {
       <style>{`
         .g-wrap { width:100%; }
         .g-legend { display:flex; gap:8px; flex-wrap:wrap; font-size:12px; margin-bottom:6px; align-items:center; justify-content:space-between; }
-        .g-pill { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:999px; }
+        .g-pill { display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:999px; background:#fff; }
         .g-dot { width:10px; height:10px; border-radius:50%; }
         .g-row { display:grid; grid-template-columns: ${LABEL_W}px 1fr; gap:8px; }
         .g-left { position:relative; }
@@ -471,29 +618,31 @@ export default function GanttPane() {
       `}</style>
 
       {/* legend + today */}
-      <div className="g-legend">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <span className="g-pill">
-            <span className="g-dot" style={{ background: "#10b981" }} />
-            Active
-          </span>
-          <span className="g-pill">
-            <span className="g-dot" style={{ background: "#f59e0b" }} />
-            Paused
-          </span>
-          <span className="g-pill">
-            <span className="g-dot" style={{ background: "#ef4444" }} />
-            Overdue / Blocked
-          </span>
-          <span className="g-pill">
-            <span className="g-dot" style={{ background: "#9ca3af" }} />
-            Closed
-          </span>
+      {showLegend && (
+        <div className="g-legend">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: "#10b981" }} />
+              Active
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: "#f59e0b" }} />
+              Paused
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: "#ef4444" }} />
+              Overdue / Blocked
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: "#9ca3af" }} />
+              Closed
+            </span>
+          </div>
+          <button className="g-pill" onClick={scrollToToday} title="Scroll to today">
+            Today
+          </button>
         </div>
-        <button className="g-pill" onClick={scrollToToday} title="Scroll to today">
-          Today
-        </button>
-      </div>
+      )}
 
       <div className="g-row" style={{ height: svgHeight + headerRows * HDR_H }}>
         {/* LEFT: names with expanders */}
@@ -544,16 +693,14 @@ export default function GanttPane() {
           {rows.map((r, i) => {
             const top = headerRows * HDR_H + i * ROW_H;
             const zebra = i % 2 === 0 ? "transparent" : "#0000000a";
+
             if (r.type === "project") {
               const pid = r.id;
               const open = openProjects.has(pid);
+              const canToggle = !embedded || true; // allow toggle even when embedded
               return (
                 <div key={r.type + pid} className="g-tree-line" style={{ top, background: zebra }}>
-                  <div
-                    className="g-arrow"
-                    title="Click arrow to expand/collapse Gantt"
-                    onClick={() => toggleProject(pid)}
-                  >
+                  <div className="g-arrow" title="Click arrow to expand/collapse" onClick={() => canToggle && toggleProject(pid)}>
                     {open ? "▾" : "▸"}
                   </div>
                   <div className="g-lab g-click" title="Open project details" onClick={() => openProjectDetail(r.item)}>
@@ -562,16 +709,13 @@ export default function GanttPane() {
                 </div>
               );
             }
+
             if (r.type === "task") {
               const tid = r.id;
               const open = openTasks.has(tid);
               return (
                 <div key={r.type + tid} className="g-tree-line" style={{ top, paddingLeft: 16, background: zebra }}>
-                  <div
-                    className="g-arrow"
-                    title="Click arrow to expand/collapse Gantt"
-                    onClick={() => toggleTask(tid)}
-                  >
+                  <div className="g-arrow" title="Click arrow to expand/collapse" onClick={() => toggleTask(tid)}>
                     {open ? "▾" : "▸"}
                   </div>
                   <div className="g-lab g-click" title="Open task details" onClick={() => openTaskDetail(r.item)}>
@@ -580,6 +724,7 @@ export default function GanttPane() {
                 </div>
               );
             }
+
             return (
               <div key={r.type + r.id} className="g-tree-line" style={{ top, paddingLeft: 32, background: zebra }}>
                 <div className="g-lab" title={r.label}>
@@ -666,7 +811,7 @@ export default function GanttPane() {
               </div>
             ))}
 
-            {/* weekend shading (behind everything) */}
+            {/* weekend shading */}
             {cal.dayObjs.map((o, i) =>
               o.isWeekend ? (
                 <div
@@ -696,7 +841,7 @@ export default function GanttPane() {
               title="Today"
             />
 
-            {/* zebra row underlay */}
+            {/* zebra underlay */}
             {rows.map((_, i) => {
               const row = headerRows + 1 + i;
               const zebra = i % 2 === 0 ? "transparent" : "#0000000a";
@@ -718,13 +863,15 @@ export default function GanttPane() {
               const row = headerRows + 1 + i;
 
               if (r.type === "project") {
-                const p = r.item;
+                const p = safeObj(r.item);
                 const s = floorLocal(p.startDate || p.start || p.startAt);
                 const e = floorLocal(p.endDate || p.end || p.endAt || p.due || p.deadlineAt || s);
                 if (!s || !e) return null;
+
                 const sIdx = Math.max(0, diffDays(cal.rangeStart, s));
                 const eIdx = Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, e));
                 const span = Math.max(1, eIdx - sIdx + 1);
+
                 const col = STATUS_COLOR(p.status);
                 const barH = Math.max(16, ROW_H - 10);
                 const today = floorLocal(new Date());
@@ -767,13 +914,15 @@ export default function GanttPane() {
               }
 
               if (r.type === "task") {
-                const t = r.item;
+                const t = safeObj(r.item);
                 const s = floorLocal(t.startAt || t.startDate || t.createdAt);
                 const e = floorLocal(t.dueAt || t.endAt || t.endDate || t.finishAt || s);
                 if (!s || !e) return null;
+
                 const sIdx = Math.max(0, diffDays(cal.rangeStart, s));
                 const eIdx = Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, e));
                 const span = Math.max(1, eIdx - sIdx + 1);
+
                 const col = STATUS_COLOR(t.status);
                 const barH = Math.max(16, ROW_H - 10);
                 const today = floorLocal(new Date());
@@ -816,7 +965,7 @@ export default function GanttPane() {
               }
 
               // milestone diamond (clickable)
-              const m = r.item;
+              const m = safeObj(r.item);
               const whenRaw =
                 canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)
                   ? m.actualEndAt || m.completedAt || m.endActual
@@ -831,6 +980,7 @@ export default function GanttPane() {
                     m.at ||
                     m.createdAt ||
                     null;
+
               const at = floorLocal(whenRaw);
               if (!at) return null;
 
@@ -841,7 +991,7 @@ export default function GanttPane() {
               return (
                 <div
                   key={"m" + r.id}
-                  title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)}`}
+                  title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)}${m.kind ? ` • ${String(m.kind)}` : ""}`}
                   onClick={() => openMilestoneDetail(m)}
                   style={{
                     gridColumn: `${xIdx + 1} / ${xIdx + 2}`,
