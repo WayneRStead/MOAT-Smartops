@@ -64,7 +64,7 @@ const TASK_PALETTE = [
   "#bcbd22",
   "#17becf",
   "#ef4444",
-  "#10b981",
+  "#056948",
 ];
 const normalizeHex = (c) => {
   if (!c) return "";
@@ -351,15 +351,6 @@ useEffect(() => {
   loadForms();
   loadProjectTasks();
   loadProjectSubmissions();
-
-  // ✅ Force embedded Gantt to filter to this project
-  try {
-    window.dispatchEvent(
-      new CustomEvent("dashboard:filtersChanged", {
-        detail: { project: { ids: [String(id)] } },
-      })
-    );
-  } catch {}
 
   // eslint-disable-next-line
 }, [id]);
@@ -1643,9 +1634,12 @@ useEffect(() => {
       </Card>
 
       {/* ✅ Project Plan (Gantt) */}
-      <Card title="Project Plan (Gantt)">
-        <GanttPane />
-      </Card>
+<Card title="Project Plan (Gantt)">
+  {(() => {
+    const pid = String(p?._id || p?.id || id || "");
+    return pid ? <GanttPane key={pid} projectId={pid} embedded /> : null;
+  })()}
+</Card>
     
       {/* Tasks list — titles open TaskDetail in lightbox */}
       <Card
