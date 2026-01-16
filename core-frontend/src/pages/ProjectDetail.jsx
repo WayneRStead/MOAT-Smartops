@@ -7,6 +7,7 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { api, fileUrl } from "../lib/api";
 import { listProjectTasks } from "../lib/api";
 import ProjectTasksTimeline from "../components/ProjectTasksTimeline";
+import GanttPane from "../components/GanttPane";
 import { listForms } from "../lib/inspectionApi.js";
 import TaskDetail from "./TaskDetail.jsx";
 
@@ -343,15 +344,25 @@ export default function ProjectDetail({ id: propId, onClose }) {
   const [subModal, setSubModal] = useState({ open: false, subId: "", url: "", title: "" });
 
   /* ------------ data loads ------------ */
-  useEffect(() => {
-    loadProject();
-    loadUsers();
-    loadDocs();
-    loadForms();
-    loadProjectTasks();
-    loadProjectSubmissions();
-    // eslint-disable-next-line
-  }, [id]);
+useEffect(() => {
+  loadProject();
+  loadUsers();
+  loadDocs();
+  loadForms();
+  loadProjectTasks();
+  loadProjectSubmissions();
+
+  // ✅ Force embedded Gantt to filter to this project
+  try {
+    window.dispatchEvent(
+      new CustomEvent("dashboard:filtersChanged", {
+        detail: { project: { ids: [String(id)] } },
+      })
+    );
+  } catch {}
+
+  // eslint-disable-next-line
+}, [id]);
 
   async function loadProject() {
     setErr("");
@@ -944,13 +955,16 @@ export default function ProjectDetail({ id: propId, onClose }) {
           if (Number.isFinite(lat) && Number.isFinite(lng)) {
             const color = taskColourMap.get(String(t._id));
             out.push({
-              id: `${t._id}-pin`,
-              type: "Point",
-              coordinates: [lng, lat],
-              title: t.title || "Task",
-              meta: { label: t.title || "Task", taskId: String(t._id || ""), color },
-              style: { stroke: color, fill: color, strokeWidth: 2 },
-            });
+            id: `${t._id}-pin`,
+            type: "point",                    // ✅ normalize (lowercase)
+            lat,                              // ✅ explicit for Leaflet helpers
+            lng,                              // ✅ explicit for Leaflet helpers
+            point: { lat, lng },              // ✅ common GeoFencePreview convention
+            coordinates: [lng, lat],          // ✅ keep GeoJSON-style coords too
+            title: t.title || "Task",
+            meta: { label: t.title || "Task", taskId: String(t._id || ""), color },
+            style: { stroke: color, fill: color, strokeWidth: 2 },
+          });
           }
         }
       }
@@ -1007,10 +1021,16 @@ export default function ProjectDetail({ id: propId, onClose }) {
           if (type === "point" || raw?.geometry?.type === "Point") {
             const coords = Array.isArray(raw?.coordinates) ? raw.coordinates : Array.isArray(raw?.geometry?.coordinates) ? raw.geometry.coordinates : null;
             if (Array.isArray(coords) && coords.length >= 2 && coords.every(Number.isFinite)) {
+              const lng = Number(coords[0]);
+              const lat = Number(coords[1]);
+
               out.push({
                 id: `${t._id}-pt-${out.length}`,
-                type: "Point",
-                coordinates: coords,
+                type: "point",
+                lat,
+                lng,
+                point: { lat, lng },
+                coordinates: [lng, lat],
                 meta: { label: t.title || "Task", taskId: String(t._id || ""), color },
                 style: { stroke: color, fill: color, strokeWidth: 2 },
               });
@@ -1622,13 +1642,18 @@ export default function ProjectDetail({ id: propId, onClose }) {
         </div>
       </Card>
 
+      {/* ✅ Project Plan (Gantt) */}
+      <Card title="Project Plan (Gantt)">
+        <GanttPane />
+      </Card>
+
       {/* Timeline */}
       {projectTasks.length > 0 && (
         <Card title="Project tasks timeline">
           <ProjectTasksTimeline tasks={projectTasks} projectStart={p?.startDate || null} projectEnd={p?.endDate || null} />
         </Card>
       )}
-
+      
       {/* Tasks list — titles open TaskDetail in lightbox */}
       <Card
         title="Tasks for this Project"
