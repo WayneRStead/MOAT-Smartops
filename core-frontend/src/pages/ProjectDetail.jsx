@@ -6,7 +6,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { api, fileUrl } from "../lib/api";
 import { listProjectTasks } from "../lib/api";
-import ProjectTasksTimeline from "../components/ProjectTasksTimeline";
+// import ProjectTasksTimeline from "../components/ProjectTasksTimeline";
 import GanttPane from "../components/GanttPane";
 import { listForms } from "../lib/inspectionApi.js";
 import TaskDetail from "./TaskDetail.jsx";
@@ -1646,14 +1646,7 @@ useEffect(() => {
       <Card title="Project Plan (Gantt)">
         <GanttPane />
       </Card>
-
-      {/* Timeline */}
-      {projectTasks.length > 0 && (
-        <Card title="Project tasks timeline">
-          <ProjectTasksTimeline tasks={projectTasks} projectStart={p?.startDate || null} projectEnd={p?.endDate || null} />
-        </Card>
-      )}
-      
+    
       {/* Tasks list — titles open TaskDetail in lightbox */}
       <Card
         title="Tasks for this Project"
