@@ -84,31 +84,65 @@ const endOfMonthLocal = (d) => {
 };
 
 /* ───────────────────────────── status helpers (canon + color mapping) ───────────────────────────── */
+const first = (...vals) => {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === "string" && v.trim() === "") continue;
+    return v;
+  }
+  return null;
+};
+
 function canonStatus(raw) {
   const s = String(raw || "").trim().toLowerCase();
   if (["finished", "complete", "completed", "closed", "done"].includes(s)) return "finished";
-  if (["paused - problem", "paused-problem", "problem", "blocked", "block", "issue"].includes(s)) return "paused - problem";
+  if (["paused - problem", "paused-problem", "problem", "blocked", "block", "issue"].includes(s))
+    return "paused - problem";
   if (["paused", "pause", "on hold", "on-hold", "hold"].includes(s)) return "paused";
-  if (["started", "start", "in-progress", "in progress", "open", "active", "running"].includes(s)) return "started";
+  if (["started", "start", "in-progress", "in progress", "open", "active", "running"].includes(s))
+    return "started";
   return "pending";
 }
+
 const isClosedLike = (s) => canonStatus(s) === "finished";
 const isPausedLike = (s) => canonStatus(s) === "paused";
 const isActiveLike = (s) => canonStatus(s) === "started";
 const isProblemLike = (s) => canonStatus(s) === "paused - problem";
 
-const STATUS_COLOR = (s) => {
-  const cs = canonStatus(s);
-  if (cs === "finished") return "#9ca3af"; // gray
-  if (cs === "paused - problem") return "#ef4444"; // red
-  if (cs === "paused") return "#f59e0b"; // amber
-  if (cs === "started") return "#10b981"; // green
-  return "#60a5fa"; // blue (pending/other)
+const COLORS = {
+  pending: "#60a5fa", // light blue
+  started: "#1e3a8a", // dark blue
+  paused: "#f59e0b", // mustard
+  pausedProblem: "#92400e", // brown
+  finishedPlanned: "#10b981", // green
+  finishedActual: "#7c3aed", // purple
+  overdue: "#ef4444", // red
 };
-const OVERDUE = "#ef4444";
+
+const OVERDUE = COLORS.overdue;
+
+// Determine “finished planned vs finished actual”
+// Rule (safe): if actualEndAt exists => purple, else green
+function finishedColorFor(item) {
+  const actual = first(item?.actualEndAt, item?.completedAt, item?.endActual, item?.finishedAt);
+  return actual ? COLORS.finishedActual : COLORS.finishedPlanned;
+}
+
+// Base status color (without overdue override)
+function baseStatusColor(itemOrStatus) {
+  const rawStatus = typeof itemOrStatus === "string" ? itemOrStatus : itemOrStatus?.status;
+  const cs = canonStatus(rawStatus);
+
+  if (cs === "paused - problem") return COLORS.pausedProblem;
+  if (cs === "paused") return COLORS.paused;
+  if (cs === "started") return COLORS.started;
+  if (cs === "finished") return finishedColorFor(itemOrStatus || {});
+  return COLORS.pending;
+}
 
 /* ─────────────────────────────────────────── filtering ─────────────────────────────────────────── */
 const toId = (x) => String(x?._id || x?.id || "");
+const safeObj = (x) => (x && typeof x === "object" ? x : {});
 const dateInRange = (start, end, fromAt, toAt) => {
   if (!fromAt && !toAt) return true;
   const s = start ? new Date(start) : null;
@@ -147,26 +181,19 @@ const HDR_H = 24;
 const LABEL_W = 240;
 
 /* ───────────────────────────────────────── safe parsing ───────────────────────────────────────── */
-const parseDate = (v) => {
-  if (!v) return null;
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? null : d;
-};
-const safeObj = (x) => (x && typeof x === "object" ? x : {});
-const first = (...vals) => {
-  for (const v of vals) {
-    if (v === undefined || v === null) continue;
-    if (typeof v === "string" && v.trim() === "") continue;
-    return v;
-  }
-  return null;
-};
-
 function normalizeMilestones(data) {
-  const arr = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : Array.isArray(data?.items) ? data.items : [];
+  const arr = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.rows)
+    ? data.rows
+    : Array.isArray(data?.items)
+    ? data.items
+    : [];
   return arr.map((m, i) => {
     const id = m._id || m.id || `m_${i}`;
-    const startAt = first(m.startPlanned, m.startAt, m.startDate, m.plannedStartAt, m.beginAt, m.start) || null;
+    const startAt =
+      first(m.startPlanned, m.startAt, m.startDate, m.plannedStartAt, m.beginAt, m.start) || null;
+
     const dueAt =
       first(
         m.endPlanned,
@@ -180,7 +207,9 @@ function normalizeMilestones(data) {
         m.date
       ) || null;
 
-    const actualEndAt = first(m.actualEndAt, m.endActual, m.completedAt, m.finishedAt, m.actualEnd, m.actualEndDate) || null;
+    const actualEndAt =
+      first(m.actualEndAt, m.endActual, m.completedAt, m.finishedAt, m.actualEnd, m.actualEndDate) ||
+      null;
 
     const title = m.title || m.name || m.label || `Milestone ${i + 1}`;
     const statusRaw = first(m.status, m.state, m.progressStatus) || (m.completed ? "finished" : "pending");
@@ -188,7 +217,13 @@ function normalizeMilestones(data) {
 
     const rb = m.isRoadblock ?? m.roadblock ?? m.blocker ?? m.isRoadBlock;
 
-    const dependsOn = Array.isArray(m.dependsOn) ? m.dependsOn : Array.isArray(m.requires) ? m.requires : Array.isArray(m.dependencies) ? m.dependencies : [];
+    const dependsOn = Array.isArray(m.dependsOn)
+      ? m.dependsOn
+      : Array.isArray(m.requires)
+      ? m.requires
+      : Array.isArray(m.dependencies)
+      ? m.dependencies
+      : [];
     const blockedBy = Array.isArray(m.blockedBy) ? m.blockedBy : [];
 
     return {
@@ -212,12 +247,19 @@ function normalizeMilestones(data) {
 }
 
 function normalizeTasks(data) {
-  const arr = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : Array.isArray(data?.items) ? data.items : [];
+  const arr = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.rows)
+    ? data.rows
+    : Array.isArray(data?.items)
+    ? data.items
+    : [];
   return arr.map((t, i) => {
     const id = t._id || t.id || `t_${i}`;
     const title = t.title || t.name || `Task ${i + 1}`;
     const start = first(t.startDate, t.startAt, t.start) || t.createdAt || null;
-    const due = first(t.dueAt, t.dueDate, t.endDate, t.endAt, t.finishAt, t.deadlineAt) || start || null;
+    const due =
+      first(t.dueAt, t.dueDate, t.endDate, t.endAt, t.finishAt, t.deadlineAt) || start || null;
     return {
       ...t,
       _id: id,
@@ -232,7 +274,7 @@ function normalizeTasks(data) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════════════════
-   GanttPane (DROP-IN) — supports:
+   GanttPane (DROP-IN)
    - Dashboard mode (filters + all projects)
    - Embedded mode for a single project: <GanttPane projectId="..." embedded />
    - Project-scoped milestone loading via: GET /task-milestones?projectId=...
@@ -240,7 +282,7 @@ function normalizeTasks(data) {
 ══════════════════════════════════════════════════════════════════════════════════════════════════════ */
 export default function GanttPane({ projectId = null, embedded = false }) {
   const dashFilters = useOptionalFilters();
-  const useDashFilters = !projectId; // if a projectId is passed, we ignore dashboard filters and scope strictly to that project
+  const useDashFilters = !projectId;
 
   const rag = useDashFilters ? dashFilters.rag : "";
   const dr = useDashFilters ? dashFilters.dr : {};
@@ -251,9 +293,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
   const [tasksByProject, setTasksByProject] = useState(new Map());
   const [milesByTask, setMilesByTask] = useState(new Map());
 
-  // NEW: project-scoped milestone cache (for embedded project gantt)
   const [projectMilestones, setProjectMilestones] = useState(new Map()); // pid -> milestone[]
-
   const [openProjects, setOpenProjects] = useState(new Set());
   const [openTasks, setOpenTasks] = useState(new Set());
   const [err, setErr] = useState("");
@@ -270,14 +310,12 @@ export default function GanttPane({ projectId = null, embedded = false }) {
       setErr("");
       try {
         const params = { limit: 2000, _ts: Date.now() };
-        // Project-scoped embed: still call /projects but then filter to the one record.
         const { data } = await api.get("/projects", { params, timeout: 12000 });
         if (!alive) return;
         const rows = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
         if (projectId) {
           const pid = String(projectId);
           setProjects(rows.filter((p) => String(p?._id || p?.id || "") === pid));
-          // auto expand the project in embedded mode
           setOpenProjects(new Set([pid]));
         } else {
           setProjects(rows);
@@ -300,11 +338,12 @@ export default function GanttPane({ projectId = null, embedded = false }) {
       const ids = Array.from(openProjects).filter((pid) => !tasksByProject.has(pid));
       for (const pid of ids) {
         try {
-          const { data } = await api.get("/tasks", { params: { projectId: pid, limit: 2000, _ts: Date.now() } });
+          const { data } = await api.get("/tasks", {
+            params: { projectId: pid, limit: 2000, _ts: Date.now() },
+          });
           const rows = normalizeTasks(data);
           if (cancelled) return;
           setTasksByProject((prev) => new Map(prev).set(pid, rows));
-          // In embedded mode, auto-expand tasks list is optional; keep collapsed by default.
         } catch {
           if (cancelled) return;
           setTasksByProject((prev) => new Map(prev).set(pid, []));
@@ -325,12 +364,14 @@ export default function GanttPane({ projectId = null, embedded = false }) {
       if (projectMilestones.has(pid)) return;
 
       try {
-        const { data } = await api.get("/task-milestones", { params: { projectId: pid, limit: 5000, _ts: Date.now() } });
+        const { data } = await api.get("/task-milestones", {
+          params: { projectId: pid, limit: 5000, _ts: Date.now() },
+        });
         const ms = normalizeMilestones(data);
         if (cancelled) return;
         setProjectMilestones((prev) => new Map(prev).set(pid, ms));
 
-        // also seed milesByTask so expanding tasks doesn't refetch
+        // seed per-task cache too
         const byTask = new Map();
         ms.forEach((m) => {
           const tid = String(m.taskId || "");
@@ -345,8 +386,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
           }
           return next;
         });
-      } catch (e) {
-        // don't hard-fail embedded gantt; tasks + per-task milestones still work
+      } catch {
         if (cancelled) return;
         setProjectMilestones((prev) => new Map(prev).set(pid, []));
       }
@@ -363,7 +403,9 @@ export default function GanttPane({ projectId = null, embedded = false }) {
       const ids = Array.from(openTasks).filter((tid) => !milesByTask.has(tid));
       for (const tid of ids) {
         try {
-          const res = await api.get(`/tasks/${tid}/milestones`, { params: { limit: 2000, _ts: Date.now() } });
+          const res = await api.get(`/tasks/${tid}/milestones`, {
+            params: { limit: 2000, _ts: Date.now() },
+          });
           const rows = normalizeMilestones(res.data);
           if (cancelled) return;
           setMilesByTask((prev) => new Map(prev).set(tid, rows));
@@ -380,7 +422,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
 
   /* ───────────────────────────── filter projects by rag/date/groups/projectIds ───────────────────────────── */
   const filteredProjects = useMemo(() => {
-    if (projectId) return projects; // hard scope for embedded mode
+    if (projectId) return projects;
 
     const fromAt = dr?.fromAt || dr?.from || "";
     const toAt = dr?.toAt || dr?.to || "";
@@ -414,8 +456,8 @@ export default function GanttPane({ projectId = null, embedded = false }) {
 
   /* ───────────────────────────── calendar domain ───────────────────────────── */
   const cal = useMemo(() => {
-    const fromAt = (projectId ? "" : (dr?.fromAt || dr?.from || "")) || "";
-    const toAt = (projectId ? "" : (dr?.toAt || dr?.to || "")) || "";
+    const fromAt = (projectId ? "" : dr?.fromAt || dr?.from || "") || "";
+    const toAt = (projectId ? "" : dr?.toAt || dr?.to || "") || "";
     const today = floorLocal(new Date());
 
     let rangeStart, rangeEnd;
@@ -424,7 +466,6 @@ export default function GanttPane({ projectId = null, embedded = false }) {
       rangeStart = floorLocal(fromAt || new Date(Date.now() - 30 * DAY));
       rangeEnd = floorLocal(toAt || new Date(Date.now() + 60 * DAY));
     } else {
-      // embedded mode: try to align to the project itself if it has dates, else month window
       if (projectId && filteredProjects?.[0]) {
         const p = filteredProjects[0];
         const ps = floorLocal(p.startDate || p.start || p.startAt);
@@ -464,8 +505,8 @@ export default function GanttPane({ projectId = null, embedded = false }) {
     let i = 0;
     while (i < days) {
       const d = addDays(rangeStart, i);
-      const m = d.getMonth(),
-        y = d.getFullYear();
+      const m = d.getMonth();
+      const y = d.getFullYear();
       const label = d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
       let span = 0;
       while (i + span < days) {
@@ -539,7 +580,6 @@ export default function GanttPane({ projectId = null, embedded = false }) {
     sc.scrollTo({ left: centerTarget, behavior: "smooth" });
   };
 
-  // auto-center today on mount / when calendar changes
   useEffect(() => {
     const sc = scrollerRef.current;
     if (!sc) return;
@@ -597,7 +637,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
     return out;
   }, [rows, cal.rangeStart]);
 
-  const showLegend = !embedded; // embedded view is cleaner by default
+  const showLegend = true;
 
   /* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */
   return (
@@ -615,32 +655,53 @@ export default function GanttPane({ projectId = null, embedded = false }) {
         .g-click { cursor:pointer; }
         .g-click:hover { text-decoration: underline; }
         .g-chart { border:1px solid #e5e7eb; background:#fff; border-radius:8px; overflow:hidden; }
+        @media print {
+          .g-legend { display:none !important; }
+          .g-chart { overflow: visible !important; border: none !important; }
+        }
       `}</style>
 
-      {/* legend + today */}
       {showLegend && (
         <div className="g-legend">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <span className="g-pill">
-              <span className="g-dot" style={{ background: "#10b981" }} />
-              Active
+              <span className="g-dot" style={{ background: COLORS.pending }} />
+              Pending
             </span>
             <span className="g-pill">
-              <span className="g-dot" style={{ background: "#f59e0b" }} />
+              <span className="g-dot" style={{ background: COLORS.started }} />
+              Started
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: COLORS.paused }} />
               Paused
             </span>
             <span className="g-pill">
-              <span className="g-dot" style={{ background: "#ef4444" }} />
-              Overdue / Blocked
+              <span className="g-dot" style={{ background: COLORS.pausedProblem }} />
+              Paused Problem
             </span>
             <span className="g-pill">
-              <span className="g-dot" style={{ background: "#9ca3af" }} />
-              Closed
+              <span className="g-dot" style={{ background: COLORS.finishedPlanned }} />
+              Finished Planned
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: COLORS.finishedActual }} />
+              Finished Actual
+            </span>
+            <span className="g-pill">
+              <span className="g-dot" style={{ background: COLORS.overdue }} />
+              Overdue
             </span>
           </div>
-          <button className="g-pill" onClick={scrollToToday} title="Scroll to today">
-            Today
-          </button>
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="g-pill" onClick={scrollToToday} title="Scroll to today">
+              Today
+            </button>
+            <button className="g-pill" onClick={() => window.print()} title="Print plan">
+              Print plan
+            </button>
+          </div>
         </div>
       )}
 
@@ -697,10 +758,9 @@ export default function GanttPane({ projectId = null, embedded = false }) {
             if (r.type === "project") {
               const pid = r.id;
               const open = openProjects.has(pid);
-              const canToggle = !embedded || true; // allow toggle even when embedded
               return (
                 <div key={r.type + pid} className="g-tree-line" style={{ top, background: zebra }}>
-                  <div className="g-arrow" title="Click arrow to expand/collapse" onClick={() => canToggle && toggleProject(pid)}>
+                  <div className="g-arrow" title="Click arrow to expand/collapse" onClick={() => toggleProject(pid)}>
                     {open ? "▾" : "▸"}
                   </div>
                   <div className="g-lab g-click" title="Open project details" onClick={() => openProjectDetail(r.item)}>
@@ -767,6 +827,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                 {m.label}
               </div>
             ))}
+
             {/* Day-of-week row */}
             {cal.dayObjs.map((o, i) => (
               <div
@@ -788,6 +849,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                 {o.dow}
               </div>
             ))}
+
             {/* Date row */}
             {cal.dayObjs.map((o, i) => (
               <div
@@ -858,7 +920,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
               );
             })}
 
-            {/* bars + diamonds */}
+            {/* bars + markers */}
             {rows.map((r, i) => {
               const row = headerRows + 1 + i;
 
@@ -872,11 +934,13 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                 const eIdx = Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, e));
                 const span = Math.max(1, eIdx - sIdx + 1);
 
-                const col = STATUS_COLOR(p.status);
+                const col = baseStatusColor(p);
                 const barH = Math.max(16, ROW_H - 10);
                 const today = floorLocal(new Date());
                 const overdue = !isClosedLike(p.status) && e < today;
-                const oIdx = overdue ? Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, today)) : null;
+                const oIdx = overdue
+                  ? Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, today))
+                  : null;
                 const oSpan = overdue ? Math.max(1, oIdx - eIdx) : 0;
 
                 return (
@@ -923,11 +987,13 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                 const eIdx = Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, e));
                 const span = Math.max(1, eIdx - sIdx + 1);
 
-                const col = STATUS_COLOR(t.status);
+                const col = baseStatusColor(t);
                 const barH = Math.max(16, ROW_H - 10);
                 const today = floorLocal(new Date());
                 const overdue = !isClosedLike(t.status) && e < today;
-                const oIdx = overdue ? Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, today)) : null;
+                const oIdx = overdue
+                  ? Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, today))
+                  : null;
                 const oSpan = overdue ? Math.max(1, oIdx - eIdx) : 0;
 
                 return (
@@ -964,7 +1030,7 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                 );
               }
 
-              // milestone diamond (clickable)
+              // ── milestone marker (diamond default, reporting circle, feedback triangle)
               const m = safeObj(r.item);
               const whenRaw =
                 canonStatus(m.status) === "finished" && (m.actualEndAt || m.completedAt || m.endActual)
@@ -985,8 +1051,57 @@ export default function GanttPane({ projectId = null, embedded = false }) {
               if (!at) return null;
 
               const xIdx = Math.max(0, Math.min(cal.dayObjs.length - 1, diffDays(cal.rangeStart, at)));
-              const col = STATUS_COLOR(m.status);
+              const col = baseStatusColor(m);
               const size = 12;
+
+              const kind = String(m.kind || "").toLowerCase();
+              const markerStyleBase = {
+                gridColumn: `${xIdx + 1} / ${xIdx + 2}`,
+                gridRow: `${row} / ${row + 1}`,
+                justifySelf: "center",
+                alignSelf: "center",
+                width: size,
+                height: size,
+                background: col,
+                boxShadow: "0 0 0 1px rgba(17,24,39,0.15)",
+                zIndex: 4,
+                cursor: "pointer",
+              };
+
+              if (kind === "reporting" || kind === "report" || kind === "reporting-point") {
+                return (
+                  <div
+                    key={"m" + r.id}
+                    title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)} • reporting`}
+                    onClick={() => openMilestoneDetail(m)}
+                    style={{
+                      ...markerStyleBase,
+                      borderRadius: 999,
+                      border: m.isRoadblock ? "2px dashed #111" : "2px solid #fff",
+                    }}
+                  />
+                );
+              }
+
+              if (kind === "feedback" || kind === "feedback-point") {
+                return (
+                  <div
+                    key={"m" + r.id}
+                    title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)} • feedback`}
+                    onClick={() => openMilestoneDetail(m)}
+                    style={{
+                      ...markerStyleBase,
+                      background: "transparent",
+                      width: 0,
+                      height: 0,
+                      borderLeft: `${size / 2}px solid transparent`,
+                      borderRight: `${size / 2}px solid transparent`,
+                      borderBottom: `${size}px solid ${col}`,
+                      boxShadow: "none",
+                    }}
+                  />
+                );
+              }
 
               return (
                 <div
@@ -994,18 +1109,9 @@ export default function GanttPane({ projectId = null, embedded = false }) {
                   title={`${r.label} (${canonStatus(m.status)}) • ${fmt(at)}${m.kind ? ` • ${String(m.kind)}` : ""}`}
                   onClick={() => openMilestoneDetail(m)}
                   style={{
-                    gridColumn: `${xIdx + 1} / ${xIdx + 2}`,
-                    gridRow: `${row} / ${row + 1}`,
-                    justifySelf: "center",
-                    alignSelf: "center",
-                    width: size,
-                    height: size,
+                    ...markerStyleBase,
                     transform: "rotate(45deg)",
-                    background: col,
                     border: m.isRoadblock ? "2px dashed #111" : "2px solid #fff",
-                    boxShadow: "0 0 0 1px rgba(17,24,39,0.15)",
-                    zIndex: 4,
-                    cursor: "pointer",
                   }}
                 />
               );
