@@ -790,23 +790,41 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
 });
 
 /* --------------------------- UPDATE (PUT full) --------------------------- */
-router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
+router.patch("/:id", requireAuth, async (req, res) => {
   try {
     const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
 
+    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+    const role = String(getRole(req) || "user").toLowerCase();
+    const elevated = role === "manager" || isAdminRole(role);
+
     const b = req.body || {};
+
+    // Non-elevated users: allow ONLY status update (and nothing else)
+    if (!elevated) {
+      if (!("status" in b)) {
+        return res.status(403).json({ error: "Only managers/admins can edit task fields" });
+      }
+      t.status = normalizeStatus(b.status) || t.status;
+      await t.save();
+      return res.json(normalizeOut(t));
+    }
+
+    // Elevated users: full patch behavior (your existing logic)
     if (b.title != null) t.title = String(b.title).trim();
     if (b.description != null) t.description = String(b.description);
     if (b.priority != null) t.priority = String(b.priority).toLowerCase();
     if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
     if (b.status != null) t.status = normalizeStatus(b.status);
 
-    if ("startDate" in b || "startAt" in b) {
+    if (b.startDate != null || b.startAt != null) {
       t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
     }
 
-    if ("dueDate" in b || "dueAt" in b || "deadline" in b || "deadlineAt" in b) {
+    if (b.dueAt != null || b.dueDate != null || b.deadline != null || b.deadlineAt != null) {
       const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
       const d = rawDue ? new Date(rawDue) : undefined;
       t.dueDate = d;
@@ -872,7 +890,7 @@ router.put("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), as
     await t.save();
     res.json(normalizeOut(t));
   } catch (e) {
-    console.error("PUT /tasks/:id error:", e);
+    console.error("PATCH /tasks/:id error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -1343,150 +1361,6 @@ router.delete("/:id/attachments/:attId", requireAuth, allowRoles("manager", "adm
     res.json(normalizeOut(fresh));
   } catch (e) {
     console.error("DELETE /tasks/:id/attachments/:attId error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* --------------------------- GEOFENCES (unchanged) --------------------------- */
-
-router.post("/:id/geofences/upload", requireAuth, allowRoles("manager", "admin", "superadmin"), memUpload.single("file"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    if (!req.file) return res.status(400).json({ error: "file required" });
-
-    const radius = Number(req.query.radius || 50);
-    const ext = (req.file.originalname.split(".").pop() || "").toLowerCase();
-    const mime = (req.file.mimetype || "").toLowerCase();
-
-    let fences = [];
-    if (ext === "geojson" || mime.includes("geo+json") || mime === "application/json") {
-      fences = parseGeoJSONToFences(req.file.buffer, radius);
-    } else if (ext === "kml" || mime.includes("kml")) {
-      fences = parseKMLToFences(req.file.buffer.toString("utf8"), radius);
-    } else if (ext === "kmz" || mime.includes("kmz") || mime === "application/zip") {
-      const kmlText = extractKMLFromKMZ(req.file.buffer);
-      if (!kmlText) return res.status(400).json({ error: "no KML found in KMZ" });
-      fences = parseKMLToFences(kmlText, radius);
-    } else {
-      return res.status(400).json({ error: "unsupported file type (use .geojson, .kml or .kmz)" });
-    }
-
-    if (!fences.length) return res.status(400).json({ error: "no usable shapes found" });
-
-    t.geoFences = Array.isArray(t.geoFences) ? t.geoFences : [];
-    for (const f of fences) {
-      if (f.type === "polygon") t.geoFences.push({ type: "polygon", polygon: f.polygon });
-      else if (f.type === "circle") t.geoFences.push({ type: "circle", center: f.center, radius: f.radius });
-    }
-
-    await t.save();
-    const fresh = await Task.findById(t._id).lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("POST /tasks/:id/geofences/upload error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.put("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
-    t.geoFences = arr;
-    await t.save();
-    res.json(normalizeOut(await Task.findById(t._id).lean()));
-  } catch (e) {
-    console.error("PUT /tasks/:id/geofences error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.patch("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const arr = Array.isArray(req.body?.geoFences) ? req.body.geoFences : [];
-    t.geoFences = Array.isArray(t.geoFences) ? t.geoFences.concat(arr) : arr;
-    await t.save();
-    res.json(normalizeOut(await Task.findById(t._id).lean()));
-  } catch (e) {
-    console.error("PATCH /tasks/:id/geofences error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.delete("/:id/geofences", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    t.geoFences = [];
-    await t.save();
-    res.json(normalizeOut(await Task.findById(t._id).lean()));
-  } catch (e) {
-    console.error("DELETE /tasks/:id/geofences error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.get("/:id/geofences", requireAuth, async (req, res) => {
-  try {
-    const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) }).lean();
-    if (!t) return res.status(404).json({ error: "Not found" });
-    res.json({ geoFences: Array.isArray(t.geoFences) ? t.geoFences : [] });
-  } catch (e) {
-    console.error("GET /tasks/:id/geofences error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.get("/:id/geofences/effective", requireAuth, async (req, res) => {
-  try {
-    const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) }).lean();
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    let fences = collectTaskFences(t);
-    let source = "task";
-
-    if (!fences.length && t.projectId) {
-      const proj = await Project.findById(t.projectId).lean();
-      if (proj) {
-        const pf = collectTaskFences(proj);
-        if (pf.length) {
-          fences = pf;
-          source = "project";
-        } else {
-          source = "none";
-        }
-      } else {
-        source = "none";
-      }
-    }
-
-    const out = fences.map((f) => (f.type === "polygon" && f.ring ? { type: "polygon", polygon: f.ring } : f));
-    res.json({ geoFences: out, source });
-  } catch (e) {
-    console.error("GET /tasks/:id/geofences/effective error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
