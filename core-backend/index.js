@@ -24,14 +24,16 @@ try {
   require("./models/User");
 } catch {} // ensure User is compiled for boot
 
-// --- Optional/Safe require helper ---
+// --- Optional/Safe require helper (NOW logs failures) ---
 function safeRequire(p) {
   try {
     return require(p);
-  } catch {
+  } catch (e) {
+    console.warn(`[safeRequire] failed to load ${p}:`, e?.message || String(e));
     return null;
   }
 }
+
 const runSuperadminBoot = safeRequire("./boot/superadmin");
 const touchOrgActivity = safeRequire("./middleware/org-activity") || ((_req, _res, next) => next());
 const enforceTrial = safeRequire("./middleware/org-trial") || ((_req, _res, next) => next());
@@ -60,7 +62,11 @@ const vehiclesRouter = safeRequire("./routes/vehicles");
 const logbookRouter = require("./routes/logbook");
 const invoicesRouter = safeRequire("./routes/invoices");
 const groupsRouter = safeRequire("./routes/groups");
-const tasksRouter = safeRequire("./routes/tasks");
+
+// ✅ CRITICAL: tasks router MUST NOT be optional
+// If it fails to load, we WANT the server to crash loudly so routes don't "disappear".
+const tasksRouter = require("./routes/tasks");
+
 const taskMilestonesRouter = safeRequire("./routes/task-milestones");
 const vendorsRouter = safeRequire("./routes/vendors");
 const purchasesRouter = safeRequire("./routes/purchases");
@@ -464,11 +470,6 @@ app.get("/health", (_req, res) => res.json({ ok: true, time: new Date().toISOStr
 app.get("/api/health", (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
 /* --------------------------- Protected Routers -------------------------- */
-/* Pattern: requireAuth → resolveOrgContext → requireOrg → enforceTrial → touchOrgActivity → (computeAccessibleUserIds?) → router
- *
- * IMPORTANT: We DO NOT run enforceTrial on /org and /api/org themselves,
- * so that suspended / expired trial orgs can still view/change billing and settings.
- */
 
 // Clockings
 app.use(
@@ -535,32 +536,28 @@ app.use(
 );
 
 /* =======================================================================
-   ✅ CRITICAL FIX: mount the BASE tasks router BEFORE any other /tasks routers
-   This prevents other sub-routers (coverage/fences/notes/milestones) from
-   shadowing GET /tasks and returning "projectId required".
+   ✅ CRITICAL: mount the BASE tasks router BEFORE any other /tasks routers
 ======================================================================== */
-if (tasksRouter) {
-  app.use(
-    "/tasks",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    tasksRouter
-  );
-  app.use(
-    "/api/tasks",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    tasksRouter
-  );
-}
+app.use(
+  "/tasks",
+  requireAuth,
+  resolveOrgContext,
+  requireOrg,
+  enforceTrial,
+  touchOrgActivity,
+  computeAccessibleUserIds,
+  tasksRouter
+);
+app.use(
+  "/api/tasks",
+  requireAuth,
+  resolveOrgContext,
+  requireOrg,
+  enforceTrial,
+  touchOrgActivity,
+  computeAccessibleUserIds,
+  tasksRouter
+);
 
 /* --------- Task-related sub-routers AFTER base tasks router --------- */
 
