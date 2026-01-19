@@ -66,7 +66,7 @@ const groupsRouter = safeRequire("./routes/groups");
 
 // ✅ CRITICAL: tasks router MUST NOT be optional
 // If it fails to load, we WANT the server to crash loudly so routes don't "disappear".
-const tasksRouter = safeRequire("./routes/tasks");
+const tasksRouter = Require("./routes/tasks");
 
 if (!tasksRouter) {
   console.error("[BOOT] routes/tasks.js FAILED to load. PUT/PATCH /tasks/:id will 404.");
@@ -152,14 +152,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 // Make sure preflight always responds cleanly
 app.options("*", cors(corsOptions));
-
-// --- Compatibility alias: allow /tasks/* to behave like /api/tasks/* ---
-app.use((req, _res, next) => {
-  if (req.url.startsWith("/tasks/")) {
-    req.url = "/api" + req.url;     // /tasks/... -> /api/tasks/...
-  }
-  next();
-});
 
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
