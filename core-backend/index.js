@@ -11,20 +11,12 @@ const fs = require("fs");
 const { GridFSBucket } = require("mongodb");
 
 // ------------------ Models (ensure compiled on boot) ------------------
-try {
-  require("./models/ManagerNote");
-} catch {}
-try {
-  require("./models/TaskCoverage");
-} catch {}
-try {
-  require("./models/InspectionSubmission");
-} catch {}
-try {
-  require("./models/User");
-} catch {} // ensure User is compiled for boot
+try { require("./models/ManagerNote"); } catch {}
+try { require("./models/TaskCoverage"); } catch {}
+try { require("./models/InspectionSubmission"); } catch {}
+try { require("./models/User"); } catch {} // ensure User is compiled for boot
 
-// --- Optional/Safe require helper (NOW logs failures) ---
+// --- Optional/Safe require helper (logs failures) ---
 function safeRequire(p) {
   try {
     return require(p);
@@ -64,13 +56,11 @@ const logbookRouter = require("./routes/logbook");
 const invoicesRouter = safeRequire("./routes/invoices");
 const groupsRouter = safeRequire("./routes/groups");
 
-// ✅ CRITICAL: tasks router MUST NOT be optional
-// If it fails to load, we WANT the server to crash loudly so routes don't "disappear".
-const tasksRouter = Require("./routes/tasks");
-
-if (!tasksRouter) {
-  console.error("[BOOT] routes/tasks.js FAILED to load. PUT/PATCH /tasks/:id will 404.");
-}
+/**
+ * ✅ CRITICAL: tasks router MUST NOT be optional.
+ * If it fails to load, we WANT the server to crash so we can see the real error.
+ */
+const tasksRouter = require("./routes/tasks");
 
 const taskMilestonesRouter = safeRequire("./routes/task-milestones");
 const vendorsRouter = safeRequire("./routes/vendors");
@@ -99,10 +89,6 @@ app.disable("x-powered-by");
 
 /**
  * ✅ CORS (stable; no throwing errors)
- * - Allows explicit origins from CORS_ORIGINS
- * - Allows localhost defaults
- * - Allows any *.vercel.app (preview deploys)
- * - IMPORTANT: does NOT throw errors for disallowed origins (prevents 500/NetworkError)
  */
 const allowedOrigins = new Set(
   String(process.env.CORS_ORIGINS || "")
@@ -118,15 +104,9 @@ allowedOrigins.add("https://moat-smartops.vercel.app");
 
 const corsOptions = {
   origin(origin, cb) {
-    // allow server-to-server / curl / health checks
     if (!origin) return cb(null, true);
-
     if (allowedOrigins.has(origin)) return cb(null, true);
-
-    // allow Vercel preview deploys
     if (/\.vercel\.app$/i.test(origin)) return cb(null, true);
-
-    // ❗ do not throw; just disallow
     return cb(null, false);
   },
   credentials: true,
@@ -150,13 +130,12 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Make sure preflight always responds cleanly
 app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
-/* ------------------------ Shared helpers (avoid duplicates) ------------------------ */
+/* ------------------------ Shared helpers ------------------------ */
 function toObjectIdOrNull(id) {
   try {
     return new mongoose.Types.ObjectId(String(id));
@@ -166,7 +145,6 @@ function toObjectIdOrNull(id) {
 }
 
 /* -------------------------- Superadmin (optional) -------------------------- */
-// Superadmin cockpit (optional, global scope – no org activity touch here)
 if (superAdminRouter) {
   app.use("/admin/super", superAdminRouter);
   app.use("/api/admin/super", superAdminRouter);
@@ -181,7 +159,7 @@ app.use("/api/public", publicAuthRouter);
 function getTripsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
-  return new GridFSBucket(db, { bucketName: "vehicleTrips" }); // MUST match vehicleTrips.files
+  return new GridFSBucket(db, { bucketName: "vehicleTrips" });
 }
 
 async function serveVehicleTripFile(req, res, next) {
@@ -189,24 +167,18 @@ async function serveVehicleTripFile(req, res, next) {
     const filename = req.params.filename;
     if (!filename) return res.status(400).json({ error: "Missing filename" });
 
-    // 1) Try disk first (legacy)
     const diskPath = path.join(__dirname, "uploads", "vehicle-trips", filename);
-    if (fs.existsSync(diskPath)) {
-      return res.sendFile(diskPath);
-    }
+    if (fs.existsSync(diskPath)) return res.sendFile(diskPath);
 
-    // 2) Fall back to GridFS
     const bucket = getTripsBucket();
     if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
 
     const files = await bucket.find({ filename }).limit(1).toArray();
-    if (!files || files.length === 0) {
-      return res.status(404).json({ error: "File not found" });
-    }
+    if (!files || files.length === 0) return res.status(404).json({ error: "File not found" });
 
     const f = files[0];
     if (f?.contentType) res.setHeader("Content-Type", f.contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day
+    res.setHeader("Cache-Control", "public, max-age=86400");
 
     const stream = bucket.openDownloadStreamByName(filename);
     stream.on("error", (err) => next(err));
@@ -216,7 +188,6 @@ async function serveVehicleTripFile(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/vehicle-trips/:filename", serveVehicleTripFile);
 app.get("/api/files/vehicle-trips/:filename", serveVehicleTripFile);
 
@@ -250,15 +221,12 @@ async function serveDocumentFile(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/documents/:fileId", serveDocumentFile);
 app.get("/api/files/documents/:fileId", serveDocumentFile);
-
-// Alias paths (frontend expects /documents/files/:fileId)
 app.get("/documents/files/:fileId", serveDocumentFile);
 app.get("/api/documents/files/:fileId", serveDocumentFile);
 
-/* -------------------- GridFS for org logos (NEW) -------------------- */
+/* -------------------- GridFS for org logos -------------------- */
 function getOrgBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -282,7 +250,6 @@ async function serveOrgLogo(req, res, next) {
     const f = files?.[0];
     if (!f?._id) return res.status(404).json({ error: "Logo not found" });
 
-    // Simple caching + 304 support
     const etag = f.md5 ? `"${f.md5}"` : null;
     if (etag) {
       res.setHeader("ETag", etag);
@@ -291,7 +258,6 @@ async function serveOrgLogo(req, res, next) {
     }
 
     if (f?.contentType) res.setHeader("Content-Type", f.contentType);
-    // Short cache because org can change logo
     res.setHeader("Cache-Control", "public, max-age=300");
 
     const stream = bucket.openDownloadStream(f._id);
@@ -302,7 +268,6 @@ async function serveOrgLogo(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/org/:org/logo", serveOrgLogo);
 app.get("/api/files/org/:org/logo", serveOrgLogo);
 
@@ -336,11 +301,10 @@ async function serveAssetFile(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/assets/:fileId", serveAssetFile);
 app.get("/api/files/assets/:fileId", serveAssetFile);
 
-/* -------------------- GridFS for invoice files (NEW) -------------------- */
+/* -------------------- GridFS for invoice files -------------------- */
 function getInvoicesBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -353,13 +317,9 @@ async function serveInvoiceFile(req, res, next) {
     const filename = String(req.params.filename || "");
     if (!org || !filename) return res.status(400).json({ error: "Missing org or filename" });
 
-    // 1) Legacy disk (if any old files exist)
     const diskPath = path.join(__dirname, "uploads", "invoices", org, filename);
-    if (fs.existsSync(diskPath)) {
-      return res.sendFile(diskPath);
-    }
+    if (fs.existsSync(diskPath)) return res.sendFile(diskPath);
 
-    // 2) GridFS
     const bucket = getInvoicesBucket();
     if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
 
@@ -373,7 +333,7 @@ async function serveInvoiceFile(req, res, next) {
     if (!f?._id) return res.status(404).json({ error: "File not found" });
 
     if (f?.contentType) res.setHeader("Content-Type", f.contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day
+    res.setHeader("Cache-Control", "public, max-age=86400");
 
     const stream = bucket.openDownloadStream(f._id);
     stream.on("error", (err) => next(err));
@@ -383,11 +343,10 @@ async function serveInvoiceFile(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/invoices/:org/:filename", serveInvoiceFile);
 app.get("/api/files/invoices/:org/:filename", serveInvoiceFile);
 
-/* -------------------- GridFS for task attachments (NEW) -------------------- */
+/* -------------------- GridFS for task attachments -------------------- */
 function getTasksBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
@@ -417,7 +376,6 @@ async function serveTaskAttachmentFile(req, res, next) {
   }
 }
 
-// IMPORTANT: mount BEFORE express.static("/files")
 app.get("/files/tasks/:fileId", serveTaskAttachmentFile);
 app.get("/api/files/tasks/:fileId", serveTaskAttachmentFile);
 
@@ -438,9 +396,7 @@ const uploadsRoot = path.join(__dirname, "uploads");
   "vehicle-trips",
   "invoices",
 ].forEach((sub) => {
-  try {
-    fs.mkdirSync(path.join(uploadsRoot, sub), { recursive: true });
-  } catch {}
+  try { fs.mkdirSync(path.join(uploadsRoot, sub), { recursive: true }); } catch {}
 });
 
 const staticOpts = {
@@ -453,7 +409,8 @@ const staticOpts = {
       res.setHeader("Content-Type", "application/json; charset=utf-8");
     else if (/\.kml$/i.test(filePath))
       res.setHeader("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8");
-    else if (/\.kmz$/i.test(filePath)) res.setHeader("Content-Type", "application/vnd.google-earth.kmz");
+    else if (/\.kmz$/i.test(filePath))
+      res.setHeader("Content-Type", "application/vnd.google-earth.kmz");
   },
 };
 
@@ -540,9 +497,9 @@ app.use(
   projectsGeofencesRouter
 );
 
-/* =======================================================================
-   ✅ CRITICAL: mount the BASE tasks router BEFORE any other /tasks routers
-======================================================================== */
+/**
+ * ✅ CRITICAL: mount the BASE tasks router BEFORE any other /tasks routers
+ */
 app.use(
   "/tasks",
   requireAuth,
@@ -571,24 +528,8 @@ app.use("/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touc
 app.use("/api/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, taskFencesRouter);
 
 // Task coverage
-app.use(
-  "/tasks",
-  requireAuth,
-  resolveOrgContext,
-  requireOrg,
-  enforceTrial,
-  touchOrgActivity,
-  require("./routes/task-coverage")
-);
-app.use(
-  "/api/tasks",
-  requireAuth,
-  resolveOrgContext,
-  requireOrg,
-  enforceTrial,
-  touchOrgActivity,
-  require("./routes/task-coverage")
-);
+app.use("/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, require("./routes/task-coverage"));
+app.use("/api/tasks", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, require("./routes/task-coverage"));
 
 /* -------------------- Manager Notes -------------------- */
 if (managerNotesRouter) {
@@ -598,71 +539,19 @@ if (managerNotesRouter) {
 
 /* -------------------- Project Manager Notes -------------------- */
 if (projectsManagerNotesRouter) {
-  app.use(
-    "/projects",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    projectsManagerNotesRouter
-  );
-  app.use(
-    "/api/projects",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    projectsManagerNotesRouter
-  );
+  app.use("/projects", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, projectsManagerNotesRouter);
+  app.use("/api/projects", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, projectsManagerNotesRouter);
 }
 
 /* -------------------------------- Other Routers -------------------------------- */
 if (projectsRouter) {
-  app.use(
-    "/projects",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    projectsRouter
-  );
-  app.use(
-    "/api/projects",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    projectsRouter
-  );
+  app.use("/projects", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, projectsRouter);
+  app.use("/api/projects", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, projectsRouter);
 }
 
 if (groupsRouter) {
-  app.use(
-    "/groups",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    groupsRouter
-  );
-  app.use(
-    "/api/groups",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    groupsRouter
-  );
+  app.use("/groups", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, groupsRouter);
+  app.use("/api/groups", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, groupsRouter);
 }
 
 /* -------------------- Task Milestones AFTER base tasks router -------------------- */
@@ -673,63 +562,15 @@ if (taskMilestonesRouter) {
 
 /* ------------------------ Inspections ----------------------- */
 if (inspectionModuleRouter) {
-  app.use(
-    "/inspections",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionModuleRouter
-  );
-  app.use(
-    "/api/inspections",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionModuleRouter
-  );
-  app.use(
-    "/inspection",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionModuleRouter
-  );
-  app.use(
-    "/api/inspection",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionModuleRouter
-  );
+  app.use("/inspections", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionModuleRouter);
+  app.use("/api/inspections", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionModuleRouter);
+  app.use("/inspection", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionModuleRouter);
+  app.use("/api/inspection", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionModuleRouter);
 } else if (inspectionsRouter) {
   app.use("/inspections", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionsRouter);
-  app.use(
-    "/api/inspections",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionsRouter
-  );
+  app.use("/api/inspections", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionsRouter);
   app.use("/inspection", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionsRouter);
-  app.use(
-    "/api/inspection",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    inspectionsRouter
-  );
+  app.use("/api/inspection", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, inspectionsRouter);
 }
 
 /* -------------------------------- Remaining Modules -------------------------------- */
@@ -739,26 +580,8 @@ if (assetsRouter) {
 }
 
 if (vehiclesRouter) {
-  app.use(
-    "/vehicles",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehiclesRouter
-  );
-  app.use(
-    "/api/vehicles",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehiclesRouter
-  );
+  app.use("/vehicles", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehiclesRouter);
+  app.use("/api/vehicles", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehiclesRouter);
 }
 
 if (logbookRouter) {
@@ -787,53 +610,16 @@ if (documentsRouter) {
 }
 
 if (vehicleTripsRouter) {
-  app.use(
-    "/",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehicleTripsRouter
-  );
-  app.use(
-    "/api",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehicleTripsRouter
-  );
+  app.use("/", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehicleTripsRouter);
+  app.use("/api", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehicleTripsRouter);
 }
 
 if (vehicleTripAliases) {
-  app.use(
-    "/",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehicleTripAliases
-  );
-  app.use(
-    "/api",
-    requireAuth,
-    resolveOrgContext,
-    requireOrg,
-    enforceTrial,
-    touchOrgActivity,
-    computeAccessibleUserIds,
-    vehicleTripAliases
-  );
+  app.use("/", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehicleTripAliases);
+  app.use("/api", requireAuth, resolveOrgContext, requireOrg, enforceTrial, touchOrgActivity, computeAccessibleUserIds, vehicleTripAliases);
 }
 
 if (billingRouter) {
-  // System-level billing (not org-scoped), so no touchOrgActivity here
   app.use("/billing", billingRouter);
   app.use("/api/billing", billingRouter);
 }
@@ -871,7 +657,6 @@ async function runTrialSweepOnce() {
       { status: "trialing", planCode: "trial", trialEndsAt: { $lt: now } },
       { $set: { status: "suspended" } }
     );
-
     const modified = res?.modifiedCount ?? res?.nModified ?? 0;
     if (modified > 0) console.log(`[trial] Suspended ${modified} org(s) with expired trial`);
   } catch (e) {
