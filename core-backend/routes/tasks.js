@@ -48,11 +48,13 @@ function extractId(maybe) {
 }
 
 function allowRoles(...roles) {
+  const allowed = roles.map((r) => String(r).toLowerCase());
   return (req, res, next) => {
-    const role = req.user?.role || req.user?.claims?.role;
-    if (!roles.length) return next();
+    const roleRaw = req.user?.role || req.user?.claims?.role;
+    const role = String(roleRaw || "").toLowerCase();
+    if (!allowed.length) return next();
     if (!role) return res.sendStatus(401);
-    if (!roles.includes(role)) return res.sendStatus(403);
+    if (!allowed.includes(role)) return res.sendStatus(403);
     next();
   };
 }
@@ -63,13 +65,21 @@ const isAdmin = (req) => isAdminRole(getRole(req));
 
 function normalizeStatus(s) {
   if (s == null) return undefined;
-  const v = String(s).trim().toLowerCase();
-  if (["done", "finish", "finished", "complete", "completed"].includes(v)) return "completed";
-  if (["in progress", "in-progress", "inprogress", "started", "start", "resume", "resumed"].includes(v))
-    return "in-progress";
-  if (["pause", "paused"].includes(v)) return "paused";
-  if (["open", "todo", "to-do", "pending", "planned", "plan"].includes(v)) return "pending";
-  return v;
+
+  const raw = String(s).trim();
+  const v = raw.toLowerCase().replace(/\s+/g, "");
+
+  if (["pending", "todo", "tbd", "planned", "plan", "open"].includes(v)) return "Pending";
+  if (["started", "inprogress", "in-progress", "active", "running"].includes(v)) return "Started";
+  if (["paused", "pause", "onhold", "hold"].includes(v)) return "Paused";
+  if (["paused-problem", "pausedproblem", "problem", "blocked", "blocker", "issue"].includes(v)) return "Paused-Problem";
+  if (["finished", "finish", "done", "complete", "completed", "closed"].includes(v)) return "Finished";
+
+  // If user passes one of the exact values already, keep it
+  if (["Pending", "Started", "Paused", "Paused-Problem", "Finished"].includes(raw)) return raw;
+
+  // Fallback: leave original
+  return raw;
 }
 
 /* ----------------------- Org helpers ----------------------- */
@@ -147,11 +157,13 @@ function setStatusFromLog(taskDoc) {
   const log = [...(taskDoc.actualDurationLog || [])]
     .sort((a, b) => new Date(a.at) - new Date(b.at))
     .filter((e) => e.action !== "photo" && e.action !== "fence");
+
   if (!log.length) return;
+
   const last = log[log.length - 1];
-  if (last.action === "start" || last.action === "resume") taskDoc.status = "in-progress";
-  if (last.action === "pause") taskDoc.status = "paused";
-  if (last.action === "complete") taskDoc.status = "completed";
+  if (last.action === "start" || last.action === "resume") taskDoc.status = "Started";
+  if (last.action === "pause") taskDoc.status = "Paused";
+  if (last.action === "complete") taskDoc.status = "Finished";
 }
 
 /* ---------------- normalize output ---------------- */
