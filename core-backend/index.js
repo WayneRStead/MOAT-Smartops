@@ -29,7 +29,8 @@ function safeRequire(p) {
   try {
     return require(p);
   } catch (e) {
-    console.warn(`[safeRequire] failed to load ${p}:`, e?.message || String(e));
+    console.error(`[safeRequire] failed: ${p}`);
+    console.error(e);
     return null;
   }
 }
@@ -65,7 +66,11 @@ const groupsRouter = safeRequire("./routes/groups");
 
 // ✅ CRITICAL: tasks router MUST NOT be optional
 // If it fails to load, we WANT the server to crash loudly so routes don't "disappear".
-const tasksRouter = require("./routes/tasks");
+const tasksRouter = safeRequire("./routes/tasks");
+
+if (!tasksRouter) {
+  console.error("[BOOT] routes/tasks.js FAILED to load. PUT/PATCH /tasks/:id will 404.");
+}
 
 const taskMilestonesRouter = safeRequire("./routes/task-milestones");
 const vendorsRouter = safeRequire("./routes/vendors");
