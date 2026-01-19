@@ -18,6 +18,9 @@ const { getBucket } = require("../lib/gridfs");
 
 const router = express.Router();
 
+router.get("/_ping", (_req, res) => res.json({ ok: true }));
+router.post("/_ping", (_req, res) => res.json({ ok: true }));
+
 /* ------------------------- Helpers ------------------------- */
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
@@ -802,7 +805,12 @@ router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), asyn
 });
 
 /* --------------------------- UPDATE (PUT full) --------------------------- */
-router.patch("/:id", requireAuth, async (req, res) => {
+/**
+ * ✅ FIX: Frontend is calling PUT /tasks/:id
+ * Your router only had PATCH /tasks/:id, so PUT was 404.
+ * This PUT handler mirrors the PATCH logic.
+ */
+router.put("/:id", requireAuth, async (req, res) => {
   try {
     const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
     if (!t) return res.status(404).json({ error: "Not found" });
@@ -815,7 +823,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
 
     const b = req.body || {};
 
-    // Non-elevated users: allow ONLY status update (and nothing else)
+    // Non-elevated users: allow ONLY status update
     if (!elevated) {
       if (!("status" in b)) {
         return res.status(403).json({ error: "Only managers/admins can edit task fields" });
@@ -825,7 +833,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
       return res.json(normalizeOut(t));
     }
 
-    // Elevated users: full patch behavior (your existing logic)
+    // Elevated users: full update behavior
     if (b.title != null) t.title = String(b.title).trim();
     if (b.description != null) t.description = String(b.description);
     if (b.priority != null) t.priority = String(b.priority).toLowerCase();
@@ -854,7 +862,10 @@ router.patch("/:id", requireAuth, async (req, res) => {
       incomingAssignees = coerceObjectIdArray(b.assignedUserIds);
     } else if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
       incomingAssignees = Array.isArray(b.assignedTo) ? coerceObjectIdArray(b.assignedTo) : null;
-    } else if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
+    } else if (
+      Object.prototype.hasOwnProperty.call(b, "assignee") ||
+      Object.prototype.hasOwnProperty.call(b, "assigneeId")
+    ) {
       const one = extractId(b.assignee || b.assigneeId);
       if (one) incomingAssignees = [one];
       else if (b.assignee === null || b.assigneeId === null) incomingAssignees = [];
@@ -885,15 +896,14 @@ router.patch("/:id", requireAuth, async (req, res) => {
 
       if (vis.assignedGroupIds != null) {
         t.assignedGroupIds = vis.assignedGroupIds;
-        t.groupId = Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
+        t.groupId =
+          Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
       }
     } catch (err) {
       return res.status(err.status || 400).json({ error: err.message || "visibility error" });
     }
 
-    if (incomingAssignees != null) {
-      applyAssignees(t, incomingAssignees);
-    }
+    if (incomingAssignees != null) applyAssignees(t, incomingAssignees);
 
     if (!ensureOrgOnDoc(Task, t, req)) {
       return res.status(400).json({ error: "orgId missing/invalid on token" });
@@ -902,95 +912,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
     await t.save();
     res.json(normalizeOut(t));
   } catch (e) {
-    console.error("PATCH /tasks/:id error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* --------------------------- PARTIAL UPDATE (PATCH) --------------------------- */
-router.patch("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-    const b = req.body || {};
-
-    if (b.title != null) t.title = String(b.title).trim();
-    if (b.description != null) t.description = String(b.description);
-    if (b.priority != null) t.priority = String(b.priority).toLowerCase();
-    if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
-    if (b.status != null) t.status = normalizeStatus(b.status);
-
-    if (b.startDate != null || b.startAt != null) {
-      t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
-    }
-
-    if (b.dueAt != null || b.dueDate != null || b.deadline != null || b.deadlineAt != null) {
-      const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
-      const d = rawDue ? new Date(rawDue) : undefined;
-      t.dueDate = d;
-      t.dueAt = d;
-    }
-
-    applyPlanningFields(t, b);
-
-    if (b.projectId !== undefined) t.projectId = OID(b.projectId);
-    if (b.groupId !== undefined) t.groupId = OID(b.groupId);
-
-    let incomingAssignees = null;
-
-    if (Object.prototype.hasOwnProperty.call(b, "assignedUserIds")) {
-      incomingAssignees = coerceObjectIdArray(b.assignedUserIds);
-    } else if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
-      incomingAssignees = Array.isArray(b.assignedTo) ? coerceObjectIdArray(b.assignedTo) : null;
-    } else if (Object.prototype.hasOwnProperty.call(b, "assignee") || Object.prototype.hasOwnProperty.call(b, "assigneeId")) {
-      const one = extractId(b.assignee || b.assigneeId);
-      if (one) incomingAssignees = [one];
-      else if (b.assignee === null || b.assigneeId === null) incomingAssignees = [];
-    }
-
-    if (b.dependentTaskIds !== undefined) {
-      t.dependentTaskIds = Array.isArray(b.dependentTaskIds)
-        ? b.dependentTaskIds.filter(isId).map((id) => new mongoose.Types.ObjectId(id))
-        : [];
-    }
-
-    if (b.enforceQRScan !== undefined) t.enforceQRScan = !!b.enforceQRScan;
-    if (b.enforceLocationCheck !== undefined) t.enforceLocationCheck = !!b.enforceLocationCheck;
-    if (b.locationGeoFence !== undefined) t.locationGeoFence = b.locationGeoFence || undefined;
-    if (b.geoFences !== undefined) t.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
-
-    if (b.estimatedDuration !== undefined) {
-      t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
-    }
-
-    try {
-      const vis = sanitizeVisibilityInput(b, isAdmin(req));
-      if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
-
-      if (vis.assignedUserIds != null && incomingAssignees == null) {
-        incomingAssignees = vis.assignedUserIds;
-      }
-
-      if (vis.assignedGroupIds != null) {
-        t.assignedGroupIds = vis.assignedGroupIds;
-        t.groupId = Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
-      }
-    } catch (err) {
-      return res.status(err.status || 400).json({ error: err.message || "visibility error" });
-    }
-
-    if (incomingAssignees != null) {
-      applyAssignees(t, incomingAssignees);
-    }
-
-    if (!ensureOrgOnDoc(Task, t, req)) {
-      return res.status(400).json({ error: "orgId missing/invalid on token" });
-    }
-
-    await t.save();
-    res.json(normalizeOut(t));
-  } catch (e) {
-    console.error("PATCH /tasks/:id error:", e);
+    console.error("PUT /tasks/:id error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -1010,7 +932,7 @@ router.post("/:id/action", requireAuth, async (req, res) => {
     if (!canSee && !adminOverride) return res.status(403).json({ error: "Forbidden" });
 
     if (action === "start" || action === "resume") {
-      const done = await Task.countDocuments({ _id: { $in: t.dependentTaskIds }, status: "completed" });
+      const done = await Task.countDocuments({ _id: { $in: t.dependentTaskIds }, status: "Finished" });
       if (done !== (t.dependentTaskIds?.length || 0) && !adminOverride) {
         return res.status(400).json({ error: "dependencies not completed" });
       }
@@ -1391,8 +1313,5 @@ router.delete("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"),
     res.status(500).json({ error: "Server error" });
   }
 });
-
-router.get("/_ping", (_req, res) => res.json({ ok: true }));
-router.post("/_ping", (_req, res) => res.json({ ok: true }));
 
 module.exports = router;
