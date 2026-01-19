@@ -148,6 +148,14 @@ app.use(cors(corsOptions));
 // Make sure preflight always responds cleanly
 app.options("*", cors(corsOptions));
 
+// --- Compatibility alias: allow /tasks/* to behave like /api/tasks/* ---
+app.use((req, _res, next) => {
+  if (req.url.startsWith("/tasks/")) {
+    req.url = "/api" + req.url;     // /tasks/... -> /api/tasks/...
+  }
+  next();
+});
+
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
