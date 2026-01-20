@@ -39,8 +39,26 @@ const ROLE_RANK = {
   admin: 5,
   superadmin: 6,
 };
+
 function rankOf(role) {
   return ROLE_RANK[normalizeRole(role)] || 0;
+}
+
+/* ------------------------- Global role helpers ------------------------- */
+function normalizeGlobalRole(r) {
+  if (!r) return "";
+  const s = String(r).trim().toLowerCase();
+  if (s === "super-admin") return "superadmin";
+  if (s === "support") return "support";
+  if (s === "superadmin") return "superadmin";
+  return "";
+}
+
+function isGlobalSuperadmin(reqUser) {
+  return (
+    normalizeGlobalRole(reqUser?.globalRole) === "superadmin" ||
+    reqUser?.isGlobalSuperadmin === true
+  );
 }
 
 /* ------------------------- Org header helpers -------------------------- */
@@ -55,6 +73,7 @@ function readOrgIdFrom(req) {
   const asObjectId = mongoose.isValidObjectId(chosen)
     ? new mongoose.Types.ObjectId(chosen)
     : null;
+
   return { id: chosen, objectId: asObjectId };
 }
 
@@ -72,11 +91,9 @@ function resolveOrgContext(req, _res, next) {
 
 function requireOrg(req, res, next) {
   if (!req.orgId) {
-    return res
-      .status(400)
-      .json({
-        error: 'Missing organization context. Send header "x-org-id: <orgId>".',
-      });
+    return res.status(400).json({
+      error: 'Missing organization context. Send header "x-org-id: <orgId>".',
+    });
   }
   return next();
 }
@@ -87,21 +104,17 @@ async function requireAuth(req, res, next) {
     const token = getTokenFrom(req);
     if (!token) return res.status(401).json({ error: "Missing token" });
 
-    // We rely on org context (your API already expects this)
+    // We rely on org context (tenant scoping)
     const got = readOrgIdFrom(req);
     if (!got?.id) {
-      return res
-        .status(400)
-        .json({
-          error:
-            'Missing organization context. Send header "x-org-id: <orgId>".',
-        });
+      return res.status(400).json({
+        error: 'Missing organization context. Send header "x-org-id: <orgId>".',
+      });
     }
 
     const admin = getFirebaseAdmin();
     const decoded = await admin.auth().verifyIdToken(token);
 
-    // decoded.uid, decoded.email, decoded.name etc.
     const firebaseUid = decoded.uid;
     const email = decoded.email
       ? String(decoded.email).trim().toLowerCase()
@@ -113,12 +126,10 @@ async function requireAuth(req, res, next) {
     if (orgPath) {
       if (orgPath.instance === "ObjectId") {
         if (!got.objectId) {
-          return res
-            .status(400)
-            .json({
-              error:
-                "Invalid orgId for this tenant. Send a valid ObjectId in x-org-id.",
-            });
+          return res.status(400).json({
+            error:
+              "Invalid orgId for this tenant. Send a valid ObjectId in x-org-id.",
+          });
         }
         orgWhere = { orgId: got.objectId };
       } else {
@@ -134,11 +145,9 @@ async function requireAuth(req, res, next) {
     });
 
     if (!user) {
-      // If you want to allow “auto-provision”, we can add it later.
-      // For now: block — admin must create/import users first.
-      return res
-        .status(401)
-        .json({ error: "User not found in this organisation" });
+      return res.status(401).json({
+        error: "User not found in this organisation",
+      });
     }
 
     // Link firebaseUid on first match via email (one-time “bind”)
@@ -152,8 +161,12 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({ error: "User account is inactive" });
     }
 
-    // Attach a clean req.user shape for the rest of your code
-    const roles = [normalizeRole(user.role || "worker")];
+    // Roles: prefer user.roles if present, else fallback to user.role
+    const roles =
+      Array.isArray(user.roles) && user.roles.length
+        ? user.roles.map(normalizeRole)
+        : [normalizeRole(user.role || "worker")];
+
     const primary = roles.sort((a, b) => rankOf(b) - rankOf(a))[0] || "worker";
 
     req.user = {
@@ -166,7 +179,6 @@ async function requireAuth(req, res, next) {
       role: primary,
       roles,
       orgId: user.orgId,
-      // keep these if your code uses them
       globalRole: user.globalRole || undefined,
       isGlobalSuperadmin: user.isGlobalSuperadmin === true,
     };
@@ -195,17 +207,17 @@ function requireRole(...allowed) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: "Not authenticated" });
 
+    // Global override: global superadmin always allowed
     if (
-      normalizeRole(req.user.globalRole) === "superadmin" ||
-      normalizeRole(req.user.role) === "superadmin" ||
-      req.user.isGlobalSuperadmin === true
+      isGlobalSuperadmin(req.user) ||
+      normalizeRole(req.user.role) === "superadmin"
     ) {
       return next();
     }
 
     const haveRank = rankOf(req.user.role);
     const hasExplicit = (req.user.roles || []).some((r) =>
-      allowedCanon.includes(r),
+      allowedCanon.includes(normalizeRole(r)),
     );
 
     if (haveRank >= requiredRank || hasExplicit) return next();
@@ -217,19 +229,19 @@ function requireRole(...allowed) {
 function requireGlobal(...globals) {
   const set = new Set(globals.map((g) => String(g).toLowerCase()));
   return (req, res, next) => {
-    const g = String(req.user?.globalRole || "").toLowerCase();
+    const g = normalizeGlobalRole(req.user?.globalRole);
     if (set.has(g)) return next();
     return res.status(403).json({ error: "Global access required" });
   };
 }
 
 function requireGlobalSuperadmin(req, res, next) {
-  const globalRole = normalizeRole(req.user?.globalRole);
-  const primaryRole = normalizeRole(req.user?.role);
-  const flag = req.user?.isGlobalSuperadmin === true;
-
-  if (globalRole === "superadmin" || primaryRole === "superadmin" || flag)
+  if (
+    isGlobalSuperadmin(req.user) ||
+    normalizeRole(req.user?.role) === "superadmin"
+  ) {
     return next();
+  }
   return res.status(403).json({ error: "Global access required" });
 }
 
