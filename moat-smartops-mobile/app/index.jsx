@@ -1,7 +1,12 @@
 // app/index.jsx
-import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { auth } from "../firebase"; // ✅ correct ONLY if firebase.js is in project root
+
+import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import {
+  Alert,
   Image,
   Modal,
   Pressable,
@@ -10,60 +15,68 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-} from 'react-native';
-import { initDatabase } from '../database';
+} from "react-native";
 
-const THEME_COLOR = '#22a6b3';
+import { initDatabase } from "../database";
+
+const THEME_COLOR = "#22a6b3";
+const TOKEN_KEY = "@moat:token";
 
 export default function LoginScreen() {
   const router = useRouter();
 
-  // Initialise SQLite DB once when this screen mounts
   useEffect(() => {
     (async () => {
       try {
         await initDatabase();
       } catch (e) {
-        console.log('[DB] initDatabase error in index.jsx', e);
+        console.log("[DB] initDatabase error in index.jsx", e);
       }
     })();
   }, []);
 
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [registerVisible, setRegisterVisible] = useState(false);
 
-  // For now this just goes to Home; later we'll call your backend here
-  const handleLogin = () => {
-    if (!username || !password) {
-      // later we can show a nicer validation message
-      return;
+  const handleLogin = async () => {
+    try {
+      if (!username || !password) return;
+
+      const email = username.trim();
+      const pass = password; // (optional) pass.trim()
+
+      const cred = await signInWithEmailAndPassword(auth, email, pass);
+      const token = await cred.user.getIdToken();
+
+      await AsyncStorage.setItem(TOKEN_KEY, token);
+
+      router.replace("/home");
+    } catch (e) {
+      console.log("Login error", e);
+      Alert.alert("Login failed", "Check your email/password and try again.");
     }
-    router.replace('/home');
   };
 
   const handleForgotPassword = () => {
-    console.log('Forgot password pressed for', username);
+    console.log("Forgot password pressed for", username);
   };
 
   const handleSubmitRegistrationRequest = () => {
-    // Later: send this to backend as "org setup / trial request"
     setRegisterVisible(false);
   };
 
   return (
     <View style={styles.container}>
-      {/* Logo / title */}
       <View style={styles.logoContainer}>
         <Image
-          source={require('../assets/moat-logo.png')}
+          source={require("../assets/moat-logo.png")}
           style={styles.logoImage}
           resizeMode="contain"
         />
         <Text style={styles.appTitle}>Smart Operations Suite</Text>
       </View>
 
-      {/* Login form */}
       <View style={styles.form}>
         <TextInput
           style={styles.input}
@@ -101,7 +114,6 @@ export default function LoginScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Registration "lightbox" modal */}
       <Modal
         visible={registerVisible}
         transparent
@@ -117,13 +129,11 @@ export default function LoginScreen() {
               placeholder="Organisation name"
               placeholderTextColor="#aaa"
             />
-
             <TextInput
               style={styles.input}
               placeholder="Contact person"
               placeholderTextColor="#aaa"
             />
-
             <TextInput
               style={styles.input}
               placeholder="Contact email"
@@ -131,8 +141,6 @@ export default function LoginScreen() {
               autoCapitalize="none"
               keyboardType="email-address"
             />
-
-            {/* Later we can add: plan selection, billing info etc. */}
 
             <View style={styles.modalButtonsRow}>
               <TouchableOpacity
@@ -150,7 +158,6 @@ export default function LoginScreen() {
             </View>
           </View>
 
-          {/* Close when tapping outside card */}
           <Pressable
             style={StyleSheet.absoluteFill}
             onPress={() => setRegisterVisible(false)}
@@ -164,13 +171,13 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: "#ffffff",
     paddingHorizontal: 24,
-    justifyContent: 'center',
-    paddingTop: 0, // move everything down a bit
+    justifyContent: "center",
+    paddingTop: 0,
   },
   logoContainer: {
-    alignItems: 'center',
+    alignItems: "center",
     marginBottom: 40,
   },
   logoImage: {
@@ -181,14 +188,14 @@ const styles = StyleSheet.create({
   appTitle: {
     marginTop: 0,
     fontSize: 24,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   form: {
-    width: '100%',
+    width: "100%",
   },
   input: {
     borderWidth: 1,
-    borderColor: '#ccc',
+    borderColor: "#ccc",
     borderRadius: 6,
     paddingHorizontal: 12,
     paddingVertical: 10,
@@ -196,50 +203,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   forgotContainer: {
-    alignItems: 'flex-end',
+    alignItems: "flex-end",
     marginBottom: 16,
   },
   forgotText: {
     fontSize: 12,
-    textDecorationLine: 'underline',
-    color: '#555',
+    textDecorationLine: "underline",
+    color: "#555",
   },
   primaryButton: {
     backgroundColor: THEME_COLOR,
     paddingVertical: 12,
     borderRadius: 6,
-    alignItems: 'center',
+    alignItems: "center",
     marginBottom: 12,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   secondaryButton: {
     marginTop: 8,
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: 'center',
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "center",
     paddingHorizontal: 24,
   },
   modalCard: {
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     borderRadius: 8,
     padding: 20,
     elevation: 5,
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 16,
-    textAlign: 'center',
+    textAlign: "center",
   },
   modalButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    justifyContent: "space-between",
     marginTop: 16,
   },
   modalButton: {
