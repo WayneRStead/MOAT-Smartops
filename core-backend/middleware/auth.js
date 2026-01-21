@@ -1,8 +1,19 @@
 // core-backend/middleware/auth.js
+// Drop-in replacement that supports BOTH:
+// 1) Firebase ID tokens (mobile / new auth)
+// 2) Legacy backend JWT tokens (existing web frontend) as a temporary fallback
+//
+// IMPORTANT:
+// - Keep JWT_SECRET in Render for now (legacy fallback needs it).
+// - Keep FIREBASE_SERVICE_ACCOUNT_JSON in Render (Firebase verify needs it).
+// - Your API still requires x-org-id header (tenant scoping).
+
+const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const { getFirebaseAdmin } = require("../firebaseAdmin");
 
+/* ------------------------------ token helper ------------------------------ */
 function getTokenFrom(req) {
   const h = req.headers["authorization"] || req.headers["Authorization"];
   if (!h) return null;
@@ -98,20 +109,70 @@ function requireOrg(req, res, next) {
   return next();
 }
 
+/* -------------------------- shared: build orgWhere -------------------------- */
+function buildOrgWhereOrThrow(req, got) {
+  // Your User model uses ObjectId orgId (per models/User.js you shared)
+  const orgPath = User?.schema?.path?.("orgId");
+  if (!orgPath) return {};
+
+  if (orgPath.instance === "ObjectId") {
+    if (!got?.objectId) {
+      const err = new Error(
+        "Invalid orgId for this tenant. Send a valid ObjectId in x-org-id."
+      );
+      err.status = 400;
+      throw err;
+    }
+    return { orgId: got.objectId };
+  }
+
+  // fallback if schema ever changes to String orgId
+  return { orgId: got?.id };
+}
+
+/* -------------------------- shared: attach req.user -------------------------- */
+function attachReqUser(req, user) {
+  const roles =
+    Array.isArray(user.roles) && user.roles.length
+      ? user.roles.map(normalizeRole)
+      : [normalizeRole(user.role || "worker")];
+
+  const primary = roles.sort((a, b) => rankOf(b) - rankOf(a))[0] || "worker";
+
+  req.user = {
+    _id: user._id,
+    id: user._id,
+    userId: user._id,
+    firebaseUid: user.firebaseUid,
+    email: user.email,
+    name: user.name,
+    role: primary,
+    roles,
+    orgId: user.orgId,
+    globalRole: user.globalRole || undefined,
+    isGlobalSuperadmin: user.isGlobalSuperadmin === true,
+  };
+}
+
 /* ------------------------------- requireAuth ------------------------------- */
 async function requireAuth(req, res, next) {
+  const token = getTokenFrom(req);
+  if (!token) return res.status(401).json({ error: "Missing token" });
+
+  // Tenant scoping is required in your API
+  const got = readOrgIdFrom(req);
+  if (!got?.id) {
+    return res.status(400).json({
+      error: 'Missing organization context. Send header "x-org-id: <orgId>".',
+    });
+  }
+
+  // Always set org fields used elsewhere
+  req.orgId = got.id;
+  req.orgObjectId = got.objectId || undefined;
+
+  // ---------- 1) Try Firebase ID token ----------
   try {
-    const token = getTokenFrom(req);
-    if (!token) return res.status(401).json({ error: "Missing token" });
-
-    // We rely on org context (tenant scoping)
-    const got = readOrgIdFrom(req);
-    if (!got?.id) {
-      return res.status(400).json({
-        error: 'Missing organization context. Send header "x-org-id: <orgId>".',
-      });
-    }
-
     const admin = getFirebaseAdmin();
     const decoded = await admin.auth().verifyIdToken(token);
 
@@ -120,22 +181,7 @@ async function requireAuth(req, res, next) {
       ? String(decoded.email).trim().toLowerCase()
       : "";
 
-    // Build org filter that matches your User orgId type
-    const orgPath = User?.schema?.path?.("orgId");
-    let orgWhere = {};
-    if (orgPath) {
-      if (orgPath.instance === "ObjectId") {
-        if (!got.objectId) {
-          return res.status(400).json({
-            error:
-              "Invalid orgId for this tenant. Send a valid ObjectId in x-org-id.",
-          });
-        }
-        orgWhere = { orgId: got.objectId };
-      } else {
-        orgWhere = { orgId: got.id };
-      }
-    }
+    const orgWhere = buildOrgWhereOrThrow(req, got);
 
     // Find user: prefer firebaseUid, fallback to email link
     let user = await User.findOne({
@@ -145,48 +191,67 @@ async function requireAuth(req, res, next) {
     });
 
     if (!user) {
-      return res.status(401).json({
-        error: "User not found in this organisation",
-      });
+      return res.status(401).json({ error: "User not found in this organisation" });
     }
 
-    // Link firebaseUid on first match via email (one-time “bind”)
+    // One-time “bind” firebaseUid on first match via email
     if (!user.firebaseUid) {
       user.firebaseUid = firebaseUid;
       await user.save();
     }
 
-    // Block inactive users
     if (user.active === false) {
       return res.status(403).json({ error: "User account is inactive" });
     }
 
-    // Roles: prefer user.roles if present, else fallback to user.role
-    const roles =
-      Array.isArray(user.roles) && user.roles.length
-        ? user.roles.map(normalizeRole)
-        : [normalizeRole(user.role || "worker")];
+    attachReqUser(req, user);
+    return next();
+  } catch (_firebaseErr) {
+    // fall through to legacy JWT verification
+  }
 
-    const primary = roles.sort((a, b) => rankOf(b) - rankOf(a))[0] || "worker";
+  // ---------- 2) Fallback: legacy backend JWT ----------
+  try {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
 
-    req.user = {
-      _id: user._id,
-      id: user._id,
-      userId: user._id,
-      firebaseUid: user.firebaseUid,
-      email: user.email,
-      name: user.name,
-      role: primary,
-      roles,
-      orgId: user.orgId,
-      globalRole: user.globalRole || undefined,
-      isGlobalSuperadmin: user.isGlobalSuperadmin === true,
-    };
+    const payload = jwt.verify(token, secret);
 
-    // Also set org fields used elsewhere
-    req.orgId = got.id;
-    req.orgObjectId = got.objectId || undefined;
+    const orgWhere = buildOrgWhereOrThrow(req, got);
 
+    const email = payload.email
+      ? String(payload.email).trim().toLowerCase()
+      : "";
+
+    const sub = payload.sub ? String(payload.sub).trim() : "";
+
+    // Find a matching user in the org
+    const or = [];
+    if (email) or.push({ email });
+    if (sub && mongoose.isValidObjectId(sub)) or.push({ _id: new mongoose.Types.ObjectId(sub) });
+    if (sub && !mongoose.isValidObjectId(sub)) or.push({ username: sub });
+
+    if (or.length === 0) {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
+    const user = await User.findOne({
+      ...orgWhere,
+      isDeleted: { $ne: true },
+      $or: or,
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: "User not found in this organisation" });
+    }
+
+    if (user.active === false) {
+      return res.status(403).json({ error: "User account is inactive" });
+    }
+
+    attachReqUser(req, user);
     return next();
   } catch (err) {
     console.log("[auth] verify failed:", err?.message || err);
@@ -217,7 +282,7 @@ function requireRole(...allowed) {
 
     const haveRank = rankOf(req.user.role);
     const hasExplicit = (req.user.roles || []).some((r) =>
-      allowedCanon.includes(normalizeRole(r)),
+      allowedCanon.includes(normalizeRole(r))
     );
 
     if (haveRank >= requiredRank || hasExplicit) return next();
@@ -248,6 +313,7 @@ function requireGlobalSuperadmin(req, res, next) {
 function getUser(req) {
   return req.user || null;
 }
+
 function getOrgId(req) {
   return req.orgId || req.user?.orgId || null;
 }

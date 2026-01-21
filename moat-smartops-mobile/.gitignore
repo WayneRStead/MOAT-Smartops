@@ -33,6 +33,21 @@ yarn-error.*
 # local env files
 .env*.local
 
+# --- Firebase / secrets ---
+firebase.js
+firebase.ts
+.env
+.env.*
+*.env
+
+# Android / iOS Firebase config files
+google-services.json
+GoogleService-Info.plist
+
+# Expo config that may include secrets
+app.config.js
+app.config.ts
+
 # typescript
 *.tsbuildinfo
 
@@ -41,3 +56,4 @@ app-example
 # generated native folders
 /ios
 /android
+
