@@ -1,12 +1,17 @@
 // core-backend/middleware/auth.js
-// Drop-in replacement that supports BOTH:
+// Supports BOTH:
 // 1) Firebase ID tokens (mobile / new auth)
 // 2) Legacy backend JWT tokens (existing web frontend) as a temporary fallback
 //
+// AUTH_MODE:
+// - "firebase" => only Firebase tokens accepted
+// - "jwt"      => only legacy JWT tokens accepted
+// - "dual"     => try Firebase, then fallback to JWT (recommended for now)
+//
 // IMPORTANT:
-// - Keep JWT_SECRET in Render for now (legacy fallback needs it).
-// - Keep FIREBASE_SERVICE_ACCOUNT_JSON in Render (Firebase verify needs it).
-// - Your API still requires x-org-id header (tenant scoping).
+// - Keep JWT_SECRET in Render for now (legacy fallback needs it)
+// - Keep FIREBASE_SERVICE_ACCOUNT_JSON in Render (Firebase verify needs it)
+// - Your API requires x-org-id header (tenant scoping)
 
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
@@ -111,7 +116,6 @@ function requireOrg(req, res, next) {
 
 /* -------------------------- shared: build orgWhere -------------------------- */
 function buildOrgWhereOrThrow(req, got) {
-  // Your User model uses ObjectId orgId (per models/User.js you shared)
   const orgPath = User?.schema?.path?.("orgId");
   if (!orgPath) return {};
 
@@ -131,7 +135,7 @@ function buildOrgWhereOrThrow(req, got) {
 }
 
 /* -------------------------- shared: attach req.user -------------------------- */
-function attachReqUser(req, user) {
+function attachReqUser(req, user, authPath) {
   const roles =
     Array.isArray(user.roles) && user.roles.length
       ? user.roles.map(normalizeRole)
@@ -151,6 +155,7 @@ function attachReqUser(req, user) {
     orgId: user.orgId,
     globalRole: user.globalRole || undefined,
     isGlobalSuperadmin: user.isGlobalSuperadmin === true,
+    authPath, // "firebase" | "jwt" (debug helper)
   };
 }
 
@@ -171,48 +176,63 @@ async function requireAuth(req, res, next) {
   req.orgId = got.id;
   req.orgObjectId = got.objectId || undefined;
 
+  const mode = String(process.env.AUTH_MODE || "dual").toLowerCase();
+  const allowFirebase = mode === "firebase" || mode === "dual";
+  const allowJwt = mode === "jwt" || mode === "dual";
+
   // ---------- 1) Try Firebase ID token ----------
-  try {
-    const admin = getFirebaseAdmin();
-    const decoded = await admin.auth().verifyIdToken(token);
+  if (allowFirebase) {
+    try {
+      const admin = getFirebaseAdmin();
+      const decoded = await admin.auth().verifyIdToken(token);
 
-    const firebaseUid = decoded.uid;
-    const email = decoded.email
-      ? String(decoded.email).trim().toLowerCase()
-      : "";
+      const firebaseUid = decoded.uid;
+      const email = decoded.email
+        ? String(decoded.email).trim().toLowerCase()
+        : "";
 
-    const orgWhere = buildOrgWhereOrThrow(req, got);
+      const orgWhere = buildOrgWhereOrThrow(req, got);
 
-    // Find user: prefer firebaseUid, fallback to email link
-    let user = await User.findOne({
-      ...orgWhere,
-      isDeleted: { $ne: true },
-      $or: [{ firebaseUid }, ...(email ? [{ email }] : [])],
-    });
+      // Find user: prefer firebaseUid, fallback to email link
+      let user = await User.findOne({
+        ...orgWhere,
+        isDeleted: { $ne: true },
+        $or: [{ firebaseUid }, ...(email ? [{ email }] : [])],
+      });
 
-    if (!user) {
-      return res
-        .status(401)
-        .json({ error: "User not found in this organisation" });
+      if (!user) {
+        // In firebase-only mode, this should hard-fail here
+        if (mode === "firebase") {
+          return res
+            .status(401)
+            .json({ error: "User not found in this organisation" });
+        }
+        // In dual mode, we allow fallback to JWT below
+        throw new Error("firebase-user-not-found");
+      }
+
+      // One-time “bind” firebaseUid on first match via email
+      if (!user.firebaseUid) {
+        user.firebaseUid = firebaseUid;
+        await user.save();
+      }
+
+      if (user.active === false) {
+        return res.status(403).json({ error: "User account is inactive" });
+      }
+
+      attachReqUser(req, user, "firebase");
+      return next();
+    } catch (_firebaseErr) {
+      // fall through to legacy JWT verification (if allowed)
     }
-
-    // One-time “bind” firebaseUid on first match via email
-    if (!user.firebaseUid) {
-      user.firebaseUid = firebaseUid;
-      await user.save();
-    }
-
-    if (user.active === false) {
-      return res.status(403).json({ error: "User account is inactive" });
-    }
-
-    attachReqUser(req, user);
-    return next();
-  } catch (_firebaseErr) {
-    // fall through to legacy JWT verification
   }
 
   // ---------- 2) Fallback: legacy backend JWT ----------
+  if (!allowJwt) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
   try {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -232,9 +252,15 @@ async function requireAuth(req, res, next) {
     // Find a matching user in the org
     const or = [];
     if (email) or.push({ email });
-    if (sub && mongoose.isValidObjectId(sub))
+
+    // IMPORTANT: keep your working behavior:
+    // - if sub is an ObjectId -> match _id
+    // - else -> match username
+    if (sub && mongoose.isValidObjectId(sub)) {
       or.push({ _id: new mongoose.Types.ObjectId(sub) });
-    if (sub && !mongoose.isValidObjectId(sub)) or.push({ username: sub });
+    } else if (sub) {
+      or.push({ username: sub });
+    }
 
     if (or.length === 0) {
       return res.status(401).json({ error: "Invalid or expired token" });
@@ -256,7 +282,7 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({ error: "User account is inactive" });
     }
 
-    attachReqUser(req, user);
+    attachReqUser(req, user, "jwt");
     return next();
   } catch (err) {
     console.log("[auth] verify failed:", err?.message || err);
@@ -277,7 +303,6 @@ function requireRole(...allowed) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: "Not authenticated" });
 
-    // Global override: global superadmin always allowed
     if (
       isGlobalSuperadmin(req.user) ||
       normalizeRole(req.user.role) === "superadmin"
