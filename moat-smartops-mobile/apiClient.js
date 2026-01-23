@@ -4,8 +4,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 export const TOKEN_KEY = "@moat:token";
 export const ORG_KEY = "@moat:orgId";
 
-// ✅ Put your Render backend base URL here
-// Example: https://core-backend.onrender.com
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL || "https://YOUR-RENDER-URL";
 
@@ -23,14 +21,7 @@ export async function getAuthHeaders() {
   return { headers, token, orgId };
 }
 
-export async function apiPost(path, body) {
-  const { headers } = await getAuthHeaders();
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body ?? {}),
-  });
-
+async function parseResponse(res) {
   const text = await res.text();
   let json = null;
   try {
@@ -48,4 +39,23 @@ export async function apiPost(path, body) {
   }
 
   return json;
+}
+
+export async function apiGet(path) {
+  const { headers } = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "GET",
+    headers,
+  });
+  return parseResponse(res);
+}
+
+export async function apiPost(path, body) {
+  const { headers } = await getAuthHeaders();
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body ?? {}),
+  });
+  return parseResponse(res);
 }

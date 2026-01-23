@@ -1,4 +1,6 @@
-import { useRouter } from 'expo-router';
+// app/home.jsx
+import { useRouter } from "expo-router";
+import { useMemo } from "react";
 import {
   Image,
   Pressable,
@@ -7,17 +9,20 @@ import {
   Text,
   TouchableOpacity,
   View,
-} from 'react-native';
+} from "react-native";
 
 export default function HomeScreen() {
   const router = useRouter();
 
   // Later these can come from the backend
-  const myTasks = {
-    overdue: 3,
-    inProgress: 7,
-    completed: 12,
-  };
+  const myTasks = useMemo(
+    () => ({
+      overdue: 3,
+      inProgress: 7,
+      completed: 12,
+    }),
+    [],
+  );
 
   const totalTasks =
     myTasks.overdue + myTasks.inProgress + myTasks.completed || 1;
@@ -25,34 +30,40 @@ export default function HomeScreen() {
   // Module definitions with icons
   const modules = [
     {
-      key: 'production',
-      label: 'Productivity',
-      icon: require('../assets/production.png'),
+      key: "production",
+      label: "Productivity",
+      icon: require("../assets/production.png"),
+      route: "/production",
     },
     {
-      key: 'clocking',
-      label: 'Clocking',
-      icon: require('../assets/clockings.png'),
+      key: "clocking",
+      label: "Clocking",
+      icon: require("../assets/clockings.png"),
+      route: "/clocking",
     },
     {
-      key: 'logbook',
-      label: 'Vehicle Logbook',
-      icon: require('../assets/vehicle-logbook.png'),
+      key: "logbook",
+      label: "Vehicle Logbook",
+      icon: require("../assets/vehicle-logbook.png"),
+      route: "/logbook",
     },
     {
-      key: 'assets',
-      label: 'Assets',
-      icon: require('../assets/assets.png'),
+      key: "assets",
+      label: "Assets",
+      icon: require("../assets/assets.png"),
+      route: "/assets",
     },
     {
-      key: 'inspections',
-      label: 'Inspections',
-      icon: require('../assets/inspections.png'),
+      key: "inspections",
+      label: "Inspections",
+      icon: require("../assets/inspections.png"),
+      route: "/inspections",
     },
     {
-      key: 'documents',
-      label: 'Documents',
-      icon: require('../assets/documents.png'),
+      key: "documents",
+      label: "Documents",
+      icon: require("../assets/documents.png"),
+      route: "/documents",
     },
   ];
 
@@ -61,18 +72,29 @@ export default function HomeScreen() {
       {/* Branding / Header */}
       <View style={styles.header}>
         <View style={styles.logoContainer}>
-          <Pressable
-            onLongPress={() => router.push('/history')}
-            delayLongPress={1200}
-          >
+          <Pressable onPress={() => router.replace("/home")}>
             <Image
-              source={require('../assets/moat-logo.png')}
+              source={require("../assets/moat-logo.png")}
               style={styles.logoImage}
               resizeMode="contain"
             />
           </Pressable>
         </View>
         <Text style={styles.appTitle}>Smart Operations Suite</Text>
+      </View>
+
+      {/* QUICK ACTION TILES (NEW) */}
+      <View style={styles.quickRow}>
+        <ActionTile
+          label="Offline & Sync"
+          icon={require("../assets/offline.png")} // add icon or swap to an existing one
+          onPress={() => router.push("/offline")}
+        />
+        <ActionTile
+          label="History"
+          icon={require("../assets/history.png")} // add icon or swap
+          onPress={() => router.push("/history")}
+        />
       </View>
 
       {/* Task / milestone overview */}
@@ -90,15 +112,15 @@ export default function HomeScreen() {
           {/* Status breakdown */}
           <View style={styles.statusList}>
             <Text style={styles.statusItem}>
-              Overdue:{' '}
+              Overdue:{" "}
               <Text style={styles.statusOverdue}>{myTasks.overdue}</Text>
             </Text>
             <Text style={styles.statusItem}>
-              In progress:{' '}
+              In progress:{" "}
               <Text style={styles.statusInProgress}>{myTasks.inProgress}</Text>
             </Text>
             <Text style={styles.statusItem}>
-              Completed:{' '}
+              Completed:{" "}
               <Text style={styles.statusCompleted}>{myTasks.completed}</Text>
             </Text>
           </View>
@@ -120,21 +142,7 @@ export default function HomeScreen() {
               key={m.key}
               label={m.label}
               icon={m.icon}
-              onPress={() => {
-                if (m.key === 'production') {
-                  router.push('/production');
-                } else if (m.key === 'clocking') {
-                  router.push('/clocking');
-                } else if (m.key === 'logbook') {
-                  router.push('/logbook');
-                } else if (m.key === 'assets') {
-                  router.push('/assets');
-                } else if (m.key === 'inspections') {
-                  router.push('/inspections');
-                } else if (m.key === 'documents') {
-                  router.push('/documents');
-                }
-              }}
+              onPress={() => router.push(m.route)}
             />
           ))}
         </View>
@@ -143,32 +151,55 @@ export default function HomeScreen() {
   );
 }
 
+function ActionTile({ label, icon, onPress }) {
+  return (
+    <TouchableOpacity
+      style={styles.actionTile}
+      onPress={onPress}
+      activeOpacity={0.85}
+    >
+      <View style={styles.actionIconWrap}>
+        <Image
+          source={icon}
+          style={styles.actionIconImage}
+          resizeMode="contain"
+        />
+      </View>
+      <Text style={styles.actionLabel}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 function ModuleTile({ label, icon, onPress }) {
   return (
     <TouchableOpacity style={styles.tile} onPress={onPress} activeOpacity={0.8}>
       <View style={styles.tileIconPlaceholder}>
-        <Image source={icon} style={styles.tileIconImage} resizeMode="contain" />
+        <Image
+          source={icon}
+          style={styles.tileIconImage}
+          resizeMode="contain"
+        />
       </View>
       <Text style={styles.tileLabel}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-const THEME_COLOR = '#22a6b3';
+const THEME_COLOR = "#22a6b3";
 
 const styles = StyleSheet.create({
   container: {
     paddingTop: 40,
     paddingHorizontal: 16,
     paddingBottom: 32,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: "#f5f5f5",
   },
   header: {
-    alignItems: 'center',
-    marginBottom: 16,
+    alignItems: "center",
+    marginBottom: 10,
   },
   logoContainer: {
-    alignItems: 'center',
+    alignItems: "center",
   },
   logoImage: {
     width: 200,
@@ -177,10 +208,46 @@ const styles = StyleSheet.create({
   appTitle: {
     marginTop: -20,
     fontSize: 24,
-    fontWeight: '500',
+    fontWeight: "500",
   },
+
+  // NEW quick actions row
+  quickRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8,
+    marginBottom: 14,
+  },
+  actionTile: {
+    width: "48%",
+    backgroundColor: "#ffffff",
+    borderRadius: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    elevation: 2,
+  },
+  actionIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+  },
+  actionIconImage: {
+    width: 44,
+    height: 44,
+  },
+  actionLabel: {
+    fontSize: 13,
+    textAlign: "center",
+    fontWeight: "600",
+    color: THEME_COLOR,
+  },
+
   card: {
-    backgroundColor: '#ffffff',
+    backgroundColor: "#ffffff",
     borderRadius: 10,
     padding: 16,
     marginBottom: 16,
@@ -188,17 +255,17 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 4,
   },
   cardSubtitle: {
     fontSize: 12,
-    color: '#666',
+    color: "#666",
     marginBottom: 12,
   },
   overviewRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     marginBottom: 12,
   },
   donutPlaceholder: {
@@ -207,17 +274,17 @@ const styles = StyleSheet.create({
     borderRadius: 40,
     borderWidth: 6,
     borderColor: THEME_COLOR,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     marginRight: 16,
   },
   donutCenterText: {
     fontSize: 18,
-    fontWeight: '700',
+    fontWeight: "700",
   },
   donutLabel: {
     fontSize: 10,
-    color: '#666',
+    color: "#666",
   },
   statusList: {
     flex: 1,
@@ -227,57 +294,57 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   statusOverdue: {
-    color: '#e74c3c',
-    fontWeight: '600',
+    color: "#e74c3c",
+    fontWeight: "600",
   },
   statusInProgress: {
-    color: '#f39c12',
-    fontWeight: '600',
+    color: "#f39c12",
+    fontWeight: "600",
   },
   statusCompleted: {
-    color: '#27ae60',
-    fontWeight: '600',
+    color: "#27ae60",
+    fontWeight: "600",
   },
   trendPlaceholder: {
     height: 40,
     borderRadius: 6,
-    backgroundColor: '#f0f0f0',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: "#f0f0f0",
+    alignItems: "center",
+    justifyContent: "center",
   },
   trendText: {
     fontSize: 11,
-    color: '#777',
+    color: "#777",
   },
   modulesContainer: {
     marginTop: 8,
   },
   modulesTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 8,
   },
   modulesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
   },
   tile: {
-    width: '48%',
-    backgroundColor: '#ffffff',
+    width: "48%",
+    backgroundColor: "#ffffff",
     borderRadius: 10,
     paddingVertical: 16,
     paddingHorizontal: 8,
     marginBottom: 12,
-    alignItems: 'center',
+    alignItems: "center",
     elevation: 2,
   },
   tileIconPlaceholder: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     marginBottom: 8,
   },
   tileIconImage: {
@@ -286,6 +353,6 @@ const styles = StyleSheet.create({
   },
   tileLabel: {
     fontSize: 13,
-    textAlign: 'center',
+    textAlign: "center",
   },
 });
