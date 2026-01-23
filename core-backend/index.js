@@ -100,10 +100,6 @@ const filesRoutes = require("./routes/files");
 app.use("/files", filesRoutes);
 app.use("/api/files", filesRoutes);
 
-const mobileRouter = require("./routes/mobile");
-app.use("/api/mobile", mobileRouter);
-app.use("/mobile", mobileRouter);
-
 /* ---------------------------- App Middleware --------------------------- */
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
@@ -175,6 +171,18 @@ if (superAdminRouter) {
 const publicAuthRouter = require("./routes/publicAuth");
 app.use("/public", publicAuthRouter);
 app.use("/api/public", publicAuthRouter);
+
+/* ------------------------------ Auth Routes ---------------------------- */
+app.use("/auth", authRouter);
+app.use("/api/auth", authRouter);
+
+/* -------------------------------- Health -------------------------------- */
+app.get("/health", (_req, res) =>
+  res.json({ ok: true, time: new Date().toISOString() }),
+);
+app.get("/api/health", (_req, res) =>
+  res.json({ ok: true, time: new Date().toISOString() }),
+);
 
 /* -------------------- GridFS fallback for vehicle trip photos -------------------- */
 function getTripsBucket() {
@@ -466,19 +474,30 @@ app.use("/api/files", express.static(uploadsRoot, staticOpts));
 app.use("/uploads", express.static(uploadsRoot, staticOpts));
 app.use("/api/uploads", express.static(uploadsRoot, staticOpts));
 
-/* ------------------------------ Auth Routes ---------------------------- */
-app.use("/auth", authRouter);
-app.use("/api/auth", authRouter);
-
-/* -------------------------------- Health -------------------------------- */
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString() }),
-);
-app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString() }),
-);
-
 /* --------------------------- Protected Routers -------------------------- */
+
+// ✅ MOBILE ROUTER MUST BE PROTECTED (so it has req.user + org context)
+const mobileRouter = require("./routes/mobile");
+app.use(
+  "/mobile",
+  requireAuth,
+  resolveOrgContext,
+  requireOrg,
+  enforceTrial,
+  touchOrgActivity,
+  computeAccessibleUserIds,
+  mobileRouter,
+);
+app.use(
+  "/api/mobile",
+  requireAuth,
+  resolveOrgContext,
+  requireOrg,
+  enforceTrial,
+  touchOrgActivity,
+  computeAccessibleUserIds,
+  mobileRouter,
+);
 
 // Clockings
 app.use(
