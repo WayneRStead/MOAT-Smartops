@@ -51,6 +51,7 @@ export default function LoginScreen() {
 
       // Save token for API calls
       await AsyncStorage.setItem(TOKEN_KEY, token);
+      console.log("TOKEN:", token);
 
       // Clear org so user must select (prevents wrong-org issues during testing)
       await AsyncStorage.removeItem(ORG_KEY);
