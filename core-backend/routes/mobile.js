@@ -1,9 +1,7 @@
 // core-backend/routes/mobile.js
 const express = require("express");
 const router = express.Router();
-
 const mongoose = require("mongoose");
-const Org = require("../models/Org"); // <-- required for bootstrap org list
 
 const {
   requireAuth,
@@ -11,10 +9,54 @@ const {
   requireOrg,
 } = require("../middleware/auth");
 
-/* ------------------------------------------------------------------ */
-/* Offline event ingestion model                                       */
-/* ------------------------------------------------------------------ */
+const User = require("../models/User");
+let Org = null;
+try {
+  Org = require("../models/Org");
+} catch {}
 
+/* ----------------------------- helpers ----------------------------- */
+function uniqObjectIdStrings(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const v of arr || []) {
+    const s = String(v || "").trim();
+    if (!s) continue;
+    if (!mongoose.isValidObjectId(s)) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+async function getUserOrgIds(user) {
+  // support a few possible shapes:
+  // - user.orgId (single org)
+  // - user.orgs (array of org ids)
+  // - user.organisations (array)
+  // - user.memberships [{ orgId }]
+  const ids = [];
+
+  if (user?.orgId) ids.push(String(user.orgId));
+
+  if (Array.isArray(user?.orgs)) {
+    for (const o of user.orgs) ids.push(String(o?._id || o));
+  }
+
+  if (Array.isArray(user?.organisations)) {
+    for (const o of user.organisations) ids.push(String(o?._id || o));
+  }
+
+  if (Array.isArray(user?.memberships)) {
+    for (const m of user.memberships)
+      ids.push(String(m?.orgId || m?.org || ""));
+  }
+
+  return uniqObjectIdStrings(ids);
+}
+
+/* ------------------------- OfflineEvent model ------------------------- */
 const OfflineEventSchema = new mongoose.Schema(
   {
     orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", index: true },
@@ -33,73 +75,68 @@ const OfflineEvent =
   mongoose.models.OfflineEvent ||
   mongoose.model("OfflineEvent", OfflineEventSchema);
 
-/* ------------------------------------------------------------------ */
-/* 1) BOOTSTRAP (AUTH ONLY — NO ORG REQUIRED)                          */
-/* ------------------------------------------------------------------ */
-/**
- * Returns the orgs available to the signed-in Firebase user.
- * This endpoint MUST NOT require x-org-id, because the user may not have chosen one yet.
- */
+/* ===================================================================== */
+/*  1) BOOTSTRAP (NO ORG HEADER REQUIRED)                                 */
+/* ===================================================================== */
+// Auth required, but NOT org context required.
 router.get("/bootstrap", requireAuth, async (req, res) => {
-  // Your requireAuth attaches req.user from Mongo User record
-  const user = req.user;
+  // req.user is already attached by requireAuth (from your middleware/auth.js)
+  const userId = req.user?._id;
 
-  // We support a few possible shapes because different seeds/schemas exist:
-  // - user.orgId (single org)
-  // - user.orgIds (array)
-  // - user.orgs (array of ids or objects)
-  const ids = [];
-
-  if (user?.orgId) ids.push(String(user.orgId));
-
-  if (Array.isArray(user?.orgIds)) {
-    for (const x of user.orgIds) if (x) ids.push(String(x));
+  const freshUser = await User.findById(userId).lean();
+  if (!freshUser) {
+    return res.status(401).json({ error: "User not found" });
   }
 
-  if (Array.isArray(user?.orgs)) {
-    for (const x of user.orgs) {
-      if (!x) continue;
-      // may be populated org object or just id
-      if (typeof x === "string") ids.push(String(x));
-      else if (x?._id) ids.push(String(x._id));
-      else if (mongoose.isValidObjectId(x)) ids.push(String(x));
-    }
+  const orgIds = await getUserOrgIds(freshUser);
+
+  // If there are no orgs linked, return empty list
+  if (!orgIds.length) {
+    return res.json({
+      ok: true,
+      user: {
+        _id: String(freshUser._id),
+        email: freshUser.email || "",
+        name: freshUser.name || "",
+        role: freshUser.role || "",
+        roles: freshUser.roles || [],
+      },
+      orgs: [],
+    });
   }
 
-  const uniqIds = [...new Set(ids)].filter((x) => mongoose.isValidObjectId(x));
+  // Prefer Org model if available
+  let orgs = orgIds.map((id) => ({ _id: id, name: "Organisation" }));
 
-  // If user only has one orgId in schema, this will return that org.
-  // If user has multiple orgs, we return them all for org-select.
-  let orgs = [];
-  if (uniqIds.length) {
-    orgs = await Org.find({ _id: { $in: uniqIds } })
-      .select("_id name status planCode")
-      .sort({ name: 1 })
+  if (Org) {
+    const docs = await Org.find({ _id: { $in: orgIds } })
+      .select("_id name")
       .lean();
+    orgs = (docs || []).map((o) => ({
+      _id: String(o._id),
+      name: o.name || "Organisation",
+    }));
   }
 
   return res.json({
     ok: true,
-    orgs,
-    // Optional convenience: backend may already know a "current" org
-    currentOrgId: user?.orgId ? String(user.orgId) : null,
     user: {
-      id: String(user?._id || ""),
-      email: user?.email || "",
-      name: user?.name || "",
-      role: user?.role || "",
+      _id: String(freshUser._id),
+      email: freshUser.email || "",
+      name: freshUser.name || "",
+      role: freshUser.role || "",
+      roles: freshUser.roles || [],
+      firebaseUid: freshUser.firebaseUid || null,
     },
+    orgs,
   });
 });
 
-/* ------------------------------------------------------------------ */
-/* 2) EVERYTHING BELOW REQUIRES ORG CONTEXT                             */
-/* ------------------------------------------------------------------ */
+/* ===================================================================== */
+/*  2) EVERYTHING ELSE (ORG REQUIRED)                                     */
+/* ===================================================================== */
 router.use(requireAuth, resolveOrgContext, requireOrg);
 
-/**
- * Raw ingestion endpoint for outbox events
- */
 router.post("/offline-events", async (req, res) => {
   const body = req.body || {};
 
