@@ -1,11 +1,12 @@
 // core-backend/routes/mobile.js
 const express = require("express");
 const router = express.Router();
-
 const mongoose = require("mongoose");
-const User = require("../models/User");
 
-// middleware
+const User = require("../models/User");
+const { getFirebaseAdmin } = require("../firebaseAdmin");
+
+// Existing org-scoped middleware for the rest
 const {
   requireAuth,
   resolveOrgContext,
@@ -18,6 +19,62 @@ try {
   Org = require("../models/Org");
 } catch {
   Org = null;
+}
+
+/* ------------------------------ helpers ------------------------------ */
+function getTokenFrom(req) {
+  const h = req.headers["authorization"] || req.headers["Authorization"];
+  if (!h) return null;
+  const [scheme, token] = String(h).split(" ");
+  if (scheme !== "Bearer" || !token) return null;
+  return token.trim();
+}
+
+/**
+ * ✅ Firebase-only auth for bootstrap (NO org header required)
+ * Attaches: req.bootstrapUser (mongoose user doc, lean)
+ */
+async function requireFirebaseOnly(req, res, next) {
+  try {
+    const token = getTokenFrom(req);
+    if (!token) return res.status(401).json({ error: "Missing token" });
+
+    const admin = getFirebaseAdmin();
+    const decoded = await admin.auth().verifyIdToken(token);
+
+    const firebaseUid = decoded.uid;
+    const email = decoded.email
+      ? String(decoded.email).trim().toLowerCase()
+      : "";
+
+    // Find user WITHOUT org scoping (bootstrap purpose)
+    const user = await User.findOne({
+      isDeleted: { $ne: true },
+      $or: [{ firebaseUid }, ...(email ? [{ email }] : [])],
+    }).lean();
+
+    if (!user) {
+      return res.status(401).json({
+        error: "User not found (not linked in backend database yet)",
+      });
+    }
+
+    // If firebaseUid missing on backend user but email matched, bind it
+    if (!user.firebaseUid && firebaseUid) {
+      try {
+        await User.updateOne({ _id: user._id }, { $set: { firebaseUid } });
+      } catch {
+        // don't block bootstrap if bind fails
+      }
+    }
+
+    req.bootstrapUser = user;
+    req.bootstrapFirebase = { firebaseUid, email };
+    return next();
+  } catch (e) {
+    console.log("[mobile/bootstrap] firebase verify failed:", e?.message || e);
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
 
 /* -------------------- Offline Events collection -------------------- */
@@ -40,33 +97,21 @@ const OfflineEvent =
   mongoose.model("OfflineEvent", OfflineEventSchema);
 
 /* ------------------------------------------------------------------ */
-/*  IMPORTANT: Bootstrap must NOT require org header                   */
+/*  ✅ BOOTSTRAP (NO org header required)                               */
 /* ------------------------------------------------------------------ */
-
-// Auth only (no requireOrg yet)
-router.use(requireAuth, resolveOrgContext);
-
 /**
  * GET /mobile/bootstrap
  * GET /api/mobile/bootstrap
  *
  * Returns org choices for current user (even if only one).
- * This runs BEFORE x-org-id exists on device.
+ * This is used BEFORE x-org-id exists on device.
  */
-router.get("/bootstrap", async (req, res) => {
-  const userId = req.user?._id;
+router.get("/bootstrap", requireFirebaseOnly, async (req, res) => {
+  const user = req.bootstrapUser;
 
-  if (!userId) {
-    return res.status(401).json({ error: "Not authenticated" });
-  }
-
-  // Load the full user (so we can safely access orgId, name, etc.)
-  const user = await User.findById(userId).lean();
-  if (!user) return res.status(401).json({ error: "User not found" });
-
-  // In your current system, user.orgId appears to be a single org ObjectId.
+  // In your current system, user.orgId is typically a single ObjectId
   const orgIds = [];
-  if (user.orgId) orgIds.push(String(user.orgId));
+  if (user?.orgId) orgIds.push(String(user.orgId));
 
   let orgs = orgIds.map((id) => ({ _id: id, name: "Organisation" }));
 
@@ -86,7 +131,6 @@ router.get("/bootstrap", async (req, res) => {
         };
       });
     } catch (e) {
-      // keep fallback org names
       console.warn("[mobile/bootstrap] Org lookup failed:", e?.message || e);
     }
   }
@@ -103,14 +147,17 @@ router.get("/bootstrap", async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Everything below here DOES require org context                     */
+/*  ✅ Everything below requires org header (normal API rules)          */
 /* ------------------------------------------------------------------ */
-router.use(requireOrg);
+router.use(requireAuth, resolveOrgContext, requireOrg);
 
+/**
+ * POST /mobile/offline-events
+ * POST /api/mobile/offline-events
+ */
 router.post("/offline-events", async (req, res) => {
   const body = req.body || {};
 
-  // orgId from header context (validated by requireOrg)
   const orgId = req.orgObjectId || req.user?.orgId;
   const userId = req.user?._id || null;
 
