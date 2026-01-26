@@ -1,3 +1,4 @@
+// src/hooks/useAuth.js
 import { useEffect, useState } from "react";
 import { getUser, whoAmI } from "../services/auth";
 
@@ -17,7 +18,9 @@ export function useAuth() {
         if (mounted) setLoading(false);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   return { user, loading };

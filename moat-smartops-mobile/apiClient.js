@@ -4,6 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 export const TOKEN_KEY = "@moat:token";
 export const ORG_KEY = "@moat:orgId";
 
+// Example: https://moat-smartops.onrender.com
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL || "https://YOUR-RENDER-URL";
 
@@ -11,10 +12,7 @@ export async function getAuthHeaders() {
   const token = await AsyncStorage.getItem(TOKEN_KEY);
   const orgId = await AsyncStorage.getItem(ORG_KEY);
 
-  const headers = {
-    "Content-Type": "application/json",
-  };
-
+  const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (orgId) headers["x-org-id"] = orgId;
 

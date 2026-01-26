@@ -1,7 +1,7 @@
-// app/index.jsx
+// moat-smartops-mobile/app/index.jsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "../firebase"; // ✅ correct ONLY if firebase.js is in project root
+import { auth } from "../firebase";
 
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
@@ -17,10 +17,10 @@ import {
   View,
 } from "react-native";
 
+import { ORG_KEY, TOKEN_KEY } from "../apiClient";
 import { initDatabase } from "../database";
 
 const THEME_COLOR = "#22a6b3";
-const TOKEN_KEY = "@moat:token";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -44,14 +44,19 @@ export default function LoginScreen() {
       if (!username || !password) return;
 
       const email = username.trim();
-      const pass = password; // (optional) pass.trim()
+      const pass = password;
 
       const cred = await signInWithEmailAndPassword(auth, email, pass);
       const token = await cred.user.getIdToken();
 
+      // Save token for API calls
       await AsyncStorage.setItem(TOKEN_KEY, token);
 
-      router.replace("/home");
+      // Clear org so user must select (prevents wrong-org issues during testing)
+      await AsyncStorage.removeItem(ORG_KEY);
+
+      // Go select org (bootstrap endpoint does not require x-org-id)
+      router.replace("/org-select");
     } catch (e) {
       console.log("Login error", e);
       Alert.alert("Login failed", "Check your email/password and try again.");

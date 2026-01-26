@@ -87,12 +87,12 @@ export default function HomeScreen() {
       <View style={styles.quickRow}>
         <ActionTile
           label="Offline & Sync"
-          icon={require("../assets/offline.png")} // add icon or swap to an existing one
+          icon={require("../assets/offline.png")}
           onPress={() => router.push("/offline")}
         />
         <ActionTile
           label="History"
-          icon={require("../assets/history.png")} // add icon or swap
+          icon={require("../assets/history.png")}
           onPress={() => router.push("/history")}
         />
       </View>
@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
     fontWeight: "600",
-    color: THEME_COLOR,
+    color: "#000000",
   },
 
   card: {

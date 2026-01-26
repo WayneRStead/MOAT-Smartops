@@ -3,17 +3,24 @@ const express = require("express");
 const router = express.Router();
 
 const mongoose = require("mongoose");
+const User = require("../models/User");
 
+// middleware
 const {
   requireAuth,
   resolveOrgContext,
   requireOrg,
 } = require("../middleware/auth");
 
-/* ------------------------------------------------------------------ */
-/*  Offline Events collection (raw ingestion)                          */
-/* ------------------------------------------------------------------ */
+// Optional Org model (safe)
+let Org = null;
+try {
+  Org = require("../models/Org");
+} catch {
+  Org = null;
+}
 
+/* -------------------- Offline Events collection -------------------- */
 const OfflineEventSchema = new mongoose.Schema(
   {
     orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", index: true },
@@ -33,198 +40,91 @@ const OfflineEvent =
   mongoose.model("OfflineEvent", OfflineEventSchema);
 
 /* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
+/*  IMPORTANT: Bootstrap must NOT require org header                   */
 /* ------------------------------------------------------------------ */
 
-function modelIfExists(name) {
-  try {
-    return mongoose.model(name);
-  } catch {
-    return null;
-  }
-}
-
-function asObjectIdOrNull(v) {
-  if (!v) return null;
-  if (v instanceof mongoose.Types.ObjectId) return v;
-  if (mongoose.isValidObjectId(v))
-    return new mongoose.Types.ObjectId(String(v));
-  return null;
-}
+// Auth only (no requireOrg yet)
+router.use(requireAuth, resolveOrgContext);
 
 /**
- * Task assignment query builder:
- * We don’t know your schema field names, so we try common ones.
- * Any of these matching the current user counts as “allocated to user”.
+ * GET /mobile/bootstrap
+ * GET /api/mobile/bootstrap
+ *
+ * Returns org choices for current user (even if only one).
+ * This runs BEFORE x-org-id exists on device.
  */
-function buildTaskAssignedToUserOr(reqUserId) {
-  const uid = asObjectIdOrNull(reqUserId);
-  if (!uid) return { _id: { $exists: false } }; // will match nothing safely
+router.get("/bootstrap", async (req, res) => {
+  const userId = req.user?._id;
 
-  return {
-    $or: [
-      // common patterns
-      { assignedTo: uid },
-      { assignedUserId: uid },
-      { assignee: uid },
-      { ownerId: uid },
-      { userId: uid },
-
-      // arrays of user ids
-      { assignedToIds: uid },
-      { assignedUsers: uid },
-      { assignees: uid },
-      { allocatedUsers: uid },
-
-      // embedded objects
-      { "assignedTo._id": uid },
-      { "assignee._id": uid },
-      { "owner._id": uid },
-    ],
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/*  Auth for all routes                                                */
-/* ------------------------------------------------------------------ */
-
-router.use(requireAuth, resolveOrgContext, requireOrg);
-
-/* ------------------------------------------------------------------ */
-/*  POST /api/mobile/offline-events                                    */
-/* ------------------------------------------------------------------ */
-
-router.post("/offline-events", async (req, res, next) => {
-  try {
-    const body = req.body || {};
-
-    const orgId = req.orgObjectId || req.user?.orgId;
-    const userId = req.user?._id || null;
-
-    const doc = await OfflineEvent.create({
-      orgId,
-      userId,
-      eventType: body.eventType || "unknown",
-      entityRef: body.entityRef || null,
-      payload: body.payload || {},
-      fileUris: Array.isArray(body.fileUris) ? body.fileUris : [],
-      createdAtClient: body.createdAt || null,
-    });
-
-    res.json({ ok: true, id: doc._id });
-  } catch (e) {
-    next(e);
+  if (!userId) {
+    return res.status(401).json({ error: "Not authenticated" });
   }
+
+  // Load the full user (so we can safely access orgId, name, etc.)
+  const user = await User.findById(userId).lean();
+  if (!user) return res.status(401).json({ error: "User not found" });
+
+  // In your current system, user.orgId appears to be a single org ObjectId.
+  const orgIds = [];
+  if (user.orgId) orgIds.push(String(user.orgId));
+
+  let orgs = orgIds.map((id) => ({ _id: id, name: "Organisation" }));
+
+  // If Org model exists, enrich names
+  if (Org && orgIds.length) {
+    try {
+      const docs = await Org.find({ _id: { $in: orgIds } })
+        .select("_id name orgName title")
+        .lean();
+
+      const byId = new Map(docs.map((d) => [String(d._id), d]));
+      orgs = orgIds.map((id) => {
+        const d = byId.get(id);
+        return {
+          _id: id,
+          name: d?.name || d?.orgName || d?.title || "Organisation",
+        };
+      });
+    } catch (e) {
+      // keep fallback org names
+      console.warn("[mobile/bootstrap] Org lookup failed:", e?.message || e);
+    }
+  }
+
+  return res.json({
+    ok: true,
+    user: {
+      _id: String(user._id),
+      name: user.name || "",
+      email: user.email || "",
+    },
+    orgs,
+  });
 });
 
 /* ------------------------------------------------------------------ */
-/*  GET /api/mobile/lists                                              */
-/*  Used by mobile app to cache dropdown lists for offline use         */
+/*  Everything below here DOES require org context                     */
 /* ------------------------------------------------------------------ */
+router.use(requireOrg);
 
-router.get("/lists", async (req, res, next) => {
-  try {
-    const orgId = req.orgObjectId || req.user?.orgId;
-    const userId = req.user?._id;
+router.post("/offline-events", async (req, res) => {
+  const body = req.body || {};
 
-    if (!orgId) {
-      return res.status(400).json({ error: "Missing org context" });
-    }
+  // orgId from header context (validated by requireOrg)
+  const orgId = req.orgObjectId || req.user?.orgId;
+  const userId = req.user?._id || null;
 
-    // Models (must exist in your backend)
-    const Task = modelIfExists("Task") || require("../models/Task");
-    const Project = modelIfExists("Project") || require("../models/Project");
-    const User = modelIfExists("User") || require("../models/User");
+  const doc = await OfflineEvent.create({
+    orgId,
+    userId,
+    eventType: body.eventType || "unknown",
+    entityRef: body.entityRef || null,
+    payload: body.payload || {},
+    fileUris: Array.isArray(body.fileUris) ? body.fileUris : [],
+    createdAtClient: body.createdAt || null,
+  });
 
-    // Optional model(s)
-    const TaskMilestone =
-      modelIfExists("TaskMilestone") || modelIfExists("Milestone") || null;
-
-    // 1) TASKS allocated to user (robust multi-field matching)
-    const taskWhere = {
-      orgId,
-      isDeleted: { $ne: true },
-      ...buildTaskAssignedToUserOr(userId),
-    };
-
-    const tasks = await Task.find(taskWhere)
-      .select(
-        "_id title name status state projectId project taskId code number milestone milestones",
-      )
-      .sort({ updatedAt: -1 })
-      .lean();
-
-    // 2) PROJECTS: prefer only projects referenced by these tasks (best UX)
-    const projectIds = new Set();
-    for (const t of tasks || []) {
-      const pid =
-        asObjectIdOrNull(t.projectId) ||
-        asObjectIdOrNull(t.project?._id) ||
-        asObjectIdOrNull(t.project);
-      if (pid) projectIds.add(String(pid));
-    }
-
-    let projects = [];
-    if (projectIds.size > 0) {
-      projects = await Project.find({
-        orgId,
-        isDeleted: { $ne: true },
-        _id: {
-          $in: Array.from(projectIds).map(
-            (x) => new mongoose.Types.ObjectId(x),
-          ),
-        },
-      })
-        .select("_id name title code number status")
-        .sort({ updatedAt: -1 })
-        .lean();
-    } else {
-      // fallback: if no tasks found, still allow “project selected” dropdown
-      projects = await Project.find({
-        orgId,
-        isDeleted: { $ne: true },
-      })
-        .select("_id name title code number status")
-        .sort({ updatedAt: -1 })
-        .limit(200)
-        .lean();
-    }
-
-    // 3) MILESTONES: if you have a milestone collection, return it.
-    // Otherwise, mobile can derive milestones from tasks (if tasks include milestone fields).
-    let milestones = [];
-    if (TaskMilestone) {
-      milestones = await TaskMilestone.find({
-        orgId,
-        isDeleted: { $ne: true },
-      })
-        .select("_id name title taskId projectId status order")
-        .sort({ order: 1, updatedAt: -1 })
-        .lean();
-    }
-
-    // 4) USERS: minimal list for “attach document to user” etc.
-    // If you later want access-scoped users only, we can tighten this.
-    const users = await User.find({
-      orgId,
-      isDeleted: { $ne: true },
-      active: { $ne: false },
-    })
-      .select("_id name email role roles")
-      .sort({ name: 1 })
-      .limit(500)
-      .lean();
-
-    res.json({
-      ok: true,
-      projects: projects || [],
-      tasks: tasks || [],
-      milestones: milestones || [],
-      users: users || [],
-    });
-  } catch (e) {
-    next(e);
-  }
+  res.json({ ok: true, id: doc._id });
 });
 
 module.exports = router;

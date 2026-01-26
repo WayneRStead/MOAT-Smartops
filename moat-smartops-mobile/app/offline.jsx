@@ -4,17 +4,16 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import {
-    Alert,
-    Image,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  Alert,
+  Image,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { ORG_KEY } from "../apiClient";
 import { syncOutbox } from "../syncOutbox";
-
 
 // Storage keys for cached lists (align to whatever your production.jsx uses)
 const CACHE_KEYS = {
@@ -175,7 +174,7 @@ export default function OfflineScreen() {
     <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.topBar}>
         <Image
-          source={require("../assets/moat-logo.png")}
+          source={require("../assets/offline-screen.png")}
           style={styles.logo}
           resizeMode="contain"
         />
@@ -248,7 +247,7 @@ const THEME_COLOR = "#22a6b3";
 
 const styles = StyleSheet.create({
   container: {
-    paddingTop: 40,
+    paddingTop: 60,
     paddingHorizontal: 16,
     paddingBottom: 32,
     backgroundColor: "#f5f5f5",
@@ -260,8 +259,8 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   logo: {
-    width: 160,
-    height: 60,
+    flex: 1,
+    height: 48,
   },
   homeButton: {
     padding: 4,
