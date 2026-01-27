@@ -15,10 +15,21 @@ try {
 } catch {}
 
 /**
+ * 🔎 Router version header so we can prove Render is running THIS file.
+ * Change the string if you ever need to confirm another deploy.
+ */
+const ROUTER_VERSION = "mobile-router-v2026-01-27-01";
+
+/**
  * IMPORTANT:
  * - requireAuth must NOT require org
  * - resolveOrgContext is safe (it only attaches orgId if present)
  */
+router.use((req, res, next) => {
+  res.setHeader("x-mobile-router-version", ROUTER_VERSION);
+  next();
+});
+
 router.use(requireAuth, resolveOrgContext);
 
 /**
@@ -29,12 +40,12 @@ router.use(requireAuth, resolveOrgContext);
 router.get("/bootstrap", async (req, res) => {
   try {
     res.setHeader("x-mobile-bootstrap", "HIT-BOOTSTRAP");
-    console.log("[mobile] BOOTSTRAP HIT");
+    console.log("[mobile] BOOTSTRAP HIT", new Date().toISOString());
 
     const user = req.user;
     if (!user?._id) return res.status(401).json({ error: "Not authenticated" });
 
-    // Your User model has a REQUIRED single orgId, so bootstrap can just return that.
+    // Your User model has a REQUIRED single orgId
     const orgId = user.orgId ? String(user.orgId) : null;
 
     if (!orgId) {
@@ -49,12 +60,7 @@ router.get("/bootstrap", async (req, res) => {
 
     return res.json({
       ok: true,
-      orgs: [
-        {
-          _id: orgId,
-          name: orgDoc?.name || "Organisation",
-        },
-      ],
+      orgs: [{ _id: orgId, name: orgDoc?.name || "Organisation" }],
     });
   } catch (e) {
     console.error("[mobile/bootstrap] error", e);
@@ -63,12 +69,19 @@ router.get("/bootstrap", async (req, res) => {
 });
 
 /**
- * Everything below here REQUIRES an org header.
- * This is correct because these routes should only be used AFTER org select.
+ * ✅ Debug endpoint (optional but very useful right now)
+ * This also does NOT require org.
  */
-router.use(requireOrg);
+router.get("/whoami", (req, res) => {
+  return res.json({
+    ok: true,
+    routerVersion: ROUTER_VERSION,
+    user: req.user || null,
+    orgIdAttached: req.orgId || null,
+  });
+});
 
-/* ------------------ Offline events ingestion ------------------ */
+/* ------------------ Offline events ingestion (ORG REQUIRED) ------------------ */
 const OfflineEventSchema = new mongoose.Schema(
   {
     orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", index: true },
@@ -87,7 +100,8 @@ const OfflineEvent =
   mongoose.models.OfflineEvent ||
   mongoose.model("OfflineEvent", OfflineEventSchema);
 
-router.post("/offline-events", async (req, res) => {
+// ✅ requireOrg is applied ONLY to this route now
+router.post("/offline-events", requireOrg, async (req, res) => {
   const body = req.body || {};
   const orgId = req.orgObjectId || req.user?.orgId;
   const userId = req.user?._id || null;
