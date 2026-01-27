@@ -94,6 +94,7 @@ router.get("/lists", requireOrg, async (req, res) => {
     let Task = null;
     let Milestone = null;
     let User = null;
+    let Inspection = null;
 
     try {
       Project = require("../models/Project");
@@ -106,6 +107,9 @@ router.get("/lists", requireOrg, async (req, res) => {
     } catch {}
     try {
       User = require("../models/User");
+    } catch {}
+    try {
+      Inspection = require("../models/Inspection");
     } catch {}
 
     const projects = Project?.find
@@ -136,12 +140,22 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    const inspections = Inspection?.find
+      ? await Inspection.find({ orgId, isDeleted: { $ne: true } })
+          .select({ _id: 1, name: 1, status: 1 })
+          .lean()
+      : [];
+
     return res.json({
       ok: true,
       projects,
       tasks,
       milestones,
       users,
+      assets: [],
+      vehicles: [],
+      inspections,
+      documents: [],
     });
   } catch (e) {
     console.error("[mobile/lists] error", e);
