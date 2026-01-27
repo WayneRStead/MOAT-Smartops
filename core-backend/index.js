@@ -58,7 +58,6 @@ const taskFencesRouter = require("./routes/task-fences");
 // --- Optional routers (guarded) ---
 const projectsRouter = safeRequire("./routes/projects");
 const documentsRouter = safeRequire("./routes/documents");
-const inspectionsRouter = safeRequire("./routes/inspections"); // legacy (fallback)
 const inspectionModuleRouter = safeRequire("./routes/inspectionModule"); // module variant
 const assetsRouter = safeRequire("./routes/assets");
 const vehiclesRouter = safeRequire("./routes/vehicles");
