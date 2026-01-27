@@ -28,6 +28,9 @@ router.use(requireAuth, resolveOrgContext);
  */
 router.get("/bootstrap", async (req, res) => {
   try {
+    res.setHeader("x-mobile-bootstrap", "HIT-BOOTSTRAP");
+    console.log("[mobile] BOOTSTRAP HIT");
+
     const user = req.user;
     if (!user?._id) return res.status(401).json({ error: "Not authenticated" });
 
