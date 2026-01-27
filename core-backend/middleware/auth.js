@@ -101,16 +101,48 @@ function resolveOrgContext(req, _res, next) {
 }
 
 function requireOrg(req, res, next) {
+  // FULL PATH (works behind routers like /api/mobile)
+  const fullPath = `${req.baseUrl || ""}${req.path || ""}`;
+
+  // ✅ Allow these endpoints to work BEFORE org selection
+  const isBootstrap =
+    fullPath === "/api/mobile/bootstrap" ||
+    fullPath === "/mobile/bootstrap" ||
+    fullPath === "/api/mobile/whoami" ||
+    fullPath === "/mobile/whoami";
+
+  // 1) If org header/query/body provided, use it normally
   const got = readOrgIdFrom(req);
-  if (!got?.id) {
-    return res.status(400).json({
-      error: 'Missing organization context. Send header "x-org-id: <orgId>".',
-    });
+  if (got?.id) {
+    req.orgId = got.id;
+    req.orgObjectId = got.objectId || undefined;
+    return next();
   }
-  // attach for downstream
-  req.orgId = got.id;
-  req.orgObjectId = got.objectId || undefined;
-  return next();
+
+  // 2) If no org provided BUT we have an authenticated user with a single orgId,
+  //    we can safely use that (this fixes your bootstrap loop immediately)
+  if (req.user?.orgId) {
+    const id = String(req.user.orgId);
+    req.orgId = id;
+    req.orgObjectId = mongoose.isValidObjectId(id)
+      ? new mongoose.Types.ObjectId(id)
+      : undefined;
+
+    // ✅ For bootstrap/whoami this is exactly what we want.
+    // ✅ For other routes, this also helps if your users only ever have one org.
+    return next();
+  }
+
+  // 3) If this is bootstrap/whoami and we STILL don't have org, allow it through
+  //    (bootstrap will return empty org list)
+  if (isBootstrap) {
+    return next();
+  }
+
+  // 4) Everything else must have org context
+  return res.status(400).json({
+    error: 'Missing organization context. Send header "x-org-id: <orgId>".',
+  });
 }
 
 /* -------------------------- shared: attach req.user -------------------------- */
