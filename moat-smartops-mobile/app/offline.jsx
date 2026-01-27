@@ -1,8 +1,7 @@
-// app/offline.jsx
-// app/offline.jsx
+// moat-smartops-mobile/app/offline.jsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Image,
@@ -12,27 +11,35 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { ORG_KEY } from "../apiClient";
+import { apiGet, ORG_KEY } from "../apiClient";
 import { syncOutbox } from "../syncOutbox";
 
-// Storage keys for cached lists (align to whatever your production.jsx uses)
+const THEME_COLOR = "#22a6b3";
+
+/**
+ * Offline cache keys (simple + reliable).
+ * You can later move these into SQLite if you prefer.
+ */
 const CACHE_KEYS = {
   projects: "@moat:cache:projects",
   tasks: "@moat:cache:tasks",
-  milestones: "@moat:cache:milestones",
-  users: "@moat:cache:users",
-
-  // placeholders for upcoming list caching
   assets: "@moat:cache:assets",
   vehicles: "@moat:cache:vehicles",
   inspections: "@moat:cache:inspections",
   documents: "@moat:cache:documents",
+  groups: "@moat:cache:groups",
 };
 
-function safeParseArray(raw) {
+async function safeCacheSet(key, value) {
+  await AsyncStorage.setItem(key, JSON.stringify(value ?? []));
+}
+
+async function safeCacheGet(key) {
+  const raw = await AsyncStorage.getItem(key);
+  if (!raw) return [];
   try {
-    const v = JSON.parse(raw || "[]");
-    return Array.isArray(v) ? v : [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -41,141 +48,147 @@ function safeParseArray(raw) {
 export default function OfflineScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+
   const [counts, setCounts] = useState({
     projects: 0,
     tasks: 0,
-    milestones: 0,
-    users: 0,
     assets: 0,
     vehicles: 0,
     inspections: 0,
     documents: 0,
+    groups: 0,
   });
 
-  const tiles = useMemo(
-    () => [
-      { key: "projects", label: "Projects" },
-      { key: "tasks", label: "My Tasks" },
-      { key: "milestones", label: "Milestones" },
-      { key: "users", label: "Users" },
-      { key: "assets", label: "Assets" },
-      { key: "vehicles", label: "Vehicles" },
-      { key: "inspections", label: "Inspections" },
-      { key: "documents", label: "Documents" },
-    ],
-    [],
-  );
+  async function loadCounts() {
+    const [projects, tasks, assets, vehicles, inspections, documents, groups] =
+      await Promise.all([
+        safeCacheGet(CACHE_KEYS.projects),
+        safeCacheGet(CACHE_KEYS.tasks),
+        safeCacheGet(CACHE_KEYS.assets),
+        safeCacheGet(CACHE_KEYS.vehicles),
+        safeCacheGet(CACHE_KEYS.inspections),
+        safeCacheGet(CACHE_KEYS.documents),
+        safeCacheGet(CACHE_KEYS.groups),
+      ]);
 
-  async function refreshCounts() {
-    const next = {};
-    for (const k of Object.keys(CACHE_KEYS)) {
-      const raw = await AsyncStorage.getItem(CACHE_KEYS[k]);
-      next[k] = safeParseArray(raw).length;
-    }
-    setCounts((prev) => ({ ...prev, ...next }));
+    setCounts({
+      projects: projects.length,
+      tasks: tasks.length,
+      assets: assets.length,
+      vehicles: vehicles.length,
+      inspections: inspections.length,
+      documents: documents.length,
+      groups: groups.length,
+    });
   }
 
   useEffect(() => {
-    refreshCounts();
+    (async () => {
+      await loadCounts();
+    })();
   }, []);
 
-  async function handleRefreshLists() {
+  /**
+   * Refresh lists by calling REAL module endpoints.
+   * If a module route isn't present on backend yet, we skip it gracefully.
+   */
+  const refreshLists = async () => {
     setLoading(true);
     try {
-      // This is the backend endpoint we added: GET /api/mobile/lists
-      // Using apiPost here would be wrong (GET). So we do fetch directly.
-      const orgId = await AsyncStorage.getItem(ORG_KEY);
-
-      // Use the same auth headers the apiClient uses
-      // (apiClient has getAuthHeaders, but we’ll keep it simple & safe here)
-      const token = await AsyncStorage.getItem("@moat:token");
-
-      if (!token) {
-        Alert.alert("Not signed in", "Please sign in again.");
-        return;
-      }
-      if (!orgId) {
-        Alert.alert("Missing Org", "No orgId found on the device.");
+      const savedOrg = await AsyncStorage.getItem(ORG_KEY);
+      if (!savedOrg) {
+        Alert.alert("Missing Org", "No orgId found on this device yet.");
         return;
       }
 
-      const baseUrl =
-        process.env.EXPO_PUBLIC_API_BASE_URL || "https://YOUR-RENDER-URL";
+      // Sanity check: confirm backend sees you + org
+      await apiGet("/api/mobile/whoami");
 
-      const res = await fetch(`${baseUrl}/api/mobile/lists`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "x-org-id": orgId,
-          "Content-Type": "application/json",
-        },
-      });
+      const results = {};
 
-      const text = await res.text();
-      let json = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = { raw: text };
+      async function fetchMaybe(name, path, cacheKey) {
+        try {
+          const data = await apiGet(path);
+
+          // Many endpoints return { ok:true, items:[...] } OR just [...]
+          const items = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.items)
+              ? data.items
+              : Array.isArray(data?.data)
+                ? data.data
+                : [];
+
+          results[name] = items;
+          await safeCacheSet(cacheKey, items);
+        } catch (e) {
+          if (e?.status === 404) {
+            results[name] = "__NOT_FOUND__";
+            return;
+          }
+          throw e;
+        }
       }
 
-      if (!res.ok) {
-        throw new Error(json?.error || json?.message || `HTTP ${res.status}`);
+      await Promise.all([
+        fetchMaybe("projects", "/api/projects", CACHE_KEYS.projects),
+        fetchMaybe("tasks", "/api/tasks", CACHE_KEYS.tasks),
+        fetchMaybe("assets", "/api/assets", CACHE_KEYS.assets),
+        fetchMaybe("vehicles", "/api/vehicles", CACHE_KEYS.vehicles),
+        // ✅ corrected plural (most common pattern)
+        fetchMaybe("inspections", "/api/inspection", CACHE_KEYS.inspections),
+        fetchMaybe("documents", "/api/documents", CACHE_KEYS.documents),
+        fetchMaybe("groups", "/api/groups", CACHE_KEYS.groups),
+      ]);
+
+      await loadCounts();
+
+      const notFound = Object.entries(results)
+        .filter(([, v]) => v === "__NOT_FOUND__")
+        .map(([k]) => k);
+
+      if (notFound.length) {
+        Alert.alert(
+          "Lists refreshed (partial)",
+          `These modules are not available on the backend yet:\n${notFound.join(", ")}`,
+        );
+      } else {
+        Alert.alert("Success", "Lists refreshed and stored for offline use.");
       }
-
-      const projects = Array.isArray(json?.projects) ? json.projects : [];
-      const tasks = Array.isArray(json?.tasks) ? json.tasks : [];
-      const milestones = Array.isArray(json?.milestones) ? json.milestones : [];
-      const users = Array.isArray(json?.users) ? json.users : [];
-
-      // Save the known lists
-      await AsyncStorage.setItem(CACHE_KEYS.projects, JSON.stringify(projects));
-      await AsyncStorage.setItem(CACHE_KEYS.tasks, JSON.stringify(tasks));
-      await AsyncStorage.setItem(
-        CACHE_KEYS.milestones,
-        JSON.stringify(milestones),
-      );
-      await AsyncStorage.setItem(CACHE_KEYS.users, JSON.stringify(users));
-
-      // For now, these 4 are placeholders until backend adds them to /lists
-      // (we keep counts consistent by ensuring keys exist)
-      for (const k of ["assets", "vehicles", "inspections", "documents"]) {
-        const existing = await AsyncStorage.getItem(CACHE_KEYS[k]);
-        if (!existing)
-          await AsyncStorage.setItem(CACHE_KEYS[k], JSON.stringify([]));
-      }
-
-      await refreshCounts();
-      Alert.alert("Updated", "Lists refreshed and stored for offline use.");
     } catch (e) {
-      Alert.alert("Could not refresh", e?.message || "Network request failed");
+      Alert.alert("Could not refresh", e?.message || "Unknown error");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  async function handleSyncOutbox() {
+  const runSync = async () => {
     setLoading(true);
     try {
-      const result = await syncOutbox({ limit: 25 });
-      await refreshCounts();
+      const savedOrg = await AsyncStorage.getItem(ORG_KEY);
+      if (!savedOrg) {
+        Alert.alert("Missing Org", "No orgId found on this device yet.");
+        return;
+      }
+      const res = await syncOutbox({ limit: 25 });
       Alert.alert(
         "Sync complete",
-        `Synced: ${result.synced}\nFailed: ${result.failed}`,
+        `Synced: ${res.synced}\nFailed: ${res.failed}`,
       );
     } catch (e) {
-      Alert.alert("Sync failed", e?.message || "Network request failed");
+      Alert.alert("Sync failed", e?.message || "Unknown error");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
+      {/* Top bar with Offline logo + home */}
       <View style={styles.topBar}>
         <Image
           source={require("../assets/offline-screen.png")}
-          style={styles.logo}
+          style={styles.topBarLogo}
           resizeMode="contain"
         />
         <TouchableOpacity
@@ -189,61 +202,64 @@ export default function OfflineScreen() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Offline & Sync</Text>
-        <Text style={styles.cardSubtitle}>
-          These lists power dropdowns when you have no signal. Sync pushes your
-          saved actions to the server.
-        </Text>
+      {/* Action buttons */}
+      <View style={styles.actionsRow}>
+        <TouchableOpacity
+          style={[styles.primaryButton, loading && styles.btnDisabled]}
+          onPress={refreshLists}
+          activeOpacity={0.85}
+          disabled={loading}
+        >
+          <Text style={styles.primaryButtonText}>
+            {loading ? "Working..." : "Refresh lists"}
+          </Text>
+        </TouchableOpacity>
 
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={[styles.primaryBtn, loading && styles.btnDisabled]}
-            onPress={handleRefreshLists}
-            disabled={loading}
-          >
-            <Text style={styles.primaryBtnText}>
-              {loading ? "Working…" : "Refresh Lists"}
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.secondaryBtn, loading && styles.btnDisabled]}
-            onPress={handleSyncOutbox}
-            disabled={loading}
-          >
-            <Text style={styles.secondaryBtnText}>
-              {loading ? "Working…" : "Sync Outbox"}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={[
+            styles.primaryButton,
+            styles.secondaryButton,
+            loading && styles.btnDisabled,
+          ]}
+          onPress={runSync}
+          activeOpacity={0.85}
+          disabled={loading}
+        >
+          <Text style={styles.primaryButtonText}>
+            {loading ? "Working..." : "Sync outbox"}
+          </Text>
+        </TouchableOpacity>
       </View>
 
+      {/* Cached list counts */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Cached Lists</Text>
-        <Text style={styles.cardSubtitle}>
-          What’s currently stored on this device
+        <Text style={styles.cardTitle}>Cached lists on device</Text>
+
+        <Row label="Projects" value={counts.projects} />
+        <Row label="Tasks" value={counts.tasks} />
+        <Row label="Assets" value={counts.assets} />
+        <Row label="Vehicles" value={counts.vehicles} />
+        <Row label="Inspections" value={counts.inspections} />
+        <Row label="Documents" value={counts.documents} />
+        <Row label="Groups" value={counts.groups} />
+
+        <Text style={styles.hint}>
+          If any count stays at 0 after refresh, the backend endpoint may not
+          exist yet or your user has no data in that module.
         </Text>
-
-        <View style={styles.grid}>
-          {tiles.map((t) => (
-            <View key={t.key} style={styles.listTile}>
-              <Text style={styles.listTileLabel}>{t.label}</Text>
-              <Text style={styles.listTileCount}>{counts[t.key] ?? 0}</Text>
-              <Text style={styles.listTileHint}>items</Text>
-            </View>
-          ))}
-        </View>
-
-        <TouchableOpacity style={styles.smallLink} onPress={refreshCounts}>
-          <Text style={styles.smallLinkText}>Recheck counts</Text>
-        </TouchableOpacity>
       </View>
     </ScrollView>
   );
 }
 
-const THEME_COLOR = "#22a6b3";
+function Row({ label, value }) {
+  return (
+    <View style={styles.row}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Text style={styles.rowValue}>{String(value)}</Text>
+    </View>
+  );
+}
 
 const styles = StyleSheet.create({
   container: {
@@ -256,9 +272,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 12,
+    marginBottom: 8,
   },
-  logo: {
+  topBarLogo: {
     flex: 1,
     height: 48,
   },
@@ -270,96 +286,64 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
   },
-  card: {
-    backgroundColor: "#ffffff",
-    borderRadius: 10,
-    padding: 16,
-    marginBottom: 16,
-    elevation: 2,
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
-  cardSubtitle: {
-    fontSize: 12,
-    color: "#666",
-    marginBottom: 12,
-  },
-  actionRow: {
+  actionsRow: {
     flexDirection: "row",
     justifyContent: "space-between",
+    marginTop: 8,
+    marginBottom: 12,
   },
-  primaryBtn: {
-    width: "48%",
+  primaryButton: {
+    flex: 1,
     backgroundColor: THEME_COLOR,
+    borderRadius: 10,
     paddingVertical: 12,
-    borderRadius: 8,
     alignItems: "center",
+    elevation: 2,
+    marginRight: 8,
   },
-  primaryBtnText: {
+  secondaryButton: {
+    marginRight: 0,
+    marginLeft: 8,
+  },
+  primaryButtonText: {
     color: "#fff",
-    fontWeight: "700",
     fontSize: 13,
-  },
-  secondaryBtn: {
-    width: "48%",
-    borderWidth: 1,
-    borderColor: THEME_COLOR,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: "center",
-  },
-  secondaryBtnText: {
-    color: THEME_COLOR,
     fontWeight: "700",
-    fontSize: 13,
   },
   btnDisabled: {
     opacity: 0.6,
   },
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-  },
-  listTile: {
-    width: "48%",
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#e9e9e9",
+  card: {
+    backgroundColor: "#fff",
     borderRadius: 10,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    marginBottom: 12,
-    elevation: 1,
+    padding: 16,
+    elevation: 2,
   },
-  listTileLabel: {
+  cardTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+  rowLabel: {
     fontSize: 13,
+    color: "#222",
     fontWeight: "600",
-    marginBottom: 8,
   },
-  listTileCount: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: THEME_COLOR,
-    lineHeight: 26,
+  rowValue: {
+    fontSize: 13,
+    color: "#222",
+    fontWeight: "700",
   },
-  listTileHint: {
+  hint: {
+    marginTop: 12,
     fontSize: 11,
-    color: "#666",
-    marginTop: 2,
-  },
-  smallLink: {
-    marginTop: 4,
-    alignSelf: "center",
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-  },
-  smallLinkText: {
-    fontSize: 12,
-    color: "#555",
-    textDecorationLine: "underline",
+    color: "#777",
   },
 });

@@ -109,7 +109,7 @@ router.get("/lists", requireOrg, async (req, res) => {
       User = require("../models/User");
     } catch {}
     try {
-      Inspection = require("../models/Inspection");
+      Inspection = require("../models/InspectionForm");
     } catch {}
 
     const projects = Project?.find
