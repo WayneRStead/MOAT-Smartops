@@ -201,4 +201,103 @@ router.post("/offline-events", requireOrg, async (req, res) => {
   res.json({ ok: true, id: doc._id });
 });
 
+// ✅ Mobile list snapshot for offline caching
+// GET /api/mobile/lists
+router.get("/lists", requireOrg, async (req, res) => {
+  try {
+    // We keep these optional so the endpoint works even if a module isn't installed yet.
+    const out = { ok: true };
+
+    // --- Projects ---
+    try {
+      const Project = require("../models/Project");
+      const where = Project?.schema?.path("orgId")
+        ? { orgId: req.orgObjectId || req.user?.orgId }
+        : {};
+      out.projects = await Project.find(where)
+        .select("_id name title code status")
+        .sort({ updatedAt: -1 })
+        .limit(2000)
+        .lean();
+    } catch {
+      out.projects = [];
+    }
+
+    // --- Tasks ---
+    try {
+      const Task = require("../models/Task");
+      const where = Task?.schema?.path("orgId")
+        ? { orgId: req.orgObjectId || req.user?.orgId }
+        : {};
+      out.tasks = await Task.find(where)
+        .select("_id title name status projectId assignedTo assignedUserId")
+        .sort({ updatedAt: -1 })
+        .limit(5000)
+        .lean();
+    } catch {
+      out.tasks = [];
+    }
+
+    // --- Milestones ---
+    try {
+      const TaskMilestone = require("../models/TaskMilestone");
+      const where = TaskMilestone?.schema?.path("orgId")
+        ? { orgId: req.orgObjectId || req.user?.orgId }
+        : {};
+      out.milestones = await TaskMilestone.find(where)
+        .select("_id title name projectId taskId status")
+        .sort({ updatedAt: -1 })
+        .limit(5000)
+        .lean();
+    } catch {
+      out.milestones = [];
+    }
+
+    // --- Users ---
+    try {
+      const User = require("../models/User");
+      const where = User?.schema?.path("orgId")
+        ? {
+            orgId: req.orgObjectId || req.user?.orgId,
+            isDeleted: { $ne: true },
+          }
+        : { isDeleted: { $ne: true } };
+      out.users = await User.find(where)
+        .select("_id name email role roles")
+        .sort({ name: 1 })
+        .limit(5000)
+        .lean();
+    } catch {
+      out.users = [];
+    }
+
+    // ✅ --- INSPECTIONS (FORMS) ---
+    // Your inspection module exposes forms at /inspection/forms
+    try {
+      const InspectionForm = require("../models/InspectionForm");
+      const where = InspectionForm?.schema?.path("orgId")
+        ? {
+            orgId: req.orgObjectId || req.user?.orgId,
+            isDeleted: { $ne: true },
+          }
+        : { isDeleted: { $ne: true } };
+
+      out.inspections = await InspectionForm.find(where)
+        .select(
+          "_id title description formType scope subject scoring rolesAllowed updatedAt",
+        )
+        .sort({ updatedAt: -1 })
+        .limit(2000)
+        .lean();
+    } catch {
+      out.inspections = [];
+    }
+
+    return res.json(out);
+  } catch (e) {
+    console.error("[mobile/lists] error", e);
+    return res.status(500).json({ error: "Lists fetch failed" });
+  }
+});
+
 module.exports = router;

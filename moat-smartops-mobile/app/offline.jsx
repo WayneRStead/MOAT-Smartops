@@ -135,8 +135,11 @@ export default function OfflineScreen() {
         fetchMaybe("tasks", "/api/tasks", CACHE_KEYS.tasks),
         fetchMaybe("assets", "/api/assets", CACHE_KEYS.assets),
         fetchMaybe("vehicles", "/api/vehicles", CACHE_KEYS.vehicles),
-        // ✅ corrected plural (most common pattern)
-        fetchMaybe("inspections", "/api/inspection", CACHE_KEYS.inspections),
+        fetchMaybe(
+          "inspections",
+          "/api/inspection/forms",
+          CACHE_KEYS.inspections,
+        ),
         fetchMaybe("documents", "/api/documents", CACHE_KEYS.documents),
         fetchMaybe("groups", "/api/groups", CACHE_KEYS.groups),
       ]);
