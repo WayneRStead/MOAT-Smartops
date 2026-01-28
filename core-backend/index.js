@@ -24,6 +24,34 @@ try {
   require("./models/User");
 } catch {} // ensure User is compiled for boot
 
+// ✅ IMPORTANT: Inspections compatibility boot
+// Your real model file is models/InspectionForm.js, but some routers may expect "Inspection".
+// This creates an alias so require("./models/Inspection") or mongoose.model("Inspection") works.
+try {
+  const InspectionForm = require("./models/InspectionForm");
+
+  // If router expects mongoose.model("Inspection"), ensure it exists.
+  if (!mongoose.models.Inspection) {
+    try {
+      // Best: compile alias using same schema + same collection
+      const collectionName =
+        InspectionForm?.collection?.name ||
+        InspectionForm?.collection?.collectionName ||
+        undefined;
+
+      mongoose.model("Inspection", InspectionForm.schema, collectionName);
+      console.log("[boot] aliased InspectionForm -> Inspection");
+    } catch (e) {
+      // Fallback: direct alias reference
+      mongoose.models.Inspection = InspectionForm;
+      console.log("[boot] aliased mongoose.models.Inspection = InspectionForm");
+    }
+  }
+} catch (e) {
+  // Don't crash if inspections are not ready yet
+  console.warn("[boot] InspectionForm model not available:", e?.message || e);
+}
+
 // --- Optional/Safe require helper (logs failures) ---
 function safeRequire(p) {
   try {
@@ -58,7 +86,11 @@ const taskFencesRouter = require("./routes/task-fences");
 // --- Optional routers (guarded) ---
 const projectsRouter = safeRequire("./routes/projects");
 const documentsRouter = safeRequire("./routes/documents");
+
+// ✅ Inspections routers (guarded) — define BOTH variants safely
 const inspectionModuleRouter = safeRequire("./routes/inspectionModule"); // module variant
+const inspectionsRouter = safeRequire("./routes/inspections"); // legacy/simple variant if it exists
+
 const assetsRouter = safeRequire("./routes/assets");
 const vehiclesRouter = safeRequire("./routes/vehicles");
 const logbookRouter = require("./routes/logbook");
@@ -475,13 +507,13 @@ app.use("/api/uploads", express.static(uploadsRoot, staticOpts));
 
 /* --------------------------- Protected Routers -------------------------- */
 
-// ✅ MOBILE ROUTER MUST BE PROTECTED (so it has req.user + org context)
+// ✅ MOBILE ROUTER: allow bootstrap BEFORE org selection.
+// The router itself handles which endpoints need org (your routes/mobile.js already does that).
 const mobileRouter = require("./routes/mobile");
 app.use(
   "/mobile",
   requireAuth,
   resolveOrgContext,
-  requireOrg,
   enforceTrial,
   touchOrgActivity,
   computeAccessibleUserIds,
@@ -491,7 +523,6 @@ app.use(
   "/api/mobile",
   requireAuth,
   resolveOrgContext,
-  requireOrg,
   enforceTrial,
   touchOrgActivity,
   computeAccessibleUserIds,
@@ -743,6 +774,8 @@ if (taskMilestonesRouter) {
 
 /* ------------------------ Inspections ----------------------- */
 if (inspectionModuleRouter) {
+  // Keep BOTH spellings so your mobile app can call either:
+  // /api/inspection or /api/inspections
   app.use(
     "/inspections",
     requireAuth,
@@ -815,6 +848,10 @@ if (inspectionModuleRouter) {
     enforceTrial,
     touchOrgActivity,
     inspectionsRouter,
+  );
+} else {
+  console.warn(
+    "[routes] inspections not mounted (no inspectionModuleRouter or inspectionsRouter)",
   );
 }
 
