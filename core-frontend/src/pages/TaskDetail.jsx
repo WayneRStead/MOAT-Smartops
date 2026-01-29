@@ -8,7 +8,13 @@ import { api } from "../lib/api";
    Constants / helpers
 =========================== */
 const PRIORITIES = ["low", "medium", "high", "urgent"];
-const MS_STATUSES = ["pending", "in-progress", "paused", "completed"];
+const MS_STATUSES = [
+  "pending",
+  "started",
+  "paused",
+  "paused - problem",
+  "finished",
+];
 
 function toLocalDateInputValue(date) {
   if (!date) return "";
