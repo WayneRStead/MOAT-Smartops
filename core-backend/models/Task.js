@@ -199,7 +199,7 @@ const TaskSchema = new Schema(
 
     status: {
       type: String,
-      enum: ["pending", "in-progress", "paused", "completed"],
+      enum: ["pending", "in-progress", "paused", "paused-problem", "completed"],
       default: "pending",
       index: true,
       set: normalizeStatus,
