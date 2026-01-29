@@ -1056,6 +1056,8 @@ if (billingRouter) {
   app.use("/api/billing", billingRouter);
 }
 
+app.use("/api/mobile", require("./routes/mobileDefinitions"));
+
 /* ------------------------------- Org Routes ---------------------------- */
 app.use("/org", orgRouter);
 app.use("/api/org", orgRouter);
