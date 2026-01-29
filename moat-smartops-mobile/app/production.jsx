@@ -3,14 +3,12 @@
 //
 // What this version does (important):
 // ✅ Uses OFFLINE-CACHED dropdown lists (projects / my tasks / milestones)
-// ✅ When online, you can tap "Refresh lists" to pull latest from server and cache on device
+// ✅ REMOVES the Refresh button + all refresh/network code from this screen
+// ✅ REMOVES the task selector from Project Management (per request)
+// ✅ Project Status is now a dropdown (derived from the selected Project model)
+// ✅ Task Status is now a dropdown (derived from the selected Task model)
 // ✅ Saves updates to SQLite outbox exactly like before (offline-first)
 // ✅ Tries a best-effort sync after each save (won’t break if offline)
-//
-// NOTE (so you don’t get stuck):
-// - I don’t know your exact backend endpoints for “projects list”, “my tasks”, “milestones”.
-// - This file supports multiple common endpoint shapes and fails gracefully.
-// - You only need to adjust the ENDPOINTS in one place below if your routes differ.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
@@ -18,7 +16,6 @@ import * as Location from "expo-location";
 import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
   FlatList,
   Image,
@@ -32,7 +29,7 @@ import {
 } from "react-native";
 import MapView, { Marker, Polygon } from "react-native-maps";
 
-import { API_BASE_URL, ORG_KEY, TOKEN_KEY } from "../apiClient";
+import { ORG_KEY } from "../apiClient";
 import { syncOutbox } from "../syncOutbox";
 
 import {
@@ -43,100 +40,18 @@ import {
 } from "../database";
 
 /* ---------------------------------------------
-   CONFIG: adjust these if your backend differs
-----------------------------------------------*/
-
-// “Projects list”
-const ENDPOINT_PROJECTS = [
-  "/api/projects", // common
-  "/projects", // common (if /api mounted)
-];
-
-// “Tasks assigned to me”
-const ENDPOINT_MY_TASKS = [
-  "/api/tasks?scope=mine",
-  "/api/tasks?assigned=me",
-  "/api/tasks?assignedTo=me",
-  "/api/tasks?mine=true",
-  "/api/tasks",
-  "/tasks",
-];
-
-// “Milestones for a task”
-function endpointsMilestonesForTask(taskId) {
-  return [
-    `/api/tasks/${taskId}/milestones`,
-    `/api/tasks/${taskId}/task-milestones`,
-    `/api/tasks/${taskId}`,
-    `/tasks/${taskId}`,
-  ];
-}
-
-/* ---------------------------------------------
    OFFLINE CACHE KEYS
 ----------------------------------------------*/
-const CACHE_PROJECTS_KEY = "@moat:cache:projects:v1";
-const CACHE_TASKS_KEY = "@moat:cache:tasks:v1";
-const CACHE_MILESTONES_KEY = "@moat:cache:milestonesByTask:v1";
+const CACHE_PROJECTS_KEY = "@moat:cache:projects";
+const CACHE_TASKS_KEY = "@moat:cache:tasks";
+const CACHE_MILESTONES_KEY = "@moat:cache:milestonesByTask";
 
 // Optional (if you already store it on login, great)
 const USER_ID_KEY = "@moat:userId";
 
 /* ---------------------------------------------
-   NETWORK HELPERS
+   GENERIC HELPERS
 ----------------------------------------------*/
-async function getAuthHeaders() {
-  const token = await AsyncStorage.getItem(TOKEN_KEY);
-  const orgId = await AsyncStorage.getItem(ORG_KEY);
-
-  const headers = {
-    "Content-Type": "application/json",
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (orgId) headers["x-org-id"] = orgId;
-
-  return { headers, token, orgId };
-}
-
-async function fetchJsonTry(path) {
-  const { headers } = await getAuthHeaders();
-  const res = await fetch(`${API_BASE_URL}${path}`, { headers });
-  const text = await res.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-  if (!res.ok) return { ok: false, status: res.status, json, text };
-  return { ok: true, status: res.status, json, text };
-}
-
-function normalizeListFromUnknownShape(json) {
-  // Accept:
-  // - [ ... ]
-  // - { items: [...] }
-  // - { data: [...] }
-  // - { projects: [...] }
-  // - { tasks: [...] }
-  if (!json) return [];
-  if (Array.isArray(json)) return json;
-
-  const candidates = [
-    json.items,
-    json.data,
-    json.projects,
-    json.tasks,
-    json.results,
-  ].filter(Boolean);
-
-  for (const c of candidates) {
-    if (Array.isArray(c)) return c;
-  }
-
-  return [];
-}
-
 function pickId(x) {
   return String(x?._id || x?.id || x?.taskId || x?.projectId || "");
 }
@@ -152,16 +67,6 @@ function pickName(x) {
     x?.number ||
     pickId(x)
   );
-}
-
-function dedupeById(list) {
-  const map = new Map();
-  for (const item of list || []) {
-    const id = pickId(item);
-    if (!id) continue;
-    if (!map.has(id)) map.set(id, item);
-  }
-  return Array.from(map.values());
 }
 
 async function loadCache(key, fallback = null) {
@@ -180,8 +85,102 @@ async function saveCache(key, value) {
   } catch {}
 }
 
+function asStringArray(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input
+      .map((x) => {
+        if (x == null) return null;
+        if (typeof x === "string") return x;
+        return x?.name || x?.title || x?.code || x?.value || x?.label || null;
+      })
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * Try hard to extract a list of allowed statuses from a model object without guessing a single schema.
+ * Supports common shapes like:
+ * - model.statusOptions: ["Open","Closed"]
+ * - model.statuses: [...]
+ * - model.allowedStatuses: [...]
+ * - model.workflow.statuses: [...]
+ * - model.workflowSteps: [{name:"..."}, ...]
+ * - model.status: { options: [...] }
+ */
+function extractStatusesFromModel(modelObj) {
+  if (!modelObj || typeof modelObj !== "object") return [];
+
+  const directCandidates = [
+    modelObj.statusOptions,
+    modelObj.statuses,
+    modelObj.allowedStatuses,
+    modelObj.allowedStatus,
+    modelObj.statusList,
+    modelObj.statusValues,
+    modelObj.statusEnum,
+    modelObj.workflowStatuses,
+  ];
+
+  for (const c of directCandidates) {
+    const arr = asStringArray(c);
+    if (arr.length) return arr;
+  }
+
+  // nested: model.status.options
+  const nestedStatusOptions =
+    modelObj?.status?.options ||
+    modelObj?.status?.values ||
+    modelObj?.status?.enum ||
+    null;
+  {
+    const arr = asStringArray(nestedStatusOptions);
+    if (arr.length) return arr;
+  }
+
+  // nested workflow shapes
+  const wfCandidates = [
+    modelObj?.workflow?.statuses,
+    modelObj?.workflow?.statusOptions,
+    modelObj?.workflow?.steps,
+    modelObj?.workflowSteps,
+    modelObj?.workflow_states,
+    modelObj?.states,
+    modelObj?.stages,
+  ];
+  for (const c of wfCandidates) {
+    const arr = asStringArray(c);
+    if (arr.length) return arr;
+  }
+
+  // If status configs are stored as objects like { Open: {...}, Closed: {...} }
+  const maybeObj =
+    modelObj?.workflow?.statusMap ||
+    modelObj?.workflow?.statusesByKey ||
+    modelObj?.statusMap ||
+    null;
+  if (maybeObj && typeof maybeObj === "object" && !Array.isArray(maybeObj)) {
+    const keys = Object.keys(maybeObj).filter(Boolean);
+    if (keys.length) return keys;
+  }
+
+  return [];
+}
+
+/**
+ * Fallbacks only if model doesn't provide anything.
+ * (Keeps UI usable while still prioritizing model-derived lists.)
+ */
+function fallbackProjectStatuses() {
+  return ["Planned", "In Progress", "On Hold", "Completed", "Cancelled"];
+}
+function fallbackTaskStatuses() {
+  return ["Not Started", "In Progress", "Blocked", "Done"];
+}
+
 /* ---------------------------------------------
-   SIMPLE “SELECT MODAL” COMPONENT
+   SIMPLE “SELECT MODAL” (GENERIC)
 ----------------------------------------------*/
 function SelectModal({
   visible,
@@ -190,8 +189,24 @@ function SelectModal({
   selectedId,
   onSelect,
   onClose,
-  emptyText = "No items available offline yet. Tap Refresh lists when online.",
+  emptyText = "No items available offline yet.",
+  getId,
+  getLabel,
 }) {
+  const _getId =
+    getId ||
+    ((it) => {
+      if (typeof it === "string") return it;
+      return pickId(it);
+    });
+
+  const _getLabel =
+    getLabel ||
+    ((it) => {
+      if (typeof it === "string") return it;
+      return pickName(it);
+    });
+
   return (
     <Modal
       visible={visible}
@@ -208,12 +223,15 @@ function SelectModal({
           ) : (
             <FlatList
               data={items}
-              keyExtractor={(it) => pickId(it)}
+              keyExtractor={(it, idx) => {
+                const id = _getId(it);
+                return id ? String(id) : String(idx);
+              }}
               style={{ maxHeight: 380 }}
               renderItem={({ item }) => {
-                const id = pickId(item);
-                const name = pickName(item);
-                const active = selectedId && id === selectedId;
+                const id = String(_getId(item) || "");
+                const label = _getLabel(item);
+                const active = selectedId && id && id === String(selectedId);
                 return (
                   <TouchableOpacity
                     style={[styles.selectRow, active && styles.selectRowActive]}
@@ -225,7 +243,7 @@ function SelectModal({
                         active && styles.selectRowTextActive,
                       ]}
                     >
-                      {name}
+                      {label}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -260,7 +278,6 @@ export default function ProductionScreen() {
   const [mode, setMode] = useState("project");
 
   /* -------------------- OFFLINE LIST STATE -------------------- */
-  const [loadingLists, setLoadingLists] = useState(false);
   const [projects, setProjects] = useState([]);
   const [myTasks, setMyTasks] = useState([]);
   const [milestonesByTask, setMilestonesByTask] = useState({}); // { [taskId]: [milestoneObj|string] }
@@ -269,11 +286,13 @@ export default function ProductionScreen() {
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
   const [milestonePickerOpen, setMilestonePickerOpen] = useState(false);
+  const [statusPickerOpen, setStatusPickerOpen] = useState(false);
+
   const [activeMilestoneTaskId, setActiveMilestoneTaskId] = useState(null);
+  const [statusPickerContext, setStatusPickerContext] = useState("project"); // 'project' | 'task'
 
   // Project management form state (store IDs, show names)
   const [projectId, setProjectId] = useState("");
-  const [taskIdForProject, setTaskIdForProject] = useState("");
   const [status, setStatus] = useState("");
   const [managerNote, setManagerNote] = useState("");
 
@@ -293,7 +312,7 @@ export default function ProductionScreen() {
   // Attach User Document modal state
   const [attachVisible, setAttachVisible] = useState(false);
   const [attachProjectId, setAttachProjectId] = useState("");
-  const [attachUser, setAttachUser] = useState(""); // you’ll later swap to a real user selector
+  const [attachUser, setAttachUser] = useState(""); // temporary manual entry
   const [attachTitle, setAttachTitle] = useState("");
   const [attachTag, setAttachTag] = useState("");
   const [attachPhoto, setAttachPhoto] = useState(null);
@@ -306,12 +325,10 @@ export default function ProductionScreen() {
   const [autoCapturing, setAutoCapturing] = useState(false);
   const captureTimerRef = useRef(null);
 
-  /* -------------------- HELPERS: selected item text -------------------- */
+  /* -------------------- SELECTED OBJECTS -------------------- */
   const selectedProject = projects.find((p) => pickId(p) === projectId) || null;
 
-  // tasks “allocated to user” only: we assume myTasks is already filtered by backend.
-  const selectedTaskForProject =
-    myTasks.find((t) => pickId(t) === taskIdForProject) || null;
+  // Task management / activity use myTasks list
   const selectedTaskMgmtTask =
     myTasks.find((t) => pickId(t) === taskMgmtTaskId) || null;
   const selectedActivityTask =
@@ -341,6 +358,30 @@ export default function ProductionScreen() {
     return found ? pickMilestoneName(found) : milestoneId;
   }
 
+  /* -------------------- STATUS LISTS (derived from models) -------------------- */
+  const projectStatusOptions = (() => {
+    const fromModel = extractStatusesFromModel(selectedProject);
+    return fromModel.length ? fromModel : fallbackProjectStatuses();
+  })();
+
+  const taskStatusOptions = (() => {
+    const fromModel = extractStatusesFromModel(selectedTaskMgmtTask);
+    return fromModel.length ? fromModel : fallbackTaskStatuses();
+  })();
+
+  function openStatusPicker(context) {
+    setStatusPickerContext(context);
+    setStatusPickerOpen(true);
+  }
+
+  function onSelectStatus(statusValue) {
+    const v =
+      typeof statusValue === "string" ? statusValue : String(statusValue);
+    if (statusPickerContext === "project") setStatus(v);
+    if (statusPickerContext === "task") setTaskMgmtStatus(v);
+    setStatusPickerOpen(false);
+  }
+
   /* -------------------- LOAD CACHED LISTS ON BOOT -------------------- */
   useEffect(() => {
     (async () => {
@@ -357,51 +398,6 @@ export default function ProductionScreen() {
       );
     })();
   }, []);
-
-  /* -------------------- ONLINE REFRESH (manual button) -------------------- */
-  async function refreshListsFromServer() {
-    try {
-      setLoadingLists(true);
-
-      // 1) Projects
-      let projectsOut = [];
-      for (const ep of ENDPOINT_PROJECTS) {
-        const r = await fetchJsonTry(ep);
-        if (r.ok) {
-          projectsOut = normalizeListFromUnknownShape(r.json);
-          break;
-        }
-      }
-
-      // 2) My tasks
-      let tasksOut = [];
-      for (const ep of ENDPOINT_MY_TASKS) {
-        const r = await fetchJsonTry(ep);
-        if (r.ok) {
-          tasksOut = normalizeListFromUnknownShape(r.json);
-          break;
-        }
-      }
-
-      projectsOut = dedupeById(projectsOut);
-      tasksOut = dedupeById(tasksOut);
-
-      setProjects(projectsOut);
-      setMyTasks(tasksOut);
-
-      await saveCache(CACHE_PROJECTS_KEY, projectsOut);
-      await saveCache(CACHE_TASKS_KEY, tasksOut);
-
-      Alert.alert("Updated", "Lists refreshed and stored for offline use.");
-    } catch (e) {
-      Alert.alert(
-        "Could not refresh",
-        e?.message || "Failed to load lists from server.",
-      );
-    } finally {
-      setLoadingLists(false);
-    }
-  }
 
   /* -------------------- LOAD MILESTONES (per task, cached) -------------------- */
   async function ensureMilestonesLoaded(taskObj) {
@@ -426,42 +422,8 @@ export default function ProductionScreen() {
       return;
     }
 
-    // Otherwise try endpoints
-    try {
-      for (const ep of endpointsMilestonesForTask(taskId)) {
-        const r = await fetchJsonTry(ep);
-        if (!r.ok) continue;
-
-        // If endpoint returns a task, try to find its milestones
-        if (r.json && !Array.isArray(r.json)) {
-          const maybe = Array.isArray(r.json?.milestones)
-            ? r.json.milestones
-            : Array.isArray(r.json?.taskMilestones)
-              ? r.json.taskMilestones
-              : Array.isArray(r.json?.items)
-                ? r.json.items
-                : null;
-
-          if (maybe && maybe.length) {
-            const next = { ...(milestonesByTask || {}), [taskId]: maybe };
-            setMilestonesByTask(next);
-            await saveCache(CACHE_MILESTONES_KEY, next);
-            return;
-          }
-        }
-
-        // If endpoint returns array directly
-        const list = normalizeListFromUnknownShape(r.json);
-        if (list?.length) {
-          const next = { ...(milestonesByTask || {}), [taskId]: list };
-          setMilestonesByTask(next);
-          await saveCache(CACHE_MILESTONES_KEY, next);
-          return;
-        }
-      }
-    } catch {
-      // ignore: offline or server mismatch
-    }
+    // No network fetch here (per request: remove refresh/network logic)
+    // Milestones must come from cached task payloads or prior caching elsewhere.
   }
 
   /* -------------------- ORG / USER from storage -------------------- */
@@ -530,7 +492,7 @@ export default function ProductionScreen() {
         updatedAt: nowIso,
       };
 
-      const rowId = await saveUserDocumentAttachment(doc);
+      await saveUserDocumentAttachment(doc);
 
       Alert.alert("Saved", "User document stored on this device for sync.");
 
@@ -557,10 +519,10 @@ export default function ProductionScreen() {
   /* -------------------- SAVE: TASK MANAGEMENT -------------------- */
   const handleSaveTaskManagement = async () => {
     try {
-      if (!taskMgmtTaskId && !taskMgmtNote) {
+      if (!taskMgmtTaskId && !taskMgmtNote && !taskMgmtStatus) {
         Alert.alert(
           "Missing details",
-          "Please select a task and/or enter a note before saving.",
+          "Please select a task and/or a status and/or enter a note before saving.",
         );
         return;
       }
@@ -606,10 +568,10 @@ export default function ProductionScreen() {
   /* -------------------- SAVE: PROJECT MANAGEMENT -------------------- */
   const handleSaveProjectManagement = async () => {
     try {
-      if (!projectId && !managerNote) {
+      if (!projectId && !managerNote && !status) {
         Alert.alert(
           "Missing details",
-          "Please select a project and/or enter a note before saving.",
+          "Please select a project and/or a status and/or enter a note before saving.",
         );
         return;
       }
@@ -621,7 +583,8 @@ export default function ProductionScreen() {
         orgId,
         userId,
         projectId: projectId || null,
-        taskId: taskIdForProject || null,
+        // Task removed from project management (per request)
+        taskId: null,
         status: status || null,
         managerNote: managerNote || "",
         syncStatus: "pending",
@@ -634,7 +597,6 @@ export default function ProductionScreen() {
       Alert.alert("Saved", "Project update stored on this device.");
 
       // Reset (keep project if you want)
-      setTaskIdForProject("");
       setStatus("");
       setManagerNote("");
 
@@ -819,18 +781,10 @@ export default function ProductionScreen() {
     setProjectId(id);
     setProjectPickerOpen(false);
 
-    // reset dependent picks
-    setTaskIdForProject("");
+    // reset dependent picks where relevant
     setTaskMgmtMilestoneId("");
     setActivityMilestoneId("");
     setAttachProjectId(id);
-  }
-
-  async function onSelectTaskForProject(t) {
-    const id = pickId(t);
-    setTaskIdForProject(id);
-    setTaskPickerOpen(false);
-    await ensureMilestonesLoaded(t);
   }
 
   async function onSelectTaskMgmtTask(t) {
@@ -839,6 +793,12 @@ export default function ProductionScreen() {
     setTaskMgmtMilestoneId("");
     setTaskPickerOpen(false);
     await ensureMilestonesLoaded(t);
+
+    // If current status isn't in allowed list, clear it (prevents invalid selections)
+    const allowed = extractStatusesFromModel(t);
+    if (allowed.length && taskMgmtStatus && !allowed.includes(taskMgmtStatus)) {
+      setTaskMgmtStatus("");
+    }
   }
 
   async function onSelectActivityTask(t) {
@@ -853,7 +813,7 @@ export default function ProductionScreen() {
     if (!taskId) {
       Alert.alert(
         "Select task first",
-        "Please select a task before choosing a milestone.",
+        "Please select a task before choosing a deliverable.",
       );
       return;
     }
@@ -875,23 +835,14 @@ export default function ProductionScreen() {
       setTaskMgmtMilestoneId(id);
     } else if (activeMilestoneTaskId === activityTaskId) {
       setActivityMilestoneId(id);
-    } else if (activeMilestoneTaskId === taskIdForProject) {
-      // not used, but safe
     }
+
     setMilestonePickerOpen(false);
     setActiveMilestoneTaskId(null);
   }
 
-  /* -------------------- TASK FILTERING: “allocated to user” --------------------
-     For now we rely on backend returning “my tasks”.
-     If your backend returns all tasks, we can filter by fields like:
-       task.assignedUserId == my userId
-       task.assignedTo == email
-     but I’m not guessing those fields here to avoid breaking.
-  ----------------------------------------------------------------------------- */
-
   // Which “task picker” is open?
-  const [taskPickerContext, setTaskPickerContext] = useState("project"); // 'project'|'task'|'activity'|'attachProject'
+  const [taskPickerContext, setTaskPickerContext] = useState("task"); // 'task'|'activity'
 
   function openTaskPicker(context) {
     setTaskPickerContext(context);
@@ -899,16 +850,20 @@ export default function ProductionScreen() {
   }
 
   function handleTaskPicked(item) {
-    if (taskPickerContext === "project") return onSelectTaskForProject(item);
     if (taskPickerContext === "task") return onSelectTaskMgmtTask(item);
     if (taskPickerContext === "activity") return onSelectActivityTask(item);
-    return onSelectTaskForProject(item);
+    return onSelectTaskMgmtTask(item);
   }
 
   /* -------------------- UI -------------------- */
   const milestoneItems = activeMilestoneTaskId
     ? getMilestonesForTask(activeMilestoneTaskId)
     : [];
+
+  const statusItems =
+    statusPickerContext === "project"
+      ? projectStatusOptions
+      : taskStatusOptions;
 
   return (
     <>
@@ -927,28 +882,6 @@ export default function ProductionScreen() {
               source={require("../assets/home.png")}
               style={styles.homeIcon}
             />
-          </TouchableOpacity>
-        </View>
-
-        {/* Refresh lists */}
-        <View style={styles.refreshRow}>
-          <TouchableOpacity
-            style={styles.refreshButton}
-            onPress={refreshListsFromServer}
-            disabled={loadingLists}
-          >
-            {loadingLists ? (
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <ActivityIndicator color="#fff" />
-                <Text style={[styles.refreshButtonText, { marginLeft: 8 }]}>
-                  Refreshing…
-                </Text>
-              </View>
-            ) : (
-              <Text style={styles.refreshButtonText}>
-                Refresh lists (online)
-              </Text>
-            )}
           </TouchableOpacity>
         </View>
 
@@ -985,20 +918,21 @@ export default function ProductionScreen() {
               onPress={() => setProjectPickerOpen(true)}
             />
 
-            <SelectField
-              label="Task (optional) - my tasks"
-              valueText={
-                selectedTaskForProject ? pickName(selectedTaskForProject) : ""
-              }
-              onPress={() => openTaskPicker("project")}
-            />
+            {/* Task selector REMOVED per request */}
 
-            <TextInput
-              style={styles.input}
-              placeholder="Status"
-              placeholderTextColor="#aaa"
-              value={status}
-              onChangeText={setStatus}
+            <SelectField
+              label="Status"
+              valueText={status}
+              onPress={() => {
+                if (!projectId) {
+                  Alert.alert(
+                    "Select project first",
+                    "Please select a project before choosing a status.",
+                  );
+                  return;
+                }
+                openStatusPicker("project");
+              }}
             />
 
             <TextInput
@@ -1047,7 +981,7 @@ export default function ProductionScreen() {
             />
 
             <SelectField
-              label="Milestone (optional)"
+              label="Deliverable (optional)"
               valueText={selectedMilestoneText(
                 taskMgmtTaskId,
                 taskMgmtMilestoneId,
@@ -1055,12 +989,19 @@ export default function ProductionScreen() {
               onPress={() => openMilestonePickerFor(taskMgmtTaskId)}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Status"
-              placeholderTextColor="#aaa"
-              value={taskMgmtStatus}
-              onChangeText={setTaskMgmtStatus}
+            <SelectField
+              label="Status"
+              valueText={taskMgmtStatus}
+              onPress={() => {
+                if (!taskMgmtTaskId) {
+                  Alert.alert(
+                    "Select task first",
+                    "Please select a task before choosing a status.",
+                  );
+                  return;
+                }
+                openStatusPicker("task");
+              }}
             />
 
             <TextInput
@@ -1098,7 +1039,7 @@ export default function ProductionScreen() {
             />
 
             <SelectField
-              label="Milestone (optional)"
+              label="Deliverable (optional)"
               valueText={selectedMilestoneText(
                 activityTaskId,
                 activityMilestoneId,
@@ -1178,7 +1119,7 @@ export default function ProductionScreen() {
         selectedId={projectId}
         onSelect={onSelectProject}
         onClose={() => setProjectPickerOpen(false)}
-        emptyText="No projects cached yet. Tap Refresh lists when online."
+        emptyText="No projects cached yet."
       />
 
       <SelectModal
@@ -1186,20 +1127,16 @@ export default function ProductionScreen() {
         title="Select Task (My Tasks)"
         items={myTasks}
         selectedId={
-          taskPickerContext === "project"
-            ? taskIdForProject
-            : taskPickerContext === "task"
-              ? taskMgmtTaskId
-              : activityTaskId
+          taskPickerContext === "task" ? taskMgmtTaskId : activityTaskId
         }
         onSelect={handleTaskPicked}
         onClose={() => setTaskPickerOpen(false)}
-        emptyText="No tasks cached yet. Tap Refresh lists when online."
+        emptyText="No tasks cached yet."
       />
 
       <SelectModal
         visible={milestonePickerOpen}
-        title="Select Milestone"
+        title="Select Deliverable"
         items={milestoneItems}
         selectedId={
           activeMilestoneTaskId === taskMgmtTaskId
@@ -1213,7 +1150,21 @@ export default function ProductionScreen() {
           setMilestonePickerOpen(false);
           setActiveMilestoneTaskId(null);
         }}
-        emptyText="No milestones cached for this task yet. If online, tap Refresh lists then reopen."
+        emptyText="No deliverable for this task yet."
+        getId={pickMilestoneId}
+        getLabel={pickMilestoneName}
+      />
+
+      <SelectModal
+        visible={statusPickerOpen}
+        title="Select Status"
+        items={statusItems}
+        selectedId={statusPickerContext === "project" ? status : taskMgmtStatus}
+        onSelect={onSelectStatus}
+        onClose={() => setStatusPickerOpen(false)}
+        emptyText="No status options found on this model."
+        getId={(s) => (typeof s === "string" ? s : String(s))}
+        getLabel={(s) => (typeof s === "string" ? s : String(s))}
       />
 
       {/* -------------------- Attach User Document Modal -------------------- */}
@@ -1239,11 +1190,7 @@ export default function ProductionScreen() {
                     )
                   : ""
               }
-              onPress={() => {
-                setProjectPickerOpen(true);
-                // when project modal closes, we keep whatever projectId is set
-                // and sync attachProjectId from projectId
-              }}
+              onPress={() => setProjectPickerOpen(true)}
             />
 
             <TextInput
@@ -1443,20 +1390,6 @@ const styles = StyleSheet.create({
   homeIcon: {
     width: 32,
     height: 32,
-  },
-
-  refreshRow: {
-    marginBottom: 10,
-  },
-  refreshButton: {
-    backgroundColor: "#2c3e50",
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: "center",
-  },
-  refreshButtonText: {
-    color: "#fff",
-    fontWeight: "700",
   },
 
   modeRow: {
