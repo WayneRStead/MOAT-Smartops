@@ -1,7 +1,6 @@
 // src/pages/TaskDetail.jsx  (Part 1/3)
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import GroupSelect from "../components/GroupSelect.jsx";
 import MilestonesBlock from "../components/MilestonesBlock.jsx";
 import { api } from "../lib/api";
 
@@ -9,7 +8,7 @@ import { api } from "../lib/api";
    Constants / helpers
 =========================== */
 const PRIORITIES = ["low", "medium", "high", "urgent"];
-const MS_STATUSES = ["pending", "started", "paused", "paused - problem", "finished"];
+const MS_STATUSES = ["pending", "in-progress", "paused", "completed"];
 
 function toLocalDateInputValue(date) {
   if (!date) return "";
@@ -39,16 +38,44 @@ function fromLocalDateOnly(s) {
 }
 function escapeXml(s) {
   return String(s || "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 /* label/status helpers */
 function canonStatus(raw) {
-  const s = String(raw || "").trim().toLowerCase();
-  if (["finished","complete","completed","closed","done"].includes(s)) return "finished";
-  if (["paused - problem","paused-problem","problem","blocked","block","issue"].includes(s)) return "paused - problem";
-  if (["paused","pause","on hold","on-hold","hold"].includes(s)) return "paused";
-  if (["started","start","in-progress","in progress","open","active","running"].includes(s)) return "started";
+  const s = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (["finished", "complete", "completed", "closed", "done"].includes(s))
+    return "finished";
+  if (
+    [
+      "paused - problem",
+      "paused-problem",
+      "problem",
+      "blocked",
+      "block",
+      "issue",
+    ].includes(s)
+  )
+    return "paused - problem";
+  if (["paused", "pause", "on hold", "on-hold", "hold"].includes(s))
+    return "paused";
+  if (
+    [
+      "started",
+      "start",
+      "in-progress",
+      "in progress",
+      "open",
+      "active",
+      "running",
+    ].includes(s)
+  )
+    return "started";
   return "pending";
 }
 
@@ -60,8 +87,10 @@ function apiBaseOrigin() {
 function toAbsoluteUrl(u) {
   if (!u) return "";
   let url = String(u);
-  if (url.startsWith("/files/docs/")) url = url.replace(/^\/files\/docs\//, "/documents/");
-  if (url.startsWith("/files/vault/")) url = url.replace(/^\/files\/vault\//, "/documents/");
+  if (url.startsWith("/files/docs/"))
+    url = url.replace(/^\/files\/docs\//, "/documents/");
+  if (url.startsWith("/files/vault/"))
+    url = url.replace(/^\/files\/vault\//, "/documents/");
   if (/^https?:\/\//i.test(url)) return url;
   if (url.startsWith("/")) return apiBaseOrigin() + url;
   return url;
@@ -72,13 +101,20 @@ const PREC = 6;
 const r6 = (n) => Number.parseFloat(Number(n).toFixed(PREC));
 function closeRing(coords) {
   if (!coords?.length) return coords || [];
-  const first = coords[0]; const last = coords[coords.length - 1];
+  const first = coords[0];
+  const last = coords[coords.length - 1];
   if (first[0] !== last[0] || first[1] !== last[1]) return [...coords, first];
   return coords;
 }
 function circleToRing(center, radiusMeters, steps = 64) {
-  const lat = Number(center.lat); const lng = Number(center.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radiusMeters)) return [];
+  const lat = Number(center.lat);
+  const lng = Number(center.lng);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    !Number.isFinite(radiusMeters)
+  )
+    return [];
   const mPerDegLat = 111320;
   const mPerDegLng = 111320 * Math.cos((lat * Math.PI) / 180);
   const dLat = radiusMeters / mPerDegLat;
@@ -86,18 +122,27 @@ function circleToRing(center, radiusMeters, steps = 64) {
   const ring = [];
   for (let i = 0; i < steps; i++) {
     const theta = (i / steps) * Math.PI * 2;
-    ring.push([r6(lng + dLngBase * Math.cos(theta)), r6(lat + dLat * Math.sin(theta))]);
+    ring.push([
+      r6(lng + dLngBase * Math.cos(theta)),
+      r6(lat + dLat * Math.sin(theta)),
+    ]);
   }
   return closeRing(ring);
 }
 function fenceToRings(f) {
   if (!f) return [];
-  if (f.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3) {
+  if (
+    f.type === "polygon" &&
+    Array.isArray(f.polygon) &&
+    f.polygon.length >= 3
+  ) {
     const ring = closeRing(f.polygon.map(([lng, lat]) => [r6(lng), r6(lat)]));
     return [ring];
   }
-  if (f.type === "circle" && f.center && f.radius != null) return [circleToRing(f.center, Number(f.radius) || 0, 72)];
-  if (f.type === "point" && f.point) return [circleToRing({ lat: f.point.lat, lng: f.point.lng }, 10, 32)];
+  if (f.type === "circle" && f.center && f.radius != null)
+    return [circleToRing(f.center, Number(f.radius) || 0, 72)];
+  if (f.type === "point" && f.point)
+    return [circleToRing({ lat: f.point.lat, lng: f.point.lng }, 10, 32)];
   return [];
 }
 function fencesToKML(name, fences) {
@@ -166,11 +211,32 @@ function SafeGeoFencePreview(props) {
     let mounted = true;
     import("../components/GeoFencePreview")
       .then((m) => mounted && setLoaded(() => m.default))
-      .catch(() => mounted && setErr("Map preview unavailable (leaflet not installed)."));
-    return () => { mounted = false; };
+      .catch(
+        () =>
+          mounted && setErr("Map preview unavailable (leaflet not installed)."),
+      );
+    return () => {
+      mounted = false;
+    };
   }, []);
-  if (err) return <div className="flex items-center justify-center rounded text-sm text-gray-600" style={{height: props.height || 320}}>{err}</div>;
-  if (!Loaded) return <div className="flex items-center justify-center bg-gray-100 rounded text-sm text-gray-600" style={{height: props.height || 320}}>Loading map…</div>;
+  if (err)
+    return (
+      <div
+        className="flex items-center justify-center rounded text-sm text-gray-600"
+        style={{ height: props.height || 320 }}
+      >
+        {err}
+      </div>
+    );
+  if (!Loaded)
+    return (
+      <div
+        className="flex items-center justify-center bg-gray-100 rounded text-sm text-gray-600"
+        style={{ height: props.height || 320 }}
+      >
+        Loading map…
+      </div>
+    );
   const C = Loaded;
   return <C {...props} />;
 }
@@ -186,28 +252,31 @@ function normalizeTask(t) {
   const _id = t._id || t.id;
   const title = t.title ?? t.name ?? "";
   const dueAt = t.dueAt ?? t.dueDate ?? t.deadlineAt ?? null;
-  const firstStartFromLog =
-    Array.isArray(t?.actualDurationLog)
-      ? (t.actualDurationLog
-          .filter(e => ["start","resume"].includes(String(e.action)))
-          .map(e => e.at)
-          .sort()[0] || null)
-      : null;
+  const firstStartFromLog = Array.isArray(t?.actualDurationLog)
+    ? t.actualDurationLog
+        .filter((e) => ["start", "resume"].includes(String(e.action)))
+        .map((e) => e.at)
+        .sort()[0] || null
+    : null;
   const startDate = t.startDate ?? t.startAt ?? firstStartFromLog ?? null;
 
   let assignee = t.assignee ?? null;
   const assignedTo = Array.isArray(t.assignedTo) ? t.assignedTo : null;
-  const assignedUserIds = Array.isArray(t.assignedUserIds) ? t.assignedUserIds : null;
+  const assignedUserIds = Array.isArray(t.assignedUserIds)
+    ? t.assignedUserIds
+    : null;
   if (!assignee) {
     if (assignedTo?.length) assignee = assignedTo[0];
     else if (assignedUserIds?.length) assignee = assignedUserIds[0];
   }
 
-  const assignedGroupIds = Array.isArray(t.assignedGroupIds) ? t.assignedGroupIds.map(idOf) : [];
-  const groupId = t.groupId ?? (assignedGroupIds.length ? assignedGroupIds[0] : null);
+  const assignedGroupIds = Array.isArray(t.assignedGroupIds)
+    ? t.assignedGroupIds.map(idOf)
+    : [];
+  const groupId =
+    t.groupId ?? (assignedGroupIds.length ? assignedGroupIds[0] : null);
   const normUserIds =
-    assignedUserIds?.map(idOf) ??
-    (assignedTo ? assignedTo.map(idOf) : []);
+    assignedUserIds?.map(idOf) ?? (assignedTo ? assignedTo.map(idOf) : []);
 
   return {
     ...t,
@@ -229,16 +298,41 @@ function normMilestone(ms) {
   const title = ms.title || ms.name || "";
 
   const startAt =
-    ms.startPlanned || ms.startAt || ms.startDate || ms.scheduledAt || ms.beginAt || ms.start || null;
+    ms.startPlanned ||
+    ms.startAt ||
+    ms.startDate ||
+    ms.scheduledAt ||
+    ms.beginAt ||
+    ms.start ||
+    null;
 
   const dueAt =
-    ms.endPlanned || ms.dueAt || ms.endAt || ms.endDate || ms.targetAt || ms.targetDate || ms.date || null;
+    ms.endPlanned ||
+    ms.dueAt ||
+    ms.endAt ||
+    ms.endDate ||
+    ms.targetAt ||
+    ms.targetDate ||
+    ms.date ||
+    null;
 
-  const status = canonStatus(ms.status || (ms.completed ? "finished" : "pending"));
-  const isRoadblock = !!(ms.isRoadblock ?? ms.roadblock ?? ms.is_blocker ?? false);
+  const status = canonStatus(
+    ms.status || (ms.completed ? "finished" : "pending"),
+  );
+  const isRoadblock = !!(
+    ms.isRoadblock ??
+    ms.roadblock ??
+    ms.is_blocker ??
+    false
+  );
 
   // Normalize dependency into a SINGLE ID string
-  const rawDep = ms.dependsOn ?? ms.roadblockDependency ?? ms.requires ?? ms.dependencies ?? null;
+  const rawDep =
+    ms.dependsOn ??
+    ms.roadblockDependency ??
+    ms.requires ??
+    ms.dependencies ??
+    null;
 
   let dependsOnId = "";
   if (Array.isArray(rawDep)) {
@@ -261,7 +355,7 @@ function normMilestone(ms) {
     dueAt,
     status,
     isRoadblock,
-    dependsOnId,     // <-- use THIS in the UI
+    dependsOnId, // <-- use THIS in the UI
     actualEndAt,
   };
 }
@@ -300,19 +394,30 @@ async function fetchManagerNotes(taskId, fallbackFromTask = []) {
 }
 
 /* ============= Small UI bits ============= */
-function Modal({ open, title, onClose, children, footer, size="lg" }) {
+function Modal({ open, title, onClose, children, footer, size = "lg" }) {
   if (!open) return null;
-  const maxW = size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
+  const maxW =
+    size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : "max-w-5xl";
   return (
     <div className="fixed inset-0 z-[100] grid place-items-center">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}>
+      <div
+        className={`relative z-10 w-full ${maxW} rounded-2xl border bg-white shadow-xl`}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <div className="text-lg font-semibold">{title}</div>
-          <button className="text-sm underline" onClick={onClose}>Close</button>
+          <button className="text-sm underline" onClick={onClose}>
+            Close
+          </button>
         </div>
-        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">{children}</div>
-        {footer && <div className="px-4 py-3 border-t flex justify-end gap-2">{footer}</div>}
+        <div className="p-4 space-y-3 max-h-[78vh] overflow-auto">
+          {children}
+        </div>
+        {footer && (
+          <div className="px-4 py-3 border-t flex justify-end gap-2">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -344,9 +449,9 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [fltFrom, setFltFrom] = useState(""); // YYYY-MM-DD
   const [fltTo, setFltTo] = useState("");
 
-    // Standalone inspection submissions date filter (independent of global filter)
+  // Standalone inspection submissions date filter (independent of global filter)
   const [inspFrom, setInspFrom] = useState(""); // YYYY-MM-DD
-  const [inspTo, setInspTo] = useState("");     // YYYY-MM-DD
+  const [inspTo, setInspTo] = useState(""); // YYYY-MM-DD
 
   // Overview inline-edit state (mirrors task)
   const [title, setTitle] = useState("");
@@ -383,7 +488,13 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [mInfo, setMInfo] = useState("");
   const [mReloadKey, setMReloadKey] = useState(0);
   const [msModalOpen, setMsModalOpen] = useState(false);
-  const [msForm, setMsForm] = useState({ title: "", startAt: "", endAt: "", status: "pending", isRoadblock: false });
+  const [msForm, setMsForm] = useState({
+    title: "",
+    startAt: "",
+    endAt: "",
+    status: "pending",
+    isRoadblock: false,
+  });
 
   // Inspections
   const [forms, setForms] = useState([]);
@@ -409,7 +520,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
   // NEW: Activity sorting + edit binding
   const [activitySort, setActivitySort] = useState("desc"); // 'desc' newest first | 'asc'
-  const [editingLogId, setEditingLogId] = useState(null);   // null => add, else edit
+  const [editingLogId, setEditingLogId] = useState(null); // null => add, else edit
 
   // Image lightbox
   const [imgOpen, setImgOpen] = useState(false);
@@ -422,20 +533,26 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [managerNotes, setManagerNotes] = useState([]);
 
   const usersById = useMemo(() => {
-    const m = new Map(); users.forEach(u => m.set(String(u._id), u)); return m;
+    const m = new Map();
+    users.forEach((u) => m.set(String(u._id), u));
+    return m;
   }, [users]);
   const userLabel = (u) => {
     if (!u) return "—";
     const idStr = String(u._id || u);
-    const populated = (u && (u.name || u.email)) ? u : usersById.get(idStr);
-    return populated ? (populated.name || populated.email || populated.username || idStr) : idStr;
+    const populated = u && (u.name || u.email) ? u : usersById.get(idStr);
+    return populated
+      ? populated.name || populated.email || populated.username || idStr
+      : idStr;
   };
   const projectLabel = (pid) => {
-    const p = projects.find(pr => String(pr._id) === String(pid));
+    const p = projects.find((pr) => String(pr._id) === String(pid));
     return p?.name || "—";
   };
   const groupsById = useMemo(() => {
-    const m = new Map(); groups.forEach(g => m.set(String(g._id), g)); return m;
+    const m = new Map();
+    groups.forEach((g) => m.set(String(g._id), g));
+    return m;
   }, [groups]);
 
   /* ---------- load lookups ---------- */
@@ -458,25 +575,37 @@ export default function TaskDetail({ id: propId, onClose }) {
       try {
         const [p, u, g] = await Promise.all([
           api.get("/projects", { params: { limit: 1000 } }),
-          api.get("/users",    { params: { limit: 1000 } }),
-          api.get("/groups",   { params: { limit: 1000 } }),
+          api.get("/users", { params: { limit: 1000 } }),
+          api.get("/groups", { params: { limit: 1000 } }),
         ]);
 
-        setProjects(asList(p.data).map(normId).filter(x => x._id));
-        setUsers(asList(u.data).map(normId).filter(x => x._id));
-        setGroups(asList(g.data).map(normId).filter(x => x._id));
+        setProjects(
+          asList(p.data)
+            .map(normId)
+            .filter((x) => x._id),
+        );
+        setUsers(
+          asList(u.data)
+            .map(normId)
+            .filter((x) => x._id),
+        );
+        setGroups(
+          asList(g.data)
+            .map(normId)
+            .filter((x) => x._id),
+        );
       } catch (e) {
         // console.warn("Lookup load failed:", e?.response?.data || e);
       }
     })();
   }, []);
 
-// src/pages/TaskDetail.jsx  (Part 2/3) — continue
+  // src/pages/TaskDetail.jsx  (Part 2/3) — continue
   /* ---------- fences helpers ---------- */
   function normalizeFencesPayload(data) {
     if (Array.isArray(data?.geoFences)) return data.geoFences;
-    if (Array.isArray(data?.fences))    return data.fences;
-    if (Array.isArray(data))            return data;
+    if (Array.isArray(data?.fences)) return data.fences;
+    if (Array.isArray(data)) return data;
     return [];
   }
   async function computeEffectiveFences(taskId, pid) {
@@ -503,12 +632,14 @@ export default function TaskDetail({ id: propId, onClose }) {
         return;
       } catch {}
     }
-    setGfCount(0); setGfSource("none");
+    setGfCount(0);
+    setGfSource("none");
   }
 
   /* ---------- load task + manager notes ---------- */
   async function loadTask() {
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
       const { data } = await api.get(`/tasks/${id}`);
       const norm = normalizeTask(data || null);
@@ -523,9 +654,15 @@ export default function TaskDetail({ id: propId, onClose }) {
       setProjectId(norm?.projectId || "");
       const seedGid =
         (norm?.groupId && String(norm.groupId)) ||
-        (Array.isArray(norm?.assignedGroupIds) && norm.assignedGroupIds.length ? String(norm.assignedGroupIds[0]) : "");
+        (Array.isArray(norm?.assignedGroupIds) && norm.assignedGroupIds.length
+          ? String(norm.assignedGroupIds[0])
+          : "");
       setGroupId(seedGid || "");
-      const a = norm?.assignee || (Array.isArray(norm?.assignedTo) && norm.assignedTo.length ? norm.assignedTo[0] : "");
+      const a =
+        norm?.assignee ||
+        (Array.isArray(norm?.assignedTo) && norm.assignedTo.length
+          ? norm.assignedTo[0]
+          : "");
       setAssignee(a ? String(a._id || a) : "");
       setTags(Array.isArray(norm?.tags) ? norm.tags.join(", ") : "");
       setDescription(norm?.description || "");
@@ -542,10 +679,15 @@ export default function TaskDetail({ id: propId, onClose }) {
 
       // Load manager notes
       try {
-        const notes = await fetchManagerNotes(id, Array.isArray(norm?.managerNotes) ? norm.managerNotes : []);
+        const notes = await fetchManagerNotes(
+          id,
+          Array.isArray(norm?.managerNotes) ? norm.managerNotes : [],
+        );
         setManagerNotes(Array.isArray(notes) ? notes : []);
       } catch {
-        setManagerNotes(Array.isArray(norm?.managerNotes) ? norm.managerNotes : []);
+        setManagerNotes(
+          Array.isArray(norm?.managerNotes) ? norm.managerNotes : [],
+        );
       }
 
       await computeEffectiveFences(id, norm?.projectId || "");
@@ -556,7 +698,9 @@ export default function TaskDetail({ id: propId, onClose }) {
       console.error("Load task failed:", e?.response?.data || e);
     }
   }
-  useEffect(() => { loadTask();   }, [id]);
+  useEffect(() => {
+    loadTask();
+  }, [id]);
 
   /* ---------- milestones ---------- */
   async function loadMilestones() {
@@ -564,10 +708,14 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       let data;
       try {
-        const res = await api.get(`/tasks/${id}/milestones`, { params: { limit: 500, _ts: Date.now() } });
+        const res = await api.get(`/tasks/${id}/milestones`, {
+          params: { limit: 500, _ts: Date.now() },
+        });
         data = res.data;
       } catch (e) {
-        const res = await api.get("/milestones", { params: { taskId: id, limit: 500, _ts: Date.now() } });
+        const res = await api.get("/milestones", {
+          params: { taskId: id, limit: 500, _ts: Date.now() },
+        });
         data = res.data;
       }
       const list = Array.isArray(data) ? data.map(normMilestone) : [];
@@ -577,48 +725,80 @@ export default function TaskDetail({ id: propId, onClose }) {
       setMErr(e?.response?.data?.error || "Failed to load deliverables");
     }
   }
-  useEffect(() => { loadMilestones();   }, [id]);
+  useEffect(() => {
+    loadMilestones();
+  }, [id]);
 
   function buildMilestonePayload(ms, patch) {
     const out = {};
     if ("title" in patch) {
       const name = (patch.title || "").trim();
-      out.title = name; out.name = name;
+      out.title = name;
+      out.name = name;
     }
     if ("startAt" in patch) {
       const s = patch.startAt || null;
-      out.startPlanned = s; out.startAt = s; out.startDate = s; out.scheduledAt = s;
+      out.startPlanned = s;
+      out.startAt = s;
+      out.startDate = s;
+      out.scheduledAt = s;
     }
     if ("endAt" in patch) {
       const e = patch.endAt || null;
-      out.endPlanned = e; out.endAt = e; out.endDate = e; out.dueAt = e; out.dueDate = e; out.targetDate = e;
+      out.endPlanned = e;
+      out.endAt = e;
+      out.endDate = e;
+      out.dueAt = e;
+      out.dueDate = e;
+      out.targetDate = e;
     }
     if ("status" in patch) {
       const st = canonStatus(patch.status);
-      out.status = st; out.completed = st === "finished";
+      out.status = st;
+      out.completed = st === "finished";
       if (st === "finished" && !ms.actualEndAt && !("actualEndAt" in patch)) {
         const now = new Date().toISOString();
-        out.endActual = now; out.actualEndAt = now; out.completedAt = now;
+        out.endActual = now;
+        out.actualEndAt = now;
+        out.completedAt = now;
       }
     }
-    if ("isRoadblock" in patch) { const b = !!patch.isRoadblock; out.isRoadblock = b; out.roadblock = b; }
-    if ("dependsOn" in patch) { const arr = patch.dependsOn ? [String(patch.dependsOn)] : []; out.dependsOn = arr; out.requires = arr; out.dependencies = arr; }
-    if ("actualEndAt" in patch) { const a = patch.actualEndAt || null; out.endActual = a; out.actualEndAt = a; out.completedAt = a; }
+    if ("isRoadblock" in patch) {
+      const b = !!patch.isRoadblock;
+      out.isRoadblock = b;
+      out.roadblock = b;
+    }
+    if ("dependsOn" in patch) {
+      const arr = patch.dependsOn ? [String(patch.dependsOn)] : [];
+      out.dependsOn = arr;
+      out.requires = arr;
+      out.dependencies = arr;
+    }
+    if ("actualEndAt" in patch) {
+      const a = patch.actualEndAt || null;
+      out.endActual = a;
+      out.actualEndAt = a;
+      out.completedAt = a;
+    }
     out.taskId = id;
     return out;
   }
   async function patchMilestone(ms, patch) {
     const payload = buildMilestonePayload(ms, patch);
     try {
-      try { await api.patch(`/tasks/${id}/milestones/${ms._id}`, payload); }
-      catch (e) {
-        if (e?.response?.status === 405) await api.put(`/tasks/${id}/milestones/${ms._id}`, payload);
+      try {
+        await api.patch(`/tasks/${id}/milestones/${ms._id}`, payload);
+      } catch (e) {
+        if (e?.response?.status === 405)
+          await api.put(`/tasks/${id}/milestones/${ms._id}`, payload);
         else throw e;
       }
     } catch (e2) {
-      try { await api.patch(`/milestones/${ms._id}`, payload); }
-      catch (e3) {
-        if (e3?.response?.status === 405) await api.put(`/milestones/${ms._id}`, payload);
+      try {
+        await api.patch(`/milestones/${ms._id}`, payload);
+      } catch (e3) {
+        if (e3?.response?.status === 405)
+          await api.put(`/milestones/${ms._id}`, payload);
         else throw e3;
       }
     }
@@ -626,21 +806,42 @@ export default function TaskDetail({ id: propId, onClose }) {
 
   // Create Milestone
   async function createMilestone() {
-    setMErr(""); setMInfo("");
+    setMErr("");
+    setMInfo("");
     try {
       const title = (msForm.title || "").trim();
-      if (!title) { setMErr("Title is required"); return; }
+      if (!title) {
+        setMErr("Title is required");
+        return;
+      }
       const status = canonStatus(msForm.status || "pending");
       const sISO = msForm.startAt ? fromLocalDateOnly(msForm.startAt) : null;
       const eISO = msForm.endAt ? fromLocalDateOnly(msForm.endAt) : null;
       const payload = {
-        title, name: title,
+        title,
+        name: title,
         status,
         isRoadblock: !!msForm.isRoadblock,
         roadblock: !!msForm.isRoadblock,
         taskId: id,
-        ...(sISO ? { startPlanned: sISO, startAt: sISO, startDate: sISO, scheduledAt: sISO } : {}),
-        ...(eISO ? { endPlanned: eISO, endAt: eISO, endDate: eISO, dueAt: eISO, dueDate: eISO, targetDate: eISO } : {}),
+        ...(sISO
+          ? {
+              startPlanned: sISO,
+              startAt: sISO,
+              startDate: sISO,
+              scheduledAt: sISO,
+            }
+          : {}),
+        ...(eISO
+          ? {
+              endPlanned: eISO,
+              endAt: eISO,
+              endDate: eISO,
+              dueAt: eISO,
+              dueDate: eISO,
+              targetDate: eISO,
+            }
+          : {}),
       };
       try {
         await api.post(`/tasks/${id}/milestones`, payload);
@@ -653,10 +854,17 @@ export default function TaskDetail({ id: propId, onClose }) {
         }
       }
       setMsModalOpen(false);
-      setMsForm({ title: "", startAt: "", endAt: "", status: "pending", isRoadblock: false });
+      setMsForm({
+        title: "",
+        startAt: "",
+        endAt: "",
+        status: "pending",
+        isRoadblock: false,
+      });
       await loadMilestones();
       setMReloadKey((k) => k + 1);
-      setMInfo("Deliverable Added."); setTimeout(() => setMInfo(""), 1000);
+      setMInfo("Deliverable Added.");
+      setTimeout(() => setMInfo(""), 1000);
     } catch (e) {
       setMErr(e?.response?.data?.error || String(e));
     }
@@ -664,7 +872,8 @@ export default function TaskDetail({ id: propId, onClose }) {
 
   /* ---------- optimistic save helpers ---------- */
   async function optimisticSave(patch, applyLocal) {
-    setErr(""); setSaving(true);
+    setErr("");
+    setSaving(true);
     const prev = lastGoodTaskRef.current;
     try {
       if (applyLocal) applyLocal();
@@ -677,13 +886,14 @@ export default function TaskDetail({ id: propId, onClose }) {
       if (prev) setTask(prev);
       setSaving(false);
       const raw = e?.response?.data;
-      const msg = raw?.error || raw?.message || JSON.stringify(raw || {}) || String(e);
+      const msg =
+        raw?.error || raw?.message || JSON.stringify(raw || {}) || String(e);
       setErr(msg);
       console.error("Save failed:", raw || e);
     }
   }
 
-    const getAssigneeIdFromTask = (t) => {
+  const getAssigneeIdFromTask = (t) => {
     const a =
       t?.assignee ??
       (Array.isArray(t?.assignedTo) && t.assignedTo[0]) ??
@@ -721,9 +931,10 @@ export default function TaskDetail({ id: propId, onClose }) {
             assignee: nextAssigneeId || null,
             assignedUserIds: nextAssigneeId ? [nextAssigneeId] : [],
             assignedTo: nextAssigneeId ? [nextAssigneeId] : [],
-          }))
+          })),
       );
-      setInfo("Assignee saved."); setTimeout(()=>setInfo(""), 1000);
+      setInfo("Assignee saved.");
+      setTimeout(() => setInfo(""), 1000);
     } finally {
       saveGateRef.current.assignee = false;
     }
@@ -731,7 +942,10 @@ export default function TaskDetail({ id: propId, onClose }) {
   async function saveStartOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
-    const haveLocal = toLocalDateOnly(current.startDate || current.startAt || current.scheduledAt) || "";
+    const haveLocal =
+      toLocalDateOnly(
+        current.startDate || current.startAt || current.scheduledAt,
+      ) || "";
     if (haveLocal === String(nextLocalDateStr || "")) return;
     if (saveGateRef.current.start) return;
     const iso = nextLocalDateStr ? fromLocalDateOnly(nextLocalDateStr) : null;
@@ -739,10 +953,15 @@ export default function TaskDetail({ id: propId, onClose }) {
     saveGateRef.current.start = true;
     try {
       await optimisticSave(
-        { startDate: iso || null, startAt: iso || null, scheduledAt: iso || null },
-        () => setTask((t) => ({ ...(t || {}), startDate: iso || null }))
+        {
+          startDate: iso || null,
+          startAt: iso || null,
+          scheduledAt: iso || null,
+        },
+        () => setTask((t) => ({ ...(t || {}), startDate: iso || null })),
       );
-      setInfo("Start date saved."); setTimeout(()=>setInfo(""), 1000);
+      setInfo("Start date saved.");
+      setTimeout(() => setInfo(""), 1000);
     } finally {
       saveGateRef.current.start = false;
     }
@@ -750,17 +969,24 @@ export default function TaskDetail({ id: propId, onClose }) {
   async function saveDueOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
-    const haveLocal = toLocalDateOnly(current.dueAt || current.dueDate || current.deadlineAt) || "";
+    const haveLocal =
+      toLocalDateOnly(current.dueAt || current.dueDate || current.deadlineAt) ||
+      "";
     if (haveLocal === String(nextLocalDateStr || "")) return;
     if (saveGateRef.current.due) return;
     const iso = nextLocalDateStr ? fromLocalDateOnly(nextLocalDateStr) : null;
     saveGateRef.current.due = true;
     try {
       await optimisticSave(
-        { dueAt: iso || null, dueDate: nextLocalDateStr || null, deadlineAt: iso || null },
-        () => setTask((t) => ({ ...(t||{}), dueAt: iso || null }))
+        {
+          dueAt: iso || null,
+          dueDate: nextLocalDateStr || null,
+          deadlineAt: iso || null,
+        },
+        () => setTask((t) => ({ ...(t || {}), dueAt: iso || null })),
       );
-      setInfo("Due date saved."); setTimeout(()=>setInfo(""), 1000);
+      setInfo("Due date saved.");
+      setTimeout(() => setInfo(""), 1000);
     } finally {
       saveGateRef.current.due = false;
     }
@@ -775,147 +1001,180 @@ export default function TaskDetail({ id: propId, onClose }) {
       setForms(Array.isArray(data) ? data : []);
       setFormsErr("");
     } catch (e) {
-      setForms([]); setFormsErr(e?.response?.data?.error || "Failed to load forms");
+      setForms([]);
+      setFormsErr(e?.response?.data?.error || "Failed to load forms");
     }
   }
-async function loadSubs() {
-  try {
-    const params = { limit: 200, taskId: id };
-    if (projectId) params.projectId = projectId;
+  async function loadSubs() {
+    try {
+      const params = { limit: 200, taskId: id };
+      if (projectId) params.projectId = projectId;
 
-    const { data } = await api.get("/inspections/submissions", { params });
+      const { data } = await api.get("/inspections/submissions", { params });
 
-    // ✅ handle multiple backend shapes
-    const list =
-      Array.isArray(data) ? data :
-      Array.isArray(data?.items) ? data.items :
-      Array.isArray(data?.rows) ? data.rows :
-      Array.isArray(data?.data) ? data.data :
-      [];
+      // ✅ handle multiple backend shapes
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data?.rows)
+            ? data.rows
+            : Array.isArray(data?.data)
+              ? data.data
+              : [];
 
-    setSubs(list);
-    setSubsErr("");
-  } catch (e) {
-    setSubs([]);
-    setSubsErr(e?.response?.data?.error || "Failed to load submissions");
+      setSubs(list);
+      setSubsErr("");
+    } catch (e) {
+      setSubs([]);
+      setSubsErr(e?.response?.data?.error || "Failed to load submissions");
+    }
   }
-}
-  useEffect(() => { loadForms(); loadSubs();   }, [id, projectId]);
+  useEffect(() => {
+    loadForms();
+    loadSubs();
+  }, [id, projectId]);
 
-    /* ---------- submission field resolver (robust) ---------- */
+  /* ---------- submission field resolver (robust) ---------- */
   function resolveSubmissionFields(s) {
     // DATE
     const submittedRaw =
-      s?.submittedAt || s?.createdAt || s?.completedAt || s?.finishedAt || s?.updatedAt || null;
+      s?.submittedAt ||
+      s?.createdAt ||
+      s?.completedAt ||
+      s?.finishedAt ||
+      s?.updatedAt ||
+      null;
     const submitted = submittedRaw ? new Date(submittedRaw) : null;
 
     // INSPECTOR (many shapes)
-     const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
-  const actorObj =
-    runBy ||
-    s?.actor ||
-    (s?.user && (typeof s.user === "object" ? s.user : null)) ||
-    null;
+    const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
+    const actorObj =
+      runBy ||
+      s?.actor ||
+      (s?.user && (typeof s.user === "object" ? s.user : null)) ||
+      null;
 
-  const actorId = String(
-    actorObj?.userId ||
-    actorObj?._id ||
-    actorObj?.id ||
-    s?.userId ||
-    s?.createdBy ||
-    ""
-  );
+    const actorId = String(
+      actorObj?.userId ||
+        actorObj?._id ||
+        actorObj?.id ||
+        s?.userId ||
+        s?.createdBy ||
+        "",
+    );
 
-  const actorFromUsers = actorId && usersById.get(actorId)
-    ? (usersById.get(actorId).name || usersById.get(actorId).email)
-    : "";
+    const actorFromUsers =
+      actorId && usersById.get(actorId)
+        ? usersById.get(actorId).name || usersById.get(actorId).email
+        : "";
 
-  const inspector =
-    actorFromUsers ||
-    runBy?.name ||
-    runBy?.email ||
-    actorObj?.name ||
-    actorObj?.email ||
-    s?.userName ||
-    s?.createdByName ||
-    actorId ||
-    "—";
+    const inspector =
+      actorFromUsers ||
+      runBy?.name ||
+      runBy?.email ||
+      actorObj?.name ||
+      actorObj?.email ||
+      s?.userName ||
+      s?.createdByName ||
+      actorId ||
+      "—";
 
     // MANAGER NOTE (common nests)
-     let managerNote = "—";
-  if (Array.isArray(s?.managerComments) && s.managerComments.length) {
-    const latest = s.managerComments
-      .slice()
-      .sort((a, b) => +new Date(b.at || b.createdAt || b.date || 0) - +new Date(a.at || a.createdAt || a.date || 0))[0];
-    managerNote = latest?.comment?.trim?.() ? latest.comment : "—";
-  } else {
-    managerNote =
-      s?.managerNote ||
-      s?.note ||
-      s?.meta?.managerNote ||
-      s?.review?.note ||
-      s?.reviewNote ||
-      "—";
-  }
+    let managerNote = "—";
+    if (Array.isArray(s?.managerComments) && s.managerComments.length) {
+      const latest = s.managerComments
+        .slice()
+        .sort(
+          (a, b) =>
+            +new Date(b.at || b.createdAt || b.date || 0) -
+            +new Date(a.at || a.createdAt || a.date || 0),
+        )[0];
+      managerNote = latest?.comment?.trim?.() ? latest.comment : "—";
+    } else {
+      managerNote =
+        s?.managerNote ||
+        s?.note ||
+        s?.meta?.managerNote ||
+        s?.review?.note ||
+        s?.reviewNote ||
+        "—";
+    }
 
-// OUTCOME (MUST use overallResult)
-const readStr = (v) => {
-  if (v == null) return "";
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  // avoid crashing on objects/arrays
-  try { return String(v).trim(); } catch { return ""; }
-};
+    // OUTCOME (MUST use overallResult)
+    const readStr = (v) => {
+      if (v == null) return "";
+      if (typeof v === "string") return v.trim();
+      if (typeof v === "number" || typeof v === "boolean") return String(v);
+      // avoid crashing on objects/arrays
+      try {
+        return String(v).trim();
+      } catch {
+        return "";
+      }
+    };
 
-const normalizeOverallResult = (v) => {
-  const raw = readStr(v);
-  if (!raw) return "";
+    const normalizeOverallResult = (v) => {
+      const raw = readStr(v);
+      if (!raw) return "";
 
-  const up = raw.toUpperCase().trim();
+      const up = raw.toUpperCase().trim();
 
-  // normalize common variants
-  if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up)) return "PASS";
-  if (["FAIL", "FAILED", "NOK", "NONCOMPLIANT", "NON-COMPLIANT"].includes(up)) return "FAIL";
-  if (
-    ["NEEDS FOLLOW-UP", "NEEDS_FOLLOW_UP", "NEEDS-FOLLOW-UP", "FOLLOW-UP", "FOLLOW UP", "REQUIRES ACTION"].includes(up)
-  ) return "NEEDS FOLLOW-UP";
+      // normalize common variants
+      if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up))
+        return "PASS";
+      if (
+        ["FAIL", "FAILED", "NOK", "NONCOMPLIANT", "NON-COMPLIANT"].includes(up)
+      )
+        return "FAIL";
+      if (
+        [
+          "NEEDS FOLLOW-UP",
+          "NEEDS_FOLLOW_UP",
+          "NEEDS-FOLLOW-UP",
+          "FOLLOW-UP",
+          "FOLLOW UP",
+          "REQUIRES ACTION",
+        ].includes(up)
+      )
+        return "NEEDS FOLLOW-UP";
 
-  // if backend uses "pass"/"fail" lowercased
-  if (up === "PASS") return "PASS";
-  if (up === "FAIL") return "FAIL";
+      // if backend uses "pass"/"fail" lowercased
+      if (up === "PASS") return "PASS";
+      if (up === "FAIL") return "FAIL";
 
-  // last resort: return the raw string (but at least not crash)
-  return raw;
-};
+      // last resort: return the raw string (but at least not crash)
+      return raw;
+    };
 
-// ✅ This is the field you told me matters
-const overallResultRaw =
-  s?.overallResult ??
-  s?.overall?.overallResult ??
-  s?.summary?.overallResult ??
-  s?.meta?.overallResult ??
-  s?.review?.overallResult ??
-  s?.results?.overallResult ??
-  "";
+    // ✅ This is the field you told me matters
+    const overallResultRaw =
+      s?.overallResult ??
+      s?.overall?.overallResult ??
+      s?.summary?.overallResult ??
+      s?.meta?.overallResult ??
+      s?.review?.overallResult ??
+      s?.results?.overallResult ??
+      "";
 
-// IMPORTANT: do NOT default to PASS if missing.
-// If it's missing, show "—" so you don't lie to users.
-const outcome = normalizeOverallResult(overallResultRaw) || "—";
+    // IMPORTANT: do NOT default to PASS if missing.
+    // If it's missing, show "—" so you don't lie to users.
+    const outcome = normalizeOverallResult(overallResultRaw) || "—";
 
     // FORM TITLE
     const formTitle =
-      s?.form?.title || s?.formTitle || s?.templateTitle || s?.templateName || "Form";
+      s?.form?.title ||
+      s?.formTitle ||
+      s?.templateTitle ||
+      s?.templateName ||
+      "Form";
 
-        // coords (robust: supports GeoJSON coordinates + multiple nests)
+    // coords (robust: supports GeoJSON coordinates + multiple nests)
     const pickLatLng = (obj) => {
       if (!obj) return { lat: null, lng: null };
 
       // Common: GeoJSON Point { type:"Point", coordinates:[lng,lat] }
-      const coords =
-        obj?.coordinates ||
-        obj?.coord ||
-        obj?.coords ||
-        null;
+      const coords = obj?.coordinates || obj?.coord || obj?.coords || null;
 
       if (Array.isArray(coords) && coords.length >= 2) {
         const lng = coords[0];
@@ -924,10 +1183,8 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
       }
 
       // Common: { lat, lng } or { latitude, longitude }
-      const lat =
-        obj?.lat ?? obj?.latitude ?? obj?.y ?? null;
-      const lng =
-        obj?.lng ?? obj?.lon ?? obj?.longitude ?? obj?.x ?? null;
+      const lat = obj?.lat ?? obj?.latitude ?? obj?.y ?? null;
+      const lng = obj?.lng ?? obj?.lon ?? obj?.longitude ?? obj?.x ?? null;
 
       return { lat, lng };
     };
@@ -988,43 +1245,53 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
         })()
       : null;
 
-  const taskCircle = showPin && lat !== "" && lng !== ""
-    ? (() => {
-        const L = Number(lat);
-        const G = Number(lng);
-        const R = radius === "" ? 50 : Number(radius);
-        return Number.isFinite(L) && Number.isFinite(G) && Number.isFinite(R)
-          ? { lat: L, lng: G, radius: R }
-          : null;
-      })()
-    : null;
+  const taskCircle =
+    showPin && lat !== "" && lng !== ""
+      ? (() => {
+          const L = Number(lat);
+          const G = Number(lng);
+          const R = radius === "" ? 50 : Number(radius);
+          return Number.isFinite(L) && Number.isFinite(G) && Number.isFinite(R)
+            ? { lat: L, lng: G, radius: R }
+            : null;
+        })()
+      : null;
 
   async function saveGeofence(e) {
     e?.preventDefault?.();
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
-      const gf = (lat !== "" && lng !== "") ? {
-        lat: Number(lat),
-        lng: Number(lng),
-        radius: radius !== "" ? Number(radius) : 50,
-      } : undefined;
+      const gf =
+        lat !== "" && lng !== ""
+          ? {
+              lat: Number(lat),
+              lng: Number(lng),
+              radius: radius !== "" ? Number(radius) : 50,
+            }
+          : undefined;
 
-      const { data } = await sendTaskUpdate(id, {
-        enforceLocationCheck,
-        enforceQRScan,
-        locationGeoFence: gf,
-      }, "put");
+      const { data } = await sendTaskUpdate(
+        id,
+        {
+          enforceLocationCheck,
+          enforceQRScan,
+          locationGeoFence: gf,
+        },
+        "put",
+      );
 
       const norm = normalizeTask(data);
       setTask(norm);
       lastGoodTaskRef.current = norm;
       await computeEffectiveFences(id, norm?.projectId || "");
-      setMapBump(b=>b+1);
+      setMapBump((b) => b + 1);
       setInfo("Pin & enforcement saved.");
       setTimeout(() => setInfo(""), 1200);
     } catch (e2) {
       const raw = e2?.response?.data;
-      const msg = raw?.error || raw?.message || JSON.stringify(raw || {}) || String(e2);
+      const msg =
+        raw?.error || raw?.message || JSON.stringify(raw || {}) || String(e2);
       setErr(msg);
     }
   }
@@ -1046,16 +1313,20 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
         const name = (file.name || "").toLowerCase();
         let rings = [];
         if (name.endsWith(".geojson") || name.endsWith(".json")) {
-          const td = new TextDecoder("utf-8"); const text = td.decode(textOrZip);
+          const td = new TextDecoder("utf-8");
+          const text = td.decode(textOrZip);
           const obj = JSON.parse(text);
           rings = parseGeoJSONToRings(obj);
         } else if (name.endsWith(".kml")) {
-          const td = new TextDecoder("utf-8"); const text = td.decode(textOrZip);
+          const td = new TextDecoder("utf-8");
+          const text = td.decode(textOrZip);
           rings = parseKMLToRings(text);
         } else if (name.endsWith(".kmz")) {
           const { default: JSZip } = await import("jszip");
           const zip = await JSZip.loadAsync(textOrZip);
-          const kmlEntry = Object.values(zip.files).find((f) => /\.kml$/i.test(f.name));
+          const kmlEntry = Object.values(zip.files).find((f) =>
+            /\.kml$/i.test(f.name),
+          );
           if (!kmlEntry) throw new Error("No .kml found inside .kmz");
           const kmlText = await kmlEntry.async("text");
           rings = parseKMLToRings(kmlText);
@@ -1063,12 +1334,15 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
           throw new Error("Unsupported file type. Use .geojson, .kml or .kmz");
         }
         if (!rings.length) throw new Error("No polygons found in file.");
-        const fences = rings.map(r => ({ type: "polygon", polygon: r }));
-        try { await api.put(`/tasks/${id}/geofences`, { fences }); }
-        catch { await api.post(`/tasks/${id}/geofences/import`, { fences }); }
+        const fences = rings.map((r) => ({ type: "polygon", polygon: r }));
+        try {
+          await api.put(`/tasks/${id}/geofences`, { fences });
+        } catch {
+          await api.post(`/tasks/${id}/geofences/import`, { fences });
+        }
       }
       await computeEffectiveFences(id, projectId);
-      setMapBump(b => b + 1);
+      setMapBump((b) => b + 1);
     } catch (e) {
       throw e;
     }
@@ -1079,7 +1353,8 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
       if (!Array.isArray(coords)) return;
       const outer = coords[0];
       if (!Array.isArray(outer) || outer.length < 3) return;
-      const cleaned = outer.map(([lng, lat]) => [r6(Number(lng)), r6(Number(lat))])
+      const cleaned = outer
+        .map(([lng, lat]) => [r6(Number(lng)), r6(Number(lat))])
         .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
       if (cleaned.length >= 3) rings.push(closeRing(cleaned));
     };
@@ -1088,7 +1363,8 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
       if (g.type === "Polygon") pushPoly(g.coordinates);
       if (g.type === "MultiPolygon") (g.coordinates || []).forEach(pushPoly);
     };
-    if (obj.type === "FeatureCollection") (obj.features || []).forEach((f) => handle(f?.geometry));
+    if (obj.type === "FeatureCollection")
+      (obj.features || []).forEach((f) => handle(f?.geometry));
     else if (obj.type === "Feature") handle(obj.geometry);
     else handle(obj);
     return rings;
@@ -1101,167 +1377,206 @@ const outcome = normalizeOverallResult(overallResultRaw) || "—";
     coordsEls.forEach((el) => {
       const raw = (el.textContent || "").trim();
       if (!raw) return;
-      const pts = raw.split(/\s+/).map((pair) => {
-        const [lng, lat] = pair.split(",").slice(0, 2).map(Number);
-        return [r6(lng), r6(lat)];
-      }).filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
+      const pts = raw
+        .split(/\s+/)
+        .map((pair) => {
+          const [lng, lat] = pair.split(",").slice(0, 2).map(Number);
+          return [r6(lng), r6(lat)];
+        })
+        .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
       if (pts.length >= 3) rings.push(closeRing(pts));
     });
     return rings;
   }
 
   async function clearTaskFences() {
-    if (!window.confirm("Remove all task-specific fences? (Project fences, if any, will still apply)")) return;
+    if (
+      !window.confirm(
+        "Remove all task-specific fences? (Project fences, if any, will still apply)",
+      )
+    )
+      return;
     try {
-      try { await api.delete(`/tasks/${id}/geofences`); }
-      catch { await api.post(`/tasks/${id}/geofences/clear`); }
+      try {
+        await api.delete(`/tasks/${id}/geofences`);
+      } catch {
+        await api.post(`/tasks/${id}/geofences/clear`);
+      }
       await computeEffectiveFences(id, projectId);
-      setMapBump(b => b + 1);
-      setInfo("Task fences cleared."); setTimeout(()=>setInfo(""),1000);
+      setMapBump((b) => b + 1);
+      setInfo("Task fences cleared.");
+      setTimeout(() => setInfo(""), 1000);
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || String(e));
     }
   }
   async function refreshEffectiveFences() {
-    setErr(""); await computeEffectiveFences(id, projectId); setMapBump((b) => b + 1);
+    setErr("");
+    await computeEffectiveFences(id, projectId);
+    setMapBump((b) => b + 1);
   }
 
   /* ---------- actions/logs ---------- */
   async function doAction(action) {
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
-     const body = { action };
+      const body = { action };
 
-// Always *attempt* to capture location if available
-const coords = await new Promise((resolve) => {
-  if (!navigator.geolocation) return resolve(null);
-  navigator.geolocation.getCurrentPosition(
-    (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-    () => resolve(null),
-    { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 }
-  );
-});
-if (coords) {
-  body.lat = coords.lat;
-  body.lng = coords.lng;
-}
+      // Always *attempt* to capture location if available
+      const coords = await new Promise((resolve) => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition(
+          (pos) =>
+            resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+          () => resolve(null),
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 },
+        );
+      });
+      if (coords) {
+        body.lat = coords.lat;
+        body.lng = coords.lng;
+      }
       await api.post(`/tasks/${id}/action`, body);
       await loadTask();
-      setInfo(`Action: ${action}`); setTimeout(() => setInfo(""), 1000);
-    } catch (e) { setErr(e?.response?.data?.error || String(e)); }
+      setInfo(`Action: ${action}`);
+      setTimeout(() => setInfo(""), 1000);
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
+    }
   }
 
   // Add / Edit Log submit (productivity or photo)
-async function submitLog() {
-  setLogErr("");
-  try {
-    if (logType === "attachment") {
-      // PHOTO
-      if (!editingLogId) {
-        if (!logFile) throw new Error("Choose a photo to upload.");
+  async function submitLog() {
+    setLogErr("");
+    try {
+      if (logType === "attachment") {
+        // PHOTO
+        if (!editingLogId) {
+          if (!logFile) throw new Error("Choose a photo to upload.");
 
-        const fd = new FormData();
-        fd.append("file", logFile);
-        if (logNote) fd.append("note", logNote);
+          const fd = new FormData();
+          fd.append("file", logFile);
+          if (logNote) fd.append("note", logNote);
 
-        // If you want milestone info to travel with the photo, send it too
-        if (logMilestoneId) {
-          fd.append("milestoneId", logMilestoneId);
-          fd.append("milestone", logMilestoneId);
-          fd.append("milestone_id", logMilestoneId);
+          // If you want milestone info to travel with the photo, send it too
+          if (logMilestoneId) {
+            fd.append("milestoneId", logMilestoneId);
+            fd.append("milestone", logMilestoneId);
+            fd.append("milestone_id", logMilestoneId);
+          }
+
+          // Always try capture lat/lng when taking a photo
+          if (navigator.geolocation) {
+            const coords = await new Promise((resolve) => {
+              navigator.geolocation.getCurrentPosition(
+                (pos) =>
+                  resolve({
+                    lat: pos.coords.latitude,
+                    lng: pos.coords.longitude,
+                  }),
+                () => resolve(null),
+                { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 },
+              );
+            });
+            if (coords) {
+              fd.append("lat", coords.lat);
+              fd.append("lng", coords.lng);
+            }
+          }
+
+          await api.post(`/tasks/${id}/attachments`, fd, {
+            headers: { "Content-Type": "multipart/form-data" },
+          });
+
+          // Rely on the backend to create the "photo" log entry for this attachment.
+        } else {
+          // Editing an existing photo log: still patch the log metadata (time, note, milestone)
+          await api.patch(`/tasks/${id}/logs/${editingLogId}`, {
+            at: fromLocalDateTimeInput(logAt),
+            action: "photo",
+            note: logNote || "",
+            ...(logMilestoneId
+              ? {
+                  milestoneId: logMilestoneId,
+                  milestone: logMilestoneId,
+                  milestone_id: logMilestoneId,
+                }
+              : { milestoneId: null, milestone: null, milestone_id: null }),
+          });
         }
-
-        // Always try capture lat/lng when taking a photo
-if (navigator.geolocation) {
-  const coords = await new Promise((resolve) => {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => resolve(null),
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 }
-    );
-  });
-  if (coords) {
-    fd.append("lat", coords.lat);
-    fd.append("lng", coords.lng);
-  }
-}
-
-        await api.post(`/tasks/${id}/attachments`, fd, {
-          headers: { "Content-Type": "multipart/form-data" },
-        });
-
-        // Rely on the backend to create the "photo" log entry for this attachment.
       } else {
-        // Editing an existing photo log: still patch the log metadata (time, note, milestone)
-        await api.patch(`/tasks/${id}/logs/${editingLogId}`, {
+        // PRODUCTIVITY
+        const payload = {
+          action: logAction,
           at: fromLocalDateTimeInput(logAt),
-          action: "photo",
           note: logNote || "",
           ...(logMilestoneId
-            ? { milestoneId: logMilestoneId, milestone: logMilestoneId, milestone_id: logMilestoneId }
+            ? {
+                milestoneId: logMilestoneId,
+                milestone: logMilestoneId,
+                milestone_id: logMilestoneId,
+              }
             : { milestoneId: null, milestone: null, milestone_id: null }),
-        });
-      }
-    } else {
-      // PRODUCTIVITY
-      const payload = {
-        action: logAction,
-        at: fromLocalDateTimeInput(logAt),
-        note: logNote || "",
-        ...(logMilestoneId
-          ? { milestoneId: logMilestoneId, milestone: logMilestoneId, milestone_id: logMilestoneId }
-          : { milestoneId: null, milestone: null, milestone_id: null }),
-      };
+        };
 
-      // Always *attempt* location capture if available (for any action)
-if (navigator.geolocation) {
-  const coords = await new Promise((resolve) => {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => resolve(null),
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 }
-    );
-  });
-  if (coords) {
-    payload.lat = coords.lat;
-    payload.lng = coords.lng;
-  }
-}
+        // Always *attempt* location capture if available (for any action)
+        if (navigator.geolocation) {
+          const coords = await new Promise((resolve) => {
+            navigator.geolocation.getCurrentPosition(
+              (pos) =>
+                resolve({
+                  lat: pos.coords.latitude,
+                  lng: pos.coords.longitude,
+                }),
+              () => resolve(null),
+              { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 },
+            );
+          });
+          if (coords) {
+            payload.lat = coords.lat;
+            payload.lng = coords.lng;
+          }
+        }
 
-      if (!editingLogId) {
-        await api.post(`/tasks/${id}/logs`, payload);
-      } else {
-        await api.patch(`/tasks/${id}/logs/${editingLogId}`, payload);
+        if (!editingLogId) {
+          await api.post(`/tasks/${id}/logs`, payload);
+        } else {
+          await api.patch(`/tasks/${id}/logs/${editingLogId}`, payload);
+        }
       }
+
+      setLogOpen(false);
+      setEditingLogId(null);
+      setLogFile(null);
+      setLogNote("");
+      setLogMilestoneId("");
+      await loadTask();
+      setInfo("Log saved.");
+      setTimeout(() => setInfo(""), 1000);
+    } catch (e) {
+      setLogErr(e?.response?.data?.error || e?.message || String(e));
     }
-
-    setLogOpen(false);
-    setEditingLogId(null);
-    setLogFile(null);
-    setLogNote("");
-    setLogMilestoneId("");
-    await loadTask();
-    setInfo("Log saved.");
-    setTimeout(() => setInfo(""), 1000);
-  } catch (e) {
-    setLogErr(e?.response?.data?.error || e?.message || String(e));
   }
-}
 
   /* ---------- Manager status + notes ---------- */
   async function saveManagerStatusAndNote() {
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     const nextStatus = canonStatus(mgrStatus || "pending");
     const note = (mgrNote || "").trim();
 
     try {
-      await optimisticSave(
-        { status: nextStatus },
-        () => setTask((t) => ({ ...(t||{}), status: nextStatus }))
+      await optimisticSave({ status: nextStatus }, () =>
+        setTask((t) => ({ ...(t || {}), status: nextStatus })),
       );
 
       if (note) {
-        const entry = { at: new Date().toISOString(), status: nextStatus, note };
+        const entry = {
+          at: new Date().toISOString(),
+          status: nextStatus,
+          note,
+        };
         try {
           await api.post(`/tasks/${id}/manager-notes`, entry);
           const fresh = await fetchManagerNotes(id, []);
@@ -1269,12 +1584,13 @@ if (navigator.geolocation) {
         } catch (e) {
           const st = e?.response?.status;
           if (st === 404 || st === 405) {
-            const existing = Array.isArray(lastGoodTaskRef.current?.managerNotes)
+            const existing = Array.isArray(
+              lastGoodTaskRef.current?.managerNotes,
+            )
               ? lastGoodTaskRef.current.managerNotes
               : [];
-            await optimisticSave(
-              { managerNotes: [...existing, entry] },
-              () => setManagerNotes((prev) => [...prev, entry])
+            await optimisticSave({ managerNotes: [...existing, entry] }, () =>
+              setManagerNotes((prev) => [...prev, entry]),
             );
           } else {
             throw e;
@@ -1282,7 +1598,8 @@ if (navigator.geolocation) {
         }
         setMgrNote("");
       }
-      setInfo("Status & manager note saved."); setTimeout(()=>setInfo(""),1200);
+      setInfo("Status & manager note saved.");
+      setTimeout(() => setInfo(""), 1200);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -1294,18 +1611,26 @@ if (navigator.geolocation) {
       const node = printRef.current;
       if (!node) return window.print();
 
-      const win = window.open("", "_blank", "noopener,noreferrer,width=1024,height=768");
+      const win = window.open(
+        "",
+        "_blank",
+        "noopener,noreferrer,width=1024,height=768",
+      );
       if (!win) return window.print();
 
       const doc = win.document;
       doc.open();
-      doc.write("<!doctype html><html><head><meta charset='utf-8'><title>Task</title></head><body></body></html>");
+      doc.write(
+        "<!doctype html><html><head><meta charset='utf-8'><title>Task</title></head><body></body></html>",
+      );
 
       const head = doc.head;
-      document.querySelectorAll('link[rel="stylesheet"], style').forEach((el) => {
-        const clone = el.cloneNode(true);
-        head.appendChild(clone);
-      });
+      document
+        .querySelectorAll('link[rel="stylesheet"], style')
+        .forEach((el) => {
+          const clone = el.cloneNode(true);
+          head.appendChild(clone);
+        });
 
       const style = doc.createElement("style");
       style.textContent = `
@@ -1332,7 +1657,8 @@ if (navigator.geolocation) {
 
   async function deleteTask() {
     if (!window.confirm("Delete this task? This cannot be undone.")) return;
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
       await api.delete(`/tasks/${id}`);
       setInfo("Task deleted.");
@@ -1344,54 +1670,58 @@ if (navigator.geolocation) {
   }
 
   /* ---------- date filter helpers ---------- */
-const submissionWhenIso = (s) =>
-  s?.submittedAt ||
-  s?.createdAt ||
-  s?.completedAt ||
-  s?.finishedAt ||
-  s?.updatedAt ||
-  null;
-
-// accepts ISO string OR Date
-const inDateWindow = (d) => {
-  if (!fltFrom && !fltTo) return true;
-
-  const dt =
-    d instanceof Date ? d :
-    typeof d === "string" || typeof d === "number" ? new Date(d) :
+  const submissionWhenIso = (s) =>
+    s?.submittedAt ||
+    s?.createdAt ||
+    s?.completedAt ||
+    s?.finishedAt ||
+    s?.updatedAt ||
     null;
 
-  if (!dt || isNaN(+dt)) return false;
+  // accepts ISO string OR Date
+  const inDateWindow = (d) => {
+    if (!fltFrom && !fltTo) return true;
 
-  const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
-  const toOk   = !fltTo   || dt <= new Date(`${fltTo}T23:59:59.999`);
-  return fromOk && toOk;
-};
-// INSPECTIONS: separate date filter (date-only compare to avoid timezone weirdness)
-const isoToLocalDateOnly = (iso) => {
-  if (!iso) return "";
-  const dt = new Date(iso);
-  if (isNaN(+dt)) return "";
-  return toLocalDateOnly(dt); // uses your helper (timezone-adjusted)
-};
+    const dt =
+      d instanceof Date
+        ? d
+        : typeof d === "string" || typeof d === "number"
+          ? new Date(d)
+          : null;
 
-const inInspectionWindow = (s) => {
-  // if no inspection filter, show all
-  if (!inspFrom && !inspTo) return true;
+    if (!dt || isNaN(+dt)) return false;
 
-  const whenIso = submissionWhenIso(s);
-  const day = isoToLocalDateOnly(whenIso); // "YYYY-MM-DD"
-  if (!day) return false;
+    const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
+    const toOk = !fltTo || dt <= new Date(`${fltTo}T23:59:59.999`);
+    return fromOk && toOk;
+  };
+  // INSPECTIONS: separate date filter (date-only compare to avoid timezone weirdness)
+  const isoToLocalDateOnly = (iso) => {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (isNaN(+dt)) return "";
+    return toLocalDateOnly(dt); // uses your helper (timezone-adjusted)
+  };
 
-  if (inspFrom && day < inspFrom) return false;
-  if (inspTo && day > inspTo) return false;
-  return true;
-};
+  const inInspectionWindow = (s) => {
+    // if no inspection filter, show all
+    if (!inspFrom && !inspTo) return true;
+
+    const whenIso = submissionWhenIso(s);
+    const day = isoToLocalDateOnly(whenIso); // "YYYY-MM-DD"
+    if (!day) return false;
+
+    if (inspFrom && day < inspFrom) return false;
+    if (inspTo && day > inspTo) return false;
+    return true;
+  };
 
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
     const m = new Map();
-    (milestones || []).forEach(x => m.set(String(x._id || x.id), x.title || "Deliverables"));
+    (milestones || []).forEach((x) =>
+      m.set(String(x._id || x.id), x.title || "Deliverables"),
+    );
     return m;
   }, [milestones]);
 
@@ -1400,40 +1730,77 @@ const inInspectionWindow = (s) => {
   const actualMins = task.actualDurationMinutes ?? 0;
   const estMins = task.estimatedDuration ?? null;
   const delta = estMins != null ? actualMins - estMins : null;
-  const savingDot = saving ? <span className="ml-2 text-xs text-gray-500">Saving…</span> : null;
+  const savingDot = saving ? (
+    <span className="ml-2 text-xs text-gray-500">Saving…</span>
+  ) : null;
 
   /* ====================== UI ====================== */
   return (
     <div className="max-w-7xl mx-auto p-4" ref={printRef}>
       {/* Header */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-2xl font-semibold truncate">{task.title || "Task"}</h1>
+        <h1 className="text-2xl font-semibold truncate">
+          {task.title || "Task"}
+        </h1>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Global date filter */}
           <div className="flex items-end gap-2 text-sm mr-2">
             <label className="block">
               <div className="text-xs text-gray-600">From</div>
-              <input type="date" className="border p-2 rounded" value={fltFrom} onChange={e=>setFltFrom(e.target.value)} />
+              <input
+                type="date"
+                className="border p-2 rounded"
+                value={fltFrom}
+                onChange={(e) => setFltFrom(e.target.value)}
+              />
             </label>
             <label className="block">
               <div className="text-xs text-gray-600">To</div>
-              <input type="date" className="border p-2 rounded" value={fltTo} onChange={e=>setFltTo(e.target.value)} />
+              <input
+                type="date"
+                className="border p-2 rounded"
+                value={fltTo}
+                onChange={(e) => setFltTo(e.target.value)}
+              />
             </label>
             {(fltFrom || fltTo) && (
-              <button className="px-2 py-2 border rounded" onClick={()=>{ setFltFrom(""); setFltTo(""); }}>
+              <button
+                className="px-2 py-2 border rounded"
+                onClick={() => {
+                  setFltFrom("");
+                  setFltTo("");
+                }}
+              >
                 Clear
               </button>
             )}
           </div>
 
-          <button className="px-3 py-2 border rounded" onClick={deleteTask}>Delete</button>
-          <button className="px-3 py-2 border rounded" onClick={printPDF}>Print PDF</button>
-          <button className="px-3 py-2 border rounded" onClick={() => (onClose ? onClose() : navigate(-1))}>Back</button>
+          <button className="px-3 py-2 border rounded" onClick={deleteTask}>
+            Delete
+          </button>
+          <button className="px-3 py-2 border rounded" onClick={printPDF}>
+            Print PDF
+          </button>
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => (onClose ? onClose() : navigate(-1))}
+          >
+            Back
+          </button>
         </div>
       </div>
 
-      {err && <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm">{err}</div>}
-      {info && <div className="mt-2 rounded border border-green-200 bg-green-100 p-2 text-sm">{info}</div>}
+      {err && (
+        <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-sm">
+          {err}
+        </div>
+      )}
+      {info && (
+        <div className="mt-2 rounded border border-green-200 bg-green-100 p-2 text-sm">
+          {info}
+        </div>
+      )}
 
       {/* Top row: Overview (left) | Manager (right) */}
       <div className="grid gap-4 lg:grid-cols-2 mt-3">
@@ -1449,9 +1816,11 @@ const inInspectionWindow = (s) => {
               onChange={(e) => setTitle(e.target.value)}
               onBlur={() =>
                 title !== (lastGoodTaskRef.current?.title || "") &&
-                optimisticSave(
-                  { title: title?.trim() || "" },
-                  () => setTask((t) => ({ ...(t||{}), title: title?.trim() || "" }))
+                optimisticSave({ title: title?.trim() || "" }, () =>
+                  setTask((t) => ({
+                    ...(t || {}),
+                    title: title?.trim() || "",
+                  })),
                 )
               }
               placeholder="Task title"
@@ -1468,13 +1837,16 @@ const inInspectionWindow = (s) => {
                   const v = e.target.value;
                   setPriority(v);
                   if (v !== (lastGoodTaskRef.current?.priority || ""))
-                    optimisticSave(
-                      { priority: v },
-                      () => setTask((t) => ({ ...(t||{}), priority: v }))
+                    optimisticSave({ priority: v }, () =>
+                      setTask((t) => ({ ...(t || {}), priority: v })),
                     );
                 }}
               >
-                {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                {PRIORITIES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -1486,19 +1858,25 @@ const inInspectionWindow = (s) => {
                 onChange={(e) => {
                   const v = e.target.value;
                   setProjectId(v);
-                  if (String(v || "") !== String(lastGoodTaskRef.current?.projectId || "")) {
-                    optimisticSave(
-                      { projectId: v || null },
-                      () => setTask((t) => ({ ...(t||{}), projectId: v || null }))
+                  if (
+                    String(v || "") !==
+                    String(lastGoodTaskRef.current?.projectId || "")
+                  ) {
+                    optimisticSave({ projectId: v || null }, () =>
+                      setTask((t) => ({ ...(t || {}), projectId: v || null })),
                     ).then(() => {
                       computeEffectiveFences(id, v || "");
-                      setMapBump((b)=>b+1);
+                      setMapBump((b) => b + 1);
                     });
                   }
                 }}
               >
                 <option value="">— none —</option>
-                {projects.map(p => <option key={p._id} value={p._id}>{p.name}</option>)}
+                {projects.map((p) => (
+                  <option key={p._id} value={p._id}>
+                    {p.name}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -1539,14 +1917,12 @@ const inInspectionWindow = (s) => {
                     assignedGroupIds: gid ? [gid] : [],
                   };
 
-                  optimisticSave(
-                    patch,
-                    () =>
-                      setTask((t) => ({
-                        ...(t || {}),
-                        groupId: gid ? gid : null,
-                        assignedGroupIds: gid ? [gid] : [],
-                      }))
+                  optimisticSave(patch, () =>
+                    setTask((t) => ({
+                      ...(t || {}),
+                      groupId: gid ? gid : null,
+                      assignedGroupIds: gid ? [gid] : [],
+                    })),
                   );
                 }}
               >
@@ -1557,7 +1933,6 @@ const inInspectionWindow = (s) => {
                   </option>
                 ))}
               </select>
-
               {!groups.length && (
                 <div className="text-xs text-amber-700 mt-1">
                   No groups loaded (check /groups response shape / permissions).
@@ -1575,16 +1950,15 @@ const inInspectionWindow = (s) => {
                   setAssignee(v);
 
                   const current = lastGoodTaskRef.current;
-                  const currentId =
-                    current?.assignedTo?.[0]?._id
-                      ? String(current.assignedTo[0]._id)
-                      : current?.assignedTo?.[0]
+                  const currentId = current?.assignedTo?.[0]?._id
+                    ? String(current.assignedTo[0]._id)
+                    : current?.assignedTo?.[0]
                       ? String(current.assignedTo[0])
                       : current?.assignee?._id
-                      ? String(current.assignee._id)
-                      : current?.assignee
-                      ? String(current.assignee)
-                      : "";
+                        ? String(current.assignee._id)
+                        : current?.assignee
+                          ? String(current.assignee)
+                          : "";
 
                   if (String(v) === String(currentId)) return;
 
@@ -1596,15 +1970,13 @@ const inInspectionWindow = (s) => {
                     assignedUserIds: v ? [v] : [],
                   };
 
-                  optimisticSave(
-                    patch,
-                    () =>
-                      setTask((t) => ({
-                        ...(t || {}),
-                        assignee: v ? v : null,
-                        assignedTo: v ? [v] : [],
-                        assignedUserIds: v ? [v] : [],
-                      }))
+                  optimisticSave(patch, () =>
+                    setTask((t) => ({
+                      ...(t || {}),
+                      assignee: v ? v : null,
+                      assignedTo: v ? [v] : [],
+                      assignedUserIds: v ? [v] : [],
+                    })),
                   );
                 }}
               >
@@ -1625,12 +1997,16 @@ const inInspectionWindow = (s) => {
               value={tags}
               onChange={(e) => setTags(e.target.value)}
               onBlur={() => {
-                const arr = tags.split(",").map(s => s.trim()).filter(Boolean);
-                const prev = Array.isArray(lastGoodTaskRef.current?.tags) ? lastGoodTaskRef.current.tags : [];
+                const arr = tags
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+                const prev = Array.isArray(lastGoodTaskRef.current?.tags)
+                  ? lastGoodTaskRef.current.tags
+                  : [];
                 if (JSON.stringify(arr) !== JSON.stringify(prev)) {
-                  optimisticSave(
-                    { tags: arr, labels: arr },
-                    () => setTask((t) => ({ ...(t||{}), tags: arr }))
+                  optimisticSave({ tags: arr, labels: arr }, () =>
+                    setTask((t) => ({ ...(t || {}), tags: arr })),
                   );
                 }
               }}
@@ -1646,10 +2022,13 @@ const inInspectionWindow = (s) => {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               onBlur={() =>
-                (description || "") !== (lastGoodTaskRef.current?.description || "") &&
-                optimisticSave(
-                  { description: description || "" },
-                  () => setTask((t) => ({ ...(t||{}), description: description || "" }))
+                (description || "") !==
+                  (lastGoodTaskRef.current?.description || "") &&
+                optimisticSave({ description: description || "" }, () =>
+                  setTask((t) => ({
+                    ...(t || {}),
+                    description: description || "",
+                  })),
                 )
               }
               placeholder="Task details…"
@@ -1661,7 +2040,8 @@ const inInspectionWindow = (s) => {
             {estMins != null ? `${estMins}m` : "—"} vs {actualMins}m
             {delta != null && (
               <span className={delta <= 0 ? "text-green-700" : "text-red-700"}>
-                {" "}({Math.abs(delta)}m {delta <= 0 ? "ahead" : "behind"})
+                {" "}
+                ({Math.abs(delta)}m {delta <= 0 ? "ahead" : "behind"})
               </span>
             )}
           </div>
@@ -1678,9 +2058,13 @@ const inInspectionWindow = (s) => {
                 <select
                   className="border p-2 w-full rounded mt-1"
                   value={mgrStatus}
-                  onChange={(e)=>setMgrStatus(canonStatus(e.target.value))}
+                  onChange={(e) => setMgrStatus(canonStatus(e.target.value))}
                 >
-                  {MS_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                  {MS_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
                 </select>
               </label>
 
@@ -1691,31 +2075,56 @@ const inInspectionWindow = (s) => {
                     className="border p-2 w-full rounded mt-1"
                     rows={3}
                     value={mgrNote}
-                    onChange={(e)=>setMgrNote(e.target.value)}
+                    onChange={(e) => setMgrNote(e.target.value)}
                     placeholder="Context for this status update, blockers, decisions…"
                   />
                 </label>
               </div>
 
               <div className="md:col-span-2 flex justify-end gap-2">
-                <button className="px-3 py-2 border rounded" onClick={saveManagerStatusAndNote}>Save</button>
+                <button
+                  className="px-3 py-2 border rounded"
+                  onClick={saveManagerStatusAndNote}
+                >
+                  Save
+                </button>
               </div>
             </div>
 
             {Array.isArray(managerNotes) && managerNotes.length > 0 && (
               <div className="mt-4">
-                <div className="text-sm font-medium mb-1">Recent manager notes</div>
+                <div className="text-sm font-medium mb-1">
+                  Recent manager notes
+                </div>
                 <div className="space-y-2">
                   {managerNotes
                     .slice()
-                    .sort((a,b)=> +new Date(b.at || b.createdAt || 0) - +new Date(a.at || a.createdAt || 0))
+                    .sort(
+                      (a, b) =>
+                        +new Date(b.at || b.createdAt || 0) -
+                        +new Date(a.at || a.createdAt || 0),
+                    )
                     .map((n, idx) => (
-                      <div key={(n._id || n.id || idx) + ":" + (n.at || n.createdAt || "")} className="text-sm border rounded p-2 bg-gray-50">
+                      <div
+                        key={
+                          (n._id || n.id || idx) +
+                          ":" +
+                          (n.at || n.createdAt || "")
+                        }
+                        className="text-sm border rounded p-2 bg-gray-50"
+                      >
                         <div className="text-xs text-gray-600 mb-1">
-                          {(n.at || n.createdAt) ? new Date(n.at || n.createdAt).toLocaleString() : "—"} {n.status ? `• ${canonStatus(n.status)}` : ""}
-                          {n.author?.name ? ` • ${n.author.name}` : n.author?.email ? ` • ${n.author.email}` : ""}
+                          {n.at || n.createdAt
+                            ? new Date(n.at || n.createdAt).toLocaleString()
+                            : "—"}{" "}
+                          {n.status ? `• ${canonStatus(n.status)}` : ""}
+                          {n.author?.name
+                            ? ` • ${n.author.name}`
+                            : n.author?.email
+                              ? ` • ${n.author.email}`
+                              : ""}
                         </div>
-                        <div style={{whiteSpace:"pre-wrap"}}>{n.note}</div>
+                        <div style={{ whiteSpace: "pre-wrap" }}>{n.note}</div>
                       </div>
                     ))}
                 </div>
@@ -1730,18 +2139,29 @@ const inInspectionWindow = (s) => {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="font-semibold">Geofencing</div>
           <div className="text-sm text-gray-600">
-            Effective fences: <b>{gfCount}</b> <span className="ml-2">source: <i>{gfSource}</i></span>
+            Effective fences: <b>{gfCount}</b>{" "}
+            <span className="ml-2">
+              source: <i>{gfSource}</i>
+            </span>
           </div>
         </div>
 
         {/* toggles row */}
         <div className="flex flex-wrap items-center gap-4 mt-3">
           <label className="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={showPin} onChange={(e)=>setShowPin(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showPin}
+              onChange={(e) => setShowPin(e.target.checked)}
+            />
             Show task pin
           </label>
           <label className="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={showTaskGeofence} onChange={(e)=>setShowTaskGeofence(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={showTaskGeofence}
+              onChange={(e) => setShowTaskGeofence(e.target.checked)}
+            />
             Show task geofence
           </label>
           <div className="ml-auto text-xs text-gray-500">
@@ -1753,7 +2173,9 @@ const inInspectionWindow = (s) => {
         <div className="mt-3">
           <SafeGeoFencePreview
             projectId={task.projectId}
-            taskId={showTaskGeofence && taskFenceApi === "present" ? id : undefined}
+            taskId={
+              showTaskGeofence && taskFenceApi === "present" ? id : undefined
+            }
             showTaskCoverage={true}
             height={360}
             className="relative rounded z-0"
@@ -1764,10 +2186,13 @@ const inInspectionWindow = (s) => {
             allowPicking={true}
             legend={true}
             onPickLocation={({ lat: L, lng: G }) => {
-              setLat(L.toFixed(PREC)); setLng(G.toFixed(PREC));
+              setLat(L.toFixed(PREC));
+              setLng(G.toFixed(PREC));
               if (!radius) setRadius(50);
-              setInfo(`Pin set at ${L.toFixed(PREC)}, ${G.toFixed(PREC)} — click “Save location” to persist.`);
-              setTimeout(()=>setInfo(""),2000);
+              setInfo(
+                `Pin set at ${L.toFixed(PREC)}, ${G.toFixed(PREC)} — click “Save location” to persist.`,
+              );
+              setTimeout(() => setInfo(""), 2000);
             }}
             onLoaded={({ projectFences, taskFences }) => {
               setDlProject(projectFences || []);
@@ -1781,52 +2206,120 @@ const inInspectionWindow = (s) => {
         <form onSubmit={saveGeofence} className="mt-3 space-y-3">
           {/* coords row */}
           <div className="flex flex-wrap gap-3 items-end">
-            <label className="text-sm">Lat
-              <input className="border p-2 w-full rounded ml-2" style={{minWidth:140}} value={lat} onChange={e=>setLat(e.target.value)} placeholder="-33.123456" />
+            <label className="text-sm">
+              Lat
+              <input
+                className="border p-2 w-full rounded ml-2"
+                style={{ minWidth: 140 }}
+                value={lat}
+                onChange={(e) => setLat(e.target.value)}
+                placeholder="-33.123456"
+              />
             </label>
-            <label className="text-sm">Lng
-              <input className="border p-2 w-full rounded ml-2" style={{minWidth:140}} value={lng} onChange={e=>setLng(e.target.value)} placeholder="18.654321" />
+            <label className="text-sm">
+              Lng
+              <input
+                className="border p-2 w-full rounded ml-2"
+                style={{ minWidth: 140 }}
+                value={lng}
+                onChange={(e) => setLng(e.target.value)}
+                placeholder="18.654321"
+              />
             </label>
-            <label className="text-sm">Radius (m)
-              <input className="border p-2 w-full rounded ml-2" type="number" min="5" value={radius} onChange={e=>setRadius(e.target.value)} placeholder="50" />
+            <label className="text-sm">
+              Radius (m)
+              <input
+                className="border p-2 w-full rounded ml-2"
+                type="number"
+                min="5"
+                value={radius}
+                onChange={(e) => setRadius(e.target.value)}
+                placeholder="50"
+              />
             </label>
-            <button type="button" className="px-3 py-2 border rounded"
-              onClick={()=>{
-                if (!navigator.geolocation) return setErr("Geolocation not supported by this browser.");
+            <button
+              type="button"
+              className="px-3 py-2 border rounded"
+              onClick={() => {
+                if (!navigator.geolocation)
+                  return setErr("Geolocation not supported by this browser.");
                 navigator.geolocation.getCurrentPosition(
                   (pos) => {
                     setLat(pos.coords.latitude.toFixed(PREC));
                     setLng(pos.coords.longitude.toFixed(PREC));
                     if (!radius) setRadius(50);
                   },
-                  (ge) => setErr(ge?.message || "Failed to get current position"),
-                  { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 }
+                  (ge) =>
+                    setErr(ge?.message || "Failed to get current position"),
+                  {
+                    enableHighAccuracy: true,
+                    maximumAge: 10000,
+                    timeout: 10000,
+                  },
                 );
-              }}>Use my location</button>
-            <button className="px-3 py-2 border rounded" type="submit">Save location</button>
+              }}
+            >
+              Use my location
+            </button>
+            <button className="px-3 py-2 border rounded" type="submit">
+              Save location
+            </button>
           </div>
 
           {/* upload/clear row */}
           <div className="flex flex-wrap items-end gap-3">
             <label className="text-sm" style={{ minWidth: 260 }}>
               GeoJSON/KML/KMZ
-              <input className="border p-2 w-full rounded mt-1" type="file" accept=".geojson,.json,.kml,.kmz" onChange={async (e) => {
-                const file = e.target.files?.[0] || null;
-                if (!file) return;
-                try { await uploadTaskFencesFile(file); setInfo("Fences updated."); setTimeout(()=>setInfo(""),1000); }
-                catch (er) { setErr(er?.response?.data?.error || er?.message || String(er)); }
-                finally { e.target.value = ""; }
-              }} />
+              <input
+                className="border p-2 w-full rounded mt-1"
+                type="file"
+                accept=".geojson,.json,.kml,.kmz"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0] || null;
+                  if (!file) return;
+                  try {
+                    await uploadTaskFencesFile(file);
+                    setInfo("Fences updated.");
+                    setTimeout(() => setInfo(""), 1000);
+                  } catch (er) {
+                    setErr(
+                      er?.response?.data?.error || er?.message || String(er),
+                    );
+                  } finally {
+                    e.target.value = "";
+                  }
+                }}
+              />
             </label>
-            <button className="px-3 py-2 border rounded" type="button" onClick={clearTaskFences}>Clear fences</button>
-            <button className="px-3 py-2 border rounded" type="button" onClick={refreshEffectiveFences}>Refresh</button>
+            <button
+              className="px-3 py-2 border rounded"
+              type="button"
+              onClick={clearTaskFences}
+            >
+              Clear fences
+            </button>
+            <button
+              className="px-3 py-2 border rounded"
+              type="button"
+              onClick={refreshEffectiveFences}
+            >
+              Refresh
+            </button>
             <div className="ml-auto flex gap-2">
               <button
                 className="px-3 py-2 border rounded disabled:opacity-50"
                 disabled={!dlProject?.length || exporting === "project"}
                 onClick={async () => {
-                  try { setExporting("project"); const name = `project_${(projectLabel(projectId) || projectId || "project").replace(/[^\w\-]+/g, "_")}`; const kml = fencesToKML(name, dlProject); await downloadKMZ(`${name}.kmz`, kml); setInfo(`Exported ${name}.kmz`); setTimeout(()=>setInfo(""),1000); }
-                  finally { setExporting(null); }
+                  try {
+                    setExporting("project");
+                    const name = `project_${(projectLabel(projectId) || projectId || "project").replace(/[^\w\-]+/g, "_")}`;
+                    const kml = fencesToKML(name, dlProject);
+                    await downloadKMZ(`${name}.kmz`, kml);
+                    setInfo(`Exported ${name}.kmz`);
+                    setTimeout(() => setInfo(""), 1000);
+                  } finally {
+                    setExporting(null);
+                  }
                 }}
                 type="button"
               >
@@ -1834,17 +2327,27 @@ const inInspectionWindow = (s) => {
               </button>
               <button
                 className="px-3 py-2 border rounded disabled:opacity-50"
-                disabled={!(dlTask?.length || taskCircle) || exporting === "task"}
+                disabled={
+                  !(dlTask?.length || taskCircle) || exporting === "task"
+                }
                 onClick={async () => {
                   try {
                     setExporting("task");
                     const fences = [...(dlTask || [])];
-                    if (taskCircle) fences.push({ type: "circle", center: { lat: Number(lat), lng: Number(lng) }, radius: Number(radius || 50) });
+                    if (taskCircle)
+                      fences.push({
+                        type: "circle",
+                        center: { lat: Number(lat), lng: Number(lng) },
+                        radius: Number(radius || 50),
+                      });
                     const name = `task_${(task?.title || id || "task").replace(/[^\w\-]+/g, "_")}`;
                     const kml = fencesToKML(name, fences);
                     await downloadKMZ(`${name}.kmz`, kml);
-                    setInfo(`Exported ${name}.kmz`); setTimeout(()=>setInfo(""),1000);
-                  } finally { setExporting(null); }
+                    setInfo(`Exported ${name}.kmz`);
+                    setTimeout(() => setInfo(""), 1000);
+                  } finally {
+                    setExporting(null);
+                  }
                 }}
                 type="button"
               >
@@ -1856,11 +2359,19 @@ const inInspectionWindow = (s) => {
           {/* enforcement toggles */}
           <div className="flex flex-wrap items-center gap-4">
             <label className="text-sm inline-flex items-center gap-2">
-              <input type="checkbox" checked={enforceLocationCheck} onChange={e => setEnforceLocationCheck(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={enforceLocationCheck}
+                onChange={(e) => setEnforceLocationCheck(e.target.checked)}
+              />
               Enforce location check (on start/resume)
             </label>
             <label className="text-sm inline-flex items-center gap-2">
-              <input type="checkbox" checked={enforceQRScan} onChange={e => setEnforceQRScan(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={enforceQRScan}
+                onChange={(e) => setEnforceQRScan(e.target.checked)}
+              />
               Require QR before start
             </label>
           </div>
@@ -1872,7 +2383,9 @@ const inInspectionWindow = (s) => {
         <MilestonesBlock
           key={`${id}:${mReloadKey}`}
           taskId={id}
-          taskStartAt={task?.startAt || task?.startDate || task?.scheduledAt || null}
+          taskStartAt={
+            task?.startAt || task?.startDate || task?.scheduledAt || null
+          }
           taskEndAt={task?.dueAt || task?.dueDate || null}
           taskDueAt={task?.dueAt || null}
           reloadKey={mReloadKey}
@@ -1883,7 +2396,12 @@ const inInspectionWindow = (s) => {
       <div className="border rounded-2xl p-4 mt-4 bg-white space-y-3">
         <div className="flex items-center justify-between">
           <div className="font-semibold">Deliverables</div>
-          <button className="px-3 py-2 border rounded" onClick={()=>setMsModalOpen(true)}>Add Deliverable</button>
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => setMsModalOpen(true)}
+          >
+            Add Deliverable
+          </button>
         </div>
         {mErr && <div className="text-red-600 text-sm">{mErr}</div>}
         {mInfo && <div className="text-green-700 text-sm">{mInfo}</div>}
@@ -1903,42 +2421,77 @@ const inInspectionWindow = (s) => {
               </tr>
             </thead>
             <tbody>
-              {(milestones.length ? milestones : []).slice()
-                .filter(ms => {
+              {(milestones.length ? milestones : [])
+                .slice()
+                .filter((ms) => {
                   if (!fltFrom && !fltTo) return true;
                   const sOk = ms.startAt ? inDateWindow(ms.startAt) : false;
-                  const eOk = ms.dueAt   ? inDateWindow(ms.dueAt)   : false;
+                  const eOk = ms.dueAt ? inDateWindow(ms.dueAt) : false;
                   return sOk || eOk;
                 })
-                .sort((a,b)=>{
+                .sort((a, b) => {
                   const as = +new Date(a.startAt || 0);
                   const bs = +new Date(b.startAt || 0);
-                  return as - bs || (+new Date(a.dueAt || 0) - +new Date(b.dueAt || 0));
+                  return (
+                    as - bs || +new Date(a.dueAt || 0) - +new Date(b.dueAt || 0)
+                  );
                 })
-                .map(ms=>{
+                .map((ms) => {
                   const mid = String(ms._id || ms.id);
-                  const rbOptions = milestones.filter(m => String(m._id||m.id)!==mid && !!m.isRoadblock);
+                  const rbOptions = milestones.filter(
+                    (m) => String(m._id || m.id) !== mid && !!m.isRoadblock,
+                  );
                   const saveWrap = async (patch) => {
                     try {
-                      setMErr(""); setMInfo("");
+                      setMErr("");
+                      setMInfo("");
                       await patchMilestone(ms, patch);
                       await loadMilestones();
-                      setMReloadKey(k => k + 1);
-                      setMInfo("Milestone saved."); setTimeout(()=>setMInfo(""), 1000);
-                    } catch (e) { setMErr(e?.response?.data?.error || String(e)); }
+                      setMReloadKey((k) => k + 1);
+                      setMInfo("Milestone saved.");
+                      setTimeout(() => setMInfo(""), 1000);
+                    } catch (e) {
+                      setMErr(e?.response?.data?.error || String(e));
+                    }
                   };
                   return (
                     <tr key={mid}>
-                      <td className="border-t p-2" style={{minWidth:220}}>
-                        <input className="border p-2 w-full rounded" defaultValue={ms.title || ""} onBlur={(e)=>{ const v=(e.target.value||"").trim(); if (v !== (ms.title||"")) saveWrap({ title: v }); }} placeholder="Deliverable Title" />
+                      <td className="border-t p-2" style={{ minWidth: 220 }}>
+                        <input
+                          className="border p-2 w-full rounded"
+                          defaultValue={ms.title || ""}
+                          onBlur={(e) => {
+                            const v = (e.target.value || "").trim();
+                            if (v !== (ms.title || "")) saveWrap({ title: v });
+                          }}
+                          placeholder="Deliverable Title"
+                        />
                       </td>
-                      <td className="border-t p-2" style={{minWidth:150}}>
-                        <input className="border p-2 rounded" type="date" defaultValue={toLocalDateOnly(ms.startAt)} onBlur={(e)=>{ const v=e.target.value; if (toLocalDateOnly(ms.startAt)!==v) saveWrap({ startAt: fromLocalDateOnly(v) }); }} />
+                      <td className="border-t p-2" style={{ minWidth: 150 }}>
+                        <input
+                          className="border p-2 rounded"
+                          type="date"
+                          defaultValue={toLocalDateOnly(ms.startAt)}
+                          onBlur={(e) => {
+                            const v = e.target.value;
+                            if (toLocalDateOnly(ms.startAt) !== v)
+                              saveWrap({ startAt: fromLocalDateOnly(v) });
+                          }}
+                        />
                       </td>
-                      <td className="border-t p-2" style={{minWidth:150}}>
-                        <input className="border p-2 rounded" type="date" defaultValue={toLocalDateOnly(ms.dueAt)} onBlur={(e)=>{ const v=e.target.value; if (toLocalDateOnly(ms.dueAt)!==v) saveWrap({ endAt: fromLocalDateOnly(v) }); }} />
+                      <td className="border-t p-2" style={{ minWidth: 150 }}>
+                        <input
+                          className="border p-2 rounded"
+                          type="date"
+                          defaultValue={toLocalDateOnly(ms.dueAt)}
+                          onBlur={(e) => {
+                            const v = e.target.value;
+                            if (toLocalDateOnly(ms.dueAt) !== v)
+                              saveWrap({ endAt: fromLocalDateOnly(v) });
+                          }}
+                        />
                       </td>
-                      <td className="border-t p-2" style={{minWidth:150}}>
+                      <td className="border-t p-2" style={{ minWidth: 150 }}>
                         <input
                           className="border p-2 rounded"
                           type="date"
@@ -1955,7 +2508,7 @@ const inInspectionWindow = (s) => {
                           }}
                         />
                       </td>
-                      <td className="border-t p-2" style={{minWidth:160}}>
+                      <td className="border-t p-2" style={{ minWidth: 160 }}>
                         <select
                           className="border p-2 rounded"
                           defaultValue={canonStatus(ms.status)}
@@ -1963,57 +2516,103 @@ const inInspectionWindow = (s) => {
                             const next = canonStatus(e.target.value);
                             if (next === canonStatus(ms.status)) return;
                             if (next === "finished" && !ms.actualEndAt) {
-                              saveWrap({ status: next, actualEndAt: new Date().toISOString() });
+                              saveWrap({
+                                status: next,
+                                actualEndAt: new Date().toISOString(),
+                              });
                             } else {
                               saveWrap({ status: next });
                             }
                           }}
                         >
-                          {MS_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                          {MS_STATUSES.map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
                         </select>
                       </td>
-                      <td className="border-t p-2" style={{minWidth:130}}>
+                      <td className="border-t p-2" style={{ minWidth: 130 }}>
                         <label className="inline-flex items-center gap-2">
-                          <input type="checkbox" defaultChecked={!!ms.isRoadblock} onChange={(e)=> saveWrap({ isRoadblock: e.target.checked })} />
-                          <span className="text-xs text-gray-700">Roadblock</span>
+                          <input
+                            type="checkbox"
+                            defaultChecked={!!ms.isRoadblock}
+                            onChange={(e) =>
+                              saveWrap({ isRoadblock: e.target.checked })
+                            }
+                          />
+                          <span className="text-xs text-gray-700">
+                            Roadblock
+                          </span>
                         </label>
                       </td>
-                      <td className="border-t p-2" style={{minWidth:240}}>
-<select
-  className="border p-2 rounded w-full"
-  value={ms.dependsOnId || ""}
-  onChange={(e) => {
-    const v = e.target.value || "";
-    const next = v ? v : null;
-    const prev = ms.dependsOnId ? String(ms.dependsOnId) : "";
-    if (String(next || "") !== prev) saveWrap({ dependsOn: next });
-  }}
->
-  <option value="">— none —</option>
-  {rbOptions.map((opt) => (
-    <option key={opt._id || opt.id} value={opt._id || opt.id}>
-      {opt.title || "Untitled"} (roadblock)
-    </option>
-  ))}
-</select>
+                      <td className="border-t p-2" style={{ minWidth: 240 }}>
+                        <select
+                          className="border p-2 rounded w-full"
+                          value={ms.dependsOnId || ""}
+                          onChange={(e) => {
+                            const v = e.target.value || "";
+                            const next = v ? v : null;
+                            const prev = ms.dependsOnId
+                              ? String(ms.dependsOnId)
+                              : "";
+                            if (String(next || "") !== prev)
+                              saveWrap({ dependsOn: next });
+                          }}
+                        >
+                          <option value="">— none —</option>
+                          {rbOptions.map((opt) => (
+                            <option
+                              key={opt._id || opt.id}
+                              value={opt._id || opt.id}
+                            >
+                              {opt.title || "Untitled"} (roadblock)
+                            </option>
+                          ))}
+                        </select>
                       </td>
-                      <td className="border-t p-2 text-right whitespace-nowrap" style={{minWidth:120}}>
-                        <button className="px-2 py-1 border rounded" onClick={async ()=>{
-                          if (!window.confirm("Delete this milestone?")) return;
-                          try {
-                            setMErr(""); setMInfo("");
-                            try { await api.delete(`/tasks/${id}/milestones/${mid}`); }
-                            catch { await api.delete(`/milestones/${mid}`); }
-                            await loadMilestones();
-                            setMReloadKey(k => k + 1);
-                            setMInfo("Milestone deleted."); setTimeout(()=>setMInfo(""), 1000);
-                          } catch (e) { setMErr(e?.response?.data?.error || String(e)); }
-                        }} type="button">Delete</button>
+                      <td
+                        className="border-t p-2 text-right whitespace-nowrap"
+                        style={{ minWidth: 120 }}
+                      >
+                        <button
+                          className="px-2 py-1 border rounded"
+                          onClick={async () => {
+                            if (!window.confirm("Delete this milestone?"))
+                              return;
+                            try {
+                              setMErr("");
+                              setMInfo("");
+                              try {
+                                await api.delete(
+                                  `/tasks/${id}/milestones/${mid}`,
+                                );
+                              } catch {
+                                await api.delete(`/milestones/${mid}`);
+                              }
+                              await loadMilestones();
+                              setMReloadKey((k) => k + 1);
+                              setMInfo("Milestone deleted.");
+                              setTimeout(() => setMInfo(""), 1000);
+                            } catch (e) {
+                              setMErr(e?.response?.data?.error || String(e));
+                            }
+                          }}
+                          type="button"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   );
                 })}
-              {!milestones.length && <tr><td className="p-4 text-center" colSpan={8}>No deliverables yet</td></tr>}
+              {!milestones.length && (
+                <tr>
+                  <td className="p-4 text-center" colSpan={8}>
+                    No deliverables yet
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -2032,137 +2631,180 @@ const inInspectionWindow = (s) => {
           {formsErr && <div className="text-red-600 text-sm">{formsErr}</div>}
           {forms.length ? (
             <table className="w-full text-sm">
-              <thead><tr className="bg-gray-50">
-                <th className="p-2 text-left">Available Forms</th>
-                <th className="p-2 text-left">Scope</th>
-                <th className="p-2 text-right">Run</th>
-              </tr></thead>
+              <thead>
+                <tr className="bg-gray-50">
+                  <th className="p-2 text-left">Available Forms</th>
+                  <th className="p-2 text-left">Scope</th>
+                  <th className="p-2 text-right">Run</th>
+                </tr>
+              </thead>
               <tbody>
                 {forms.map((f) => {
                   const formId = f._id || f.id;
                   const s = f?.scope || {};
-                  const isGlobal = !!(s.isGlobal || (!Array.isArray(s.projectIds) && !Array.isArray(s.taskIds)));
-                  const onTask = Array.isArray(s.taskIds) && s.taskIds.map(String).includes(String(id));
-                  const onProject = Array.isArray(s.projectIds) && s.projectIds.map(String).includes(String(projectId));
-                  const scopeText = isGlobal ? "Global" : onTask ? "Task" : onProject ? "Project" : "Scoped";
-                  const qs = new URLSearchParams({ projectId: projectId || "", taskId: id }).toString();
+                  const isGlobal = !!(
+                    s.isGlobal ||
+                    (!Array.isArray(s.projectIds) && !Array.isArray(s.taskIds))
+                  );
+                  const onTask =
+                    Array.isArray(s.taskIds) &&
+                    s.taskIds.map(String).includes(String(id));
+                  const onProject =
+                    Array.isArray(s.projectIds) &&
+                    s.projectIds.map(String).includes(String(projectId));
+                  const scopeText = isGlobal
+                    ? "Global"
+                    : onTask
+                      ? "Task"
+                      : onProject
+                        ? "Project"
+                        : "Scoped";
+                  const qs = new URLSearchParams({
+                    projectId: projectId || "",
+                    taskId: id,
+                  }).toString();
                   return (
                     <tr key={formId}>
-                      <td className="border-t p-2">{f.title || f.name || "Form"}</td>
+                      <td className="border-t p-2">
+                        {f.title || f.name || "Form"}
+                      </td>
                       <td className="border-t p-2">{scopeText}</td>
                       <td className="border-t p-2 text-right">
-                        <Link className="px-2 py-1 border rounded" to={`/inspections/forms/${formId}/open?${qs}`}>Run</Link>
+                        <Link
+                          className="px-2 py-1 border rounded"
+                          to={`/inspections/forms/${formId}/open?${qs}`}
+                        >
+                          Run
+                        </Link>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-          ) : <div className="text-sm text-gray-600">No forms available for this task yet.</div>}
+          ) : (
+            <div className="text-sm text-gray-600">
+              No forms available for this task yet.
+            </div>
+          )}
         </div>
 
         {/* Recent submissions (filtered) */}
         <div className="space-y-2">
           <div className="font-medium text-sm bg-gray-50 rounded px-2 py-1 flex items-center justify-between flex-wrap gap-2">
-  <span className="font-semibold">Recent Inspection Submissions</span>
+            <span className="font-semibold">Recent Inspection Submissions</span>
 
-  <div className="flex items-end gap-2 text-xs flex-wrap">
-    <label className="block">
-      <div className="text-[11px] text-gray-600">Inspection From</div>
-      <input
-        type="date"
-        className="border p-2 rounded"
-        value={inspFrom}
-        onChange={(e) => setInspFrom(e.target.value)}
-      />
-    </label>
+            <div className="flex items-end gap-2 text-xs flex-wrap">
+              <label className="block">
+                <div className="text-[11px] text-gray-600">Inspection From</div>
+                <input
+                  type="date"
+                  className="border p-2 rounded"
+                  value={inspFrom}
+                  onChange={(e) => setInspFrom(e.target.value)}
+                />
+              </label>
 
-    <label className="block">
-      <div className="text-[11px] text-gray-600">Inspection To</div>
-      <input
-        type="date"
-        className="border p-2 rounded"
-        value={inspTo}
-        onChange={(e) => setInspTo(e.target.value)}
-      />
-    </label>
+              <label className="block">
+                <div className="text-[11px] text-gray-600">Inspection To</div>
+                <input
+                  type="date"
+                  className="border p-2 rounded"
+                  value={inspTo}
+                  onChange={(e) => setInspTo(e.target.value)}
+                />
+              </label>
 
-    {(inspFrom || inspTo) && (
-      <button
-        type="button"
-        className="px-2 py-2 border rounded"
-        onClick={() => {
-          setInspFrom("");
-          setInspTo("");
-        }}
-      >
-        Clear
-      </button>
-    )}
+              {(inspFrom || inspTo) && (
+                <button
+                  type="button"
+                  className="px-2 py-2 border rounded"
+                  onClick={() => {
+                    setInspFrom("");
+                    setInspTo("");
+                  }}
+                >
+                  Clear
+                </button>
+              )}
 
-    <button
-      type="button"
-      className="px-2 py-2 border rounded"
-      onClick={async () => {
-        setErr(""); setInfo("");
+              <button
+                type="button"
+                className="px-2 py-2 border rounded"
+                onClick={async () => {
+                  setErr("");
+                  setInfo("");
 
-        // 1) filter by INSPECTION window (standalone)
-        const filtered = (subs || []).filter(inInspectionWindow);
+                  // 1) filter by INSPECTION window (standalone)
+                  const filtered = (subs || []).filter(inInspectionWindow);
 
-        // 2) then require coords (using the SAME resolver as the table)
-        const withCoords = filtered.filter((s) => {
-          const { lat, lng } = resolveSubmissionFields(s);
-          return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
-        });
+                  // 2) then require coords (using the SAME resolver as the table)
+                  const withCoords = filtered.filter((s) => {
+                    const { lat, lng } = resolveSubmissionFields(s);
+                    return (
+                      Number.isFinite(Number(lat)) &&
+                      Number.isFinite(Number(lng))
+                    );
+                  });
 
-        if (!withCoords.length) {
-          setErr("No lat/lng on submissions (in inspection filter window) to export.");
-          return;
-        }
+                  if (!withCoords.length) {
+                    setErr(
+                      "No lat/lng on submissions (in inspection filter window) to export.",
+                    );
+                    return;
+                  }
 
-        const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g,"_")}`;
+                  const title = `inspections_${(task?.title || id).replace(/[^\w\-]+/g, "_")}`;
 
-        const placemarks = withCoords.map((s) => {
-          const whenIso = submissionWhenIso(s);
-          const when = whenIso ? new Date(whenIso).toLocaleString() : "—";
+                  const placemarks = withCoords
+                    .map((s) => {
+                      const whenIso = submissionWhenIso(s);
+                      const when = whenIso
+                        ? new Date(whenIso).toLocaleString()
+                        : "—";
 
-          const { outcome, formTitle, inspector, lat, lng } = resolveSubmissionFields(s);
+                      const { outcome, formTitle, inspector, lat, lng } =
+                        resolveSubmissionFields(s);
 
-          const latN = Number(lat);
-          const lngN = Number(lng);
-          if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return "";
+                      const latN = Number(lat);
+                      const lngN = Number(lng);
+                      if (!Number.isFinite(latN) || !Number.isFinite(lngN))
+                        return "";
 
-          const desc = escapeXml(
-            `Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`
-          );
+                      const desc = escapeXml(
+                        `Date: ${when}\nForm: ${formTitle}\nOverallResult: ${outcome}\nInspector: ${inspector}`,
+                      );
 
-          return `
+                      return `
 <Placemark>
   <name>${escapeXml(formTitle)}</name>
   <description>${desc}</description>
   <Point><coordinates>${r6(lngN)},${r6(latN)},0</coordinates></Point>
 </Placemark>`;
-        }).join("");
+                    })
+                    .join("");
 
-        if (!placemarks.trim()) {
-          setErr("No valid placemarks could be built (lat/lng were not usable).");
-          return;
-        }
+                  if (!placemarks.trim()) {
+                    setErr(
+                      "No valid placemarks could be built (lat/lng were not usable).",
+                    );
+                    return;
+                  }
 
-        const kml = `<?xml version="1.0" encoding="UTF-8"?>
+                  const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document><name>${escapeXml(title)}</name>${placemarks}</Document>
 </kml>`;
 
-        await downloadKMZ(`${title}.kmz`, kml);
-        setInfo("Exported inspection submissions KMZ.");
-        setTimeout(()=>setInfo(""), 1000);
-      }}
-    >
-      Export Submissions KMZ
-    </button>
-  </div>
-</div>
+                  await downloadKMZ(`${title}.kmz`, kml);
+                  setInfo("Exported inspection submissions KMZ.");
+                  setTimeout(() => setInfo(""), 1000);
+                }}
+              >
+                Export Submissions KMZ
+              </button>
+            </div>
+          </div>
 
           {subsErr && <div className="text-red-600 text-sm">{subsErr}</div>}
           {subs.filter(inInspectionWindow).length ? (
@@ -2178,67 +2820,92 @@ const inInspectionWindow = (s) => {
                   <th className="p-2 text-right">Actions</th>
                 </tr>
               </thead>
-                            <tbody>
-                {subs
-  .filter(inInspectionWindow)
-  .map((s) => {
-                    const { submitted, inspector, outcome, formTitle, lat, lng } = resolveSubmissionFields(s);
-                    const whenText = submitted ? submitted.toLocaleString() : "—";
-                    const latV = Number.isFinite(Number(lat)) ? r6(Number(lat)) : "—";
-                    const lngV = Number.isFinite(Number(lng)) ? r6(Number(lng)) : "—";
-                    return (
-                      <tr key={s._id || s.id}>
-                        <td className="border-t p-2">{whenText}</td>
-                        <td className="border-t p-2">{formTitle}</td>
-                        <td className="border-t p-2">{outcome}</td>
-                        <td className="border-t p-2">{inspector}</td>
-                        <td className="border-t p-2">{latV}</td>
-                        <td className="border-t p-2">{lngV}</td>
-                        <td className="border-t p-2 text-right">
-<button
-  type="button"
-  className="px-2 py-1 border rounded"
-  onClick={async () => {
-    const subId = s._id || s.id;
+              <tbody>
+                {subs.filter(inInspectionWindow).map((s) => {
+                  const { submitted, inspector, outcome, formTitle, lat, lng } =
+                    resolveSubmissionFields(s);
+                  const whenText = submitted ? submitted.toLocaleString() : "—";
+                  const latV = Number.isFinite(Number(lat))
+                    ? r6(Number(lat))
+                    : "—";
+                  const lngV = Number.isFinite(Number(lng))
+                    ? r6(Number(lng))
+                    : "—";
+                  return (
+                    <tr key={s._id || s.id}>
+                      <td className="border-t p-2">{whenText}</td>
+                      <td className="border-t p-2">{formTitle}</td>
+                      <td className="border-t p-2">{outcome}</td>
+                      <td className="border-t p-2">{inspector}</td>
+                      <td className="border-t p-2">{latV}</td>
+                      <td className="border-t p-2">{lngV}</td>
+                      <td className="border-t p-2 text-right">
+                        <button
+                          type="button"
+                          className="px-2 py-1 border rounded"
+                          onClick={async () => {
+                            const subId = s._id || s.id;
 
-    // Always open modal
-    setSubViewErr("");
-    setSubView(s);              // quick placeholder
-    setSubViewIframeUrl("");    // clear iframe fallback
-    setSubViewOpen(true);
+                            // Always open modal
+                            setSubViewErr("");
+                            setSubView(s); // quick placeholder
+                            setSubViewIframeUrl(""); // clear iframe fallback
+                            setSubViewOpen(true);
 
-    try {
-      const { data } = await api.get(`/inspections/submissions/${subId}`, {
-        headers: { Accept: "application/json" },
-        params: { _ts: Date.now() },
-      });
+                            try {
+                              const { data } = await api.get(
+                                `/inspections/submissions/${subId}`,
+                                {
+                                  headers: { Accept: "application/json" },
+                                  params: { _ts: Date.now() },
+                                },
+                              );
 
-      // If it's a valid submission shape, show JSON render
-      if (data && typeof data === "object" && (Array.isArray(data.answers) || data.submittedAt || data.form || data.actor)) {
-        setSubView(data);
-        return;
-      }
+                              // If it's a valid submission shape, show JSON render
+                              if (
+                                data &&
+                                typeof data === "object" &&
+                                (Array.isArray(data.answers) ||
+                                  data.submittedAt ||
+                                  data.form ||
+                                  data.actor)
+                              ) {
+                                setSubView(data);
+                                return;
+                              }
 
-      // Otherwise fall back to iframe
-      setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
-    } catch (e) {
-      // ✅ No new tab. Fall back to iframe inside modal.
-      setSubViewErr(e?.response?.data?.error || e?.message || "Failed to load submission details.");
-      setSubView(null);
-      setSubViewIframeUrl(`/inspections/submissions/${subId}?embed=1`);
-    }
-  }}
->
-  View
-</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                              // Otherwise fall back to iframe
+                              setSubView(null);
+                              setSubViewIframeUrl(
+                                `/inspections/submissions/${subId}?embed=1`,
+                              );
+                            } catch (e) {
+                              // ✅ No new tab. Fall back to iframe inside modal.
+                              setSubViewErr(
+                                e?.response?.data?.error ||
+                                  e?.message ||
+                                  "Failed to load submission details.",
+                              );
+                              setSubView(null);
+                              setSubViewIframeUrl(
+                                `/inspections/submissions/${subId}?embed=1`,
+                              );
+                            }
+                          }}
+                        >
+                          View
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
-          ) : <div className="text-sm text-gray-600">No submissions in this date range.</div>}
+          ) : (
+            <div className="text-sm text-gray-600">
+              No submissions in this date range.
+            </div>
+          )}
         </div>
       </div>
 
@@ -2252,7 +2919,7 @@ const inInspectionWindow = (s) => {
               <select
                 className="border p-2 rounded"
                 value={activitySort}
-                onChange={(e)=>setActivitySort(e.target.value)}
+                onChange={(e) => setActivitySort(e.target.value)}
               >
                 <option value="desc">Newest first</option>
                 <option value="asc">Oldest first</option>
@@ -2260,132 +2927,165 @@ const inInspectionWindow = (s) => {
             </label>
 
             <div className="flex gap-2">
-              <button className="px-3 py-2 border rounded" onClick={()=>{ 
-                setEditingLogId(null);
-                setLogErr("");
-                setLogType("productivity");
-                setLogAction("start");
-                setLogAt(toLocalDateInputValue(new Date()));
-                setLogNote("");
-                setLogMilestoneId("");
-                setLogOpen(true);
-              }}>Add log entry</button>
+              <button
+                className="px-3 py-2 border rounded"
+                onClick={() => {
+                  setEditingLogId(null);
+                  setLogErr("");
+                  setLogType("productivity");
+                  setLogAction("start");
+                  setLogAt(toLocalDateInputValue(new Date()));
+                  setLogNote("");
+                  setLogMilestoneId("");
+                  setLogOpen(true);
+                }}
+              >
+                Add log entry
+              </button>
 
               <button
-  className="px-3 py-2 border rounded"
-  onClick={async () => {
-    const rows = (task.actualDurationLog || []).filter((e) =>
-      !fltFrom && !fltTo ? true : inDateWindow(e.at)
-    );
-    if (!rows.length) {
-      setErr("No activity rows in this date range.");
-      return;
-    }
+                className="px-3 py-2 border rounded"
+                onClick={async () => {
+                  const rows = (task.actualDurationLog || []).filter((e) =>
+                    !fltFrom && !fltTo ? true : inDateWindow(e.at),
+                  );
+                  if (!rows.length) {
+                    setErr("No activity rows in this date range.");
+                    return;
+                  }
 
-    // Added lat/lng into the export
-    const headers = ["when", "action", "milestone", "by", "lat", "lng", "note"];
+                  // Added lat/lng into the export
+                  const headers = [
+                    "when",
+                    "action",
+                    "milestone",
+                    "by",
+                    "lat",
+                    "lng",
+                    "note",
+                  ];
 
-    const csvLines = [headers.join(",")].concat(
-      rows.map((e) => {
-        const safe = (s) => `"${String(s ?? "").replace(/"/g, '""')}"`;
+                  const csvLines = [headers.join(",")].concat(
+                    rows.map((e) => {
+                      const safe = (s) =>
+                        `"${String(s ?? "").replace(/"/g, '""')}"`;
 
-        const by =
-          e.userId && (e.userId.name || e.userId.email)
-            ? (e.userId.name || e.userId.email)
-            : (e.actorName || e.actorEmail || e.actorSub || "");
+                      const by =
+                        e.userId && (e.userId.name || e.userId.email)
+                          ? e.userId.name || e.userId.email
+                          : e.actorName || e.actorEmail || e.actorSub || "";
 
-        const rowMilestoneId =
-          e.milestoneId ||
-          e.milestone ||
-          (e.meta && e.meta.milestoneId) ||
-          "";
-        const milestoneName = rowMilestoneId
-          ? msTitleById.get(String(rowMilestoneId)) || String(rowMilestoneId)
-          : "";
+                      const rowMilestoneId =
+                        e.milestoneId ||
+                        e.milestone ||
+                        (e.meta && e.meta.milestoneId) ||
+                        "";
+                      const milestoneName = rowMilestoneId
+                        ? msTitleById.get(String(rowMilestoneId)) ||
+                          String(rowMilestoneId)
+                        : "";
 
-        const whenIso = e.at ? new Date(e.at).toISOString() : "";
+                      const whenIso = e.at ? new Date(e.at).toISOString() : "";
 
-        const latVal = Number.isFinite(Number(e.lat))
-          ? r6(Number(e.lat))
-          : "";
-        const lngVal = Number.isFinite(Number(e.lng))
-          ? r6(Number(e.lng))
-          : "";
+                      const latVal = Number.isFinite(Number(e.lat))
+                        ? r6(Number(e.lat))
+                        : "";
+                      const lngVal = Number.isFinite(Number(e.lng))
+                        ? r6(Number(e.lng))
+                        : "";
 
-        return [
-          safe(whenIso),
-          safe(e.action),
-          safe(milestoneName),
-          safe(by),
-          safe(latVal),
-          safe(lngVal),
-          safe(e.note || ""),
-        ].join(",");
-      })
-    );
+                      return [
+                        safe(whenIso),
+                        safe(e.action),
+                        safe(milestoneName),
+                        safe(by),
+                        safe(latVal),
+                        safe(lngVal),
+                        safe(e.note || ""),
+                      ].join(",");
+                    }),
+                  );
 
-    const csv = csvLines.join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `activity_${(task?.title || id).replace(/[^\w\-]+/g, "_")}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }}
->
-  Export Activity CSV
-</button>
+                  const csv = csvLines.join("\n");
+                  const blob = new Blob([csv], {
+                    type: "text/csv;charset=utf-8",
+                  });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `activity_${(task?.title || id).replace(/[^\w\-]+/g, "_")}.csv`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Export Activity CSV
+              </button>
 
               <button
-  className="px-3 py-2 border rounded"
-  onClick={async () => {
-    try {
-      const { data } = await api.get(`/tasks/${id}/coverage`, { params: { limit: 500 } });
+                className="px-3 py-2 border rounded"
+                onClick={async () => {
+                  try {
+                    const { data } = await api.get(`/tasks/${id}/coverage`, {
+                      params: { limit: 500 },
+                    });
 
-      const list =
-        Array.isArray(data?.items) ? data.items :
-        Array.isArray(data?.rows)  ? data.rows  :
-        Array.isArray(data)        ? data      : [];
+                    const list = Array.isArray(data?.items)
+                      ? data.items
+                      : Array.isArray(data?.rows)
+                        ? data.rows
+                        : Array.isArray(data)
+                          ? data
+                          : [];
 
-      let placemarks = "";
+                    let placemarks = "";
 
-      // 1) Try coverage geometry from backend
-      if (list.length) {
-        const filtered = list.filter((c) =>
-          !fltFrom && !fltTo ? true : inDateWindow(c?.date || c?.createdAt)
-        );
+                    // 1) Try coverage geometry from backend
+                    if (list.length) {
+                      const filtered = list.filter((c) =>
+                        !fltFrom && !fltTo
+                          ? true
+                          : inDateWindow(c?.date || c?.createdAt),
+                      );
 
-        filtered.forEach((c, i) => {
-          const name = c.title || c.filename || `Coverage ${i + 1}`;
+                      filtered.forEach((c, i) => {
+                        const name =
+                          c.title || c.filename || `Coverage ${i + 1}`;
 
-          let geom =
-            c.geometry ||
-            c.geojson ||
-            c.geoJSON ||
-            (c.feature && c.feature.geometry) ||
-            null;
+                        let geom =
+                          c.geometry ||
+                          c.geojson ||
+                          c.geoJSON ||
+                          (c.feature && c.feature.geometry) ||
+                          null;
 
-          if (!geom) return;
-          if (geom.type === "Feature" && geom.geometry) geom = geom.geometry;
+                        if (!geom) return;
+                        if (geom.type === "Feature" && geom.geometry)
+                          geom = geom.geometry;
 
-          if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
-            const coords = geom.coordinates
-              .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
-              .join(" ");
-            placemarks += `
+                        if (
+                          geom.type === "LineString" &&
+                          Array.isArray(geom.coordinates)
+                        ) {
+                          const coords = geom.coordinates
+                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
+                            .join(" ");
+                          placemarks += `
 <Placemark>
   <name>${escapeXml(name)}</name>
   <LineString><coordinates>${coords}</coordinates></LineString>
 </Placemark>`;
-          } else if (geom.type === "Polygon" && Array.isArray(geom.coordinates) && geom.coordinates[0]) {
-            const outer = geom.coordinates[0];
-            const coords = outer
-              .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
-              .join(" ");
-            placemarks += `
+                        } else if (
+                          geom.type === "Polygon" &&
+                          Array.isArray(geom.coordinates) &&
+                          geom.coordinates[0]
+                        ) {
+                          const outer = geom.coordinates[0];
+                          const coords = outer
+                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
+                            .join(" ");
+                          placemarks += `
 <Placemark>
   <name>${escapeXml(name)}</name>
   <Polygon>
@@ -2394,80 +3094,91 @@ const inInspectionWindow = (s) => {
     </outerBoundaryIs>
   </Polygon>
 </Placemark>`;
-          }
-        });
-      }
+                        }
+                      });
+                    }
 
-      // 2) If no usable coverage from backend, FALL BACK to logs with lat/lng
-      if (!placemarks.trim()) {
-        const logsWithCoords = (task.actualDurationLog || []).filter((e) => {
-          const hasCoords =
-            Number.isFinite(Number(e.lat)) &&
-            Number.isFinite(Number(e.lng));
-          if (!hasCoords) return false;
-          return !fltFrom && !fltTo ? true : inDateWindow(e.at);
-        });
+                    // 2) If no usable coverage from backend, FALL BACK to logs with lat/lng
+                    if (!placemarks.trim()) {
+                      const logsWithCoords = (
+                        task.actualDurationLog || []
+                      ).filter((e) => {
+                        const hasCoords =
+                          Number.isFinite(Number(e.lat)) &&
+                          Number.isFinite(Number(e.lng));
+                        if (!hasCoords) return false;
+                        return !fltFrom && !fltTo ? true : inDateWindow(e.at);
+                      });
 
-        if (!logsWithCoords.length) {
-          setErr("No coverage uploaded yet and no logs with lat/lng in this date range.");
-          return;
-        }
+                      if (!logsWithCoords.length) {
+                        setErr(
+                          "No coverage uploaded yet and no logs with lat/lng in this date range.",
+                        );
+                        return;
+                      }
 
-        // Sort logs by time
-        const sorted = logsWithCoords
-          .slice()
-          .sort((a, b) => +new Date(a.at || 0) - +new Date(b.at || 0));
+                      // Sort logs by time
+                      const sorted = logsWithCoords
+                        .slice()
+                        .sort(
+                          (a, b) => +new Date(a.at || 0) - +new Date(b.at || 0),
+                        );
 
-        // 2a) One Point Placemark per log entry (gives you markers + info)
-        sorted.forEach((e, idx) => {
-          const when = e.at ? new Date(e.at).toLocaleString() : "—";
+                      // 2a) One Point Placemark per log entry (gives you markers + info)
+                      sorted.forEach((e, idx) => {
+                        const when = e.at
+                          ? new Date(e.at).toLocaleString()
+                          : "—";
 
-          const rowMilestoneId =
-            e.milestoneId ||
-            e.milestone ||
-            (e.meta && e.meta.milestoneId) ||
-            "";
-          const milestoneName = rowMilestoneId
-            ? msTitleById.get(String(rowMilestoneId)) || String(rowMilestoneId)
-            : "";
+                        const rowMilestoneId =
+                          e.milestoneId ||
+                          e.milestone ||
+                          (e.meta && e.meta.milestoneId) ||
+                          "";
+                        const milestoneName = rowMilestoneId
+                          ? msTitleById.get(String(rowMilestoneId)) ||
+                            String(rowMilestoneId)
+                          : "";
 
-          const name = `${e.action || "log"} #${idx + 1}`;
-          const descText = [
-            `When: ${when}`,
-            milestoneName ? `Milestone: ${milestoneName}` : null,
-            e.note ? `Note: ${e.note}` : null,
-          ]
-            .filter(Boolean)
-            .join("\n");
+                        const name = `${e.action || "log"} #${idx + 1}`;
+                        const descText = [
+                          `When: ${when}`,
+                          milestoneName ? `Milestone: ${milestoneName}` : null,
+                          e.note ? `Note: ${e.note}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join("\n");
 
-          placemarks += `
+                        placemarks += `
 <Placemark>
   <name>${escapeXml(name)}</name>
   <description>${escapeXml(descText)}</description>
   <Point><coordinates>${r6(e.lng)},${r6(e.lat)},0</coordinates></Point>
 </Placemark>`;
-        });
+                      });
 
-        // 2b) Optional LineString track joining all log points
-        if (sorted.length > 1) {
-          const coords = sorted
-            .map((e) => `${r6(e.lng)},${r6(e.lat)},0`)
-            .join(" ");
+                      // 2b) Optional LineString track joining all log points
+                      if (sorted.length > 1) {
+                        const coords = sorted
+                          .map((e) => `${r6(e.lng)},${r6(e.lat)},0`)
+                          .join(" ");
 
-          placemarks += `
+                        placemarks += `
 <Placemark>
   <name>${escapeXml((task?.title || id || "Task coverage") + " track")}</name>
   <LineString><coordinates>${coords}</coordinates></LineString>
 </Placemark>`;
-        }
-      }
+                      }
+                    }
 
-      if (!placemarks.trim()) {
-        setErr("Coverage records were found, but no usable geometry could be created.");
-        return;
-      }
+                    if (!placemarks.trim()) {
+                      setErr(
+                        "Coverage records were found, but no usable geometry could be created.",
+                      );
+                      return;
+                    }
 
-      const kml = `<?xml version="1.0" encoding="UTF-8"?>
+                    const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${escapeXml(task?.title || id)}</name>
@@ -2475,19 +3186,19 @@ const inInspectionWindow = (s) => {
   </Document>
 </kml>`;
 
-      await downloadKMZ(
-        `coverage_${(task?.title || id).replace(/[^\w\-]+/g, "_")}.kmz`,
-        kml
-      );
-      setInfo("Exported coverage KMZ.");
-      setTimeout(() => setInfo(""), 1000);
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
-    }
-  }}
->
-  Export Coverage KMZ
-</button>
+                    await downloadKMZ(
+                      `coverage_${(task?.title || id).replace(/[^\w\-]+/g, "_")}.kmz`,
+                      kml,
+                    );
+                    setInfo("Exported coverage KMZ.");
+                    setTimeout(() => setInfo(""), 1000);
+                  } catch (e) {
+                    setErr(e?.response?.data?.error || String(e));
+                  }
+                }}
+              >
+                Export Coverage KMZ
+              </button>
             </div>
           </div>
         </div>
@@ -2507,91 +3218,157 @@ const inInspectionWindow = (s) => {
             <tbody>
               {(task.actualDurationLog || []).length ? (
                 (task.actualDurationLog || [])
-                  .filter(e => !fltFrom && !fltTo ? true : inDateWindow(e.at))
+                  .filter((e) =>
+                    !fltFrom && !fltTo ? true : inDateWindow(e.at),
+                  )
                   .slice()
-                  .sort((a,b)=>{
+                  .sort((a, b) => {
                     const da = +new Date(a.at || 0);
                     const db = +new Date(b.at || 0);
                     return activitySort === "desc" ? db - da : da - db;
                   })
                   .map((e) => {
                     const rowId = String(e._id || "");
-                    const by = (e.userId && (e.userId.name || e.userId.email))
-                      ? (e.userId.name || e.userId.email)
-                      : (e.actorName || e.actorEmail || e.actorSub || "—");
+                    const by =
+                      e.userId && (e.userId.name || e.userId.email)
+                        ? e.userId.name || e.userId.email
+                        : e.actorName || e.actorEmail || e.actorSub || "—";
 
                     let thumb = null;
-                    if (String(e.action) === "photo" && Array.isArray(task.attachments) && task.attachments.length) {
+                    if (
+                      String(e.action) === "photo" &&
+                      Array.isArray(task.attachments) &&
+                      task.attachments.length
+                    ) {
                       const at = +new Date(e.at || 0);
-                      let best = null, bestDiff = Infinity;
+                      let best = null,
+                        bestDiff = Infinity;
                       for (const a of task.attachments) {
                         if (!(a?.mime || "").startsWith("image/")) continue;
                         const t = +new Date(a.uploadedAt || 0);
                         const d = Math.abs(t - at);
-                        if (d < bestDiff) { bestDiff = d; best = a; }
+                        if (d < bestDiff) {
+                          bestDiff = d;
+                          best = a;
+                        }
                       }
                       if (best) {
-                        const url = toAbsoluteUrl(best.url || best.downloadUrl || "");
+                        const url = toAbsoluteUrl(
+                          best.url || best.downloadUrl || "",
+                        );
                         thumb = (
                           <button
                             className="inline-block rounded overflow-hidden border"
                             title={best.filename || "Photo"}
-                            onClick={()=>{ setImgSrc(url); setImgCaption(best.filename || "Photo"); setImgOpen(true); }}
+                            onClick={() => {
+                              setImgSrc(url);
+                              setImgCaption(best.filename || "Photo");
+                              setImgOpen(true);
+                            }}
                             style={{ width: 80, height: 60 }}
                           >
-                            <img src={url} alt="photo" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            <img
+                              src={url}
+                              alt="photo"
+                              style={{
+                                width: "100%",
+                                height: "100%",
+                                objectFit: "cover",
+                              }}
+                            />
                           </button>
                         );
                       }
                     }
 
                     const rowMilestoneId =
-                      e.milestoneId || e.milestone || (e.meta && e.meta.milestoneId) || "";
+                      e.milestoneId ||
+                      e.milestone ||
+                      (e.meta && e.meta.milestoneId) ||
+                      "";
                     const milestoneName = rowMilestoneId
-                      ? (msTitleById.get(String(rowMilestoneId)) || String(rowMilestoneId))
+                      ? msTitleById.get(String(rowMilestoneId)) ||
+                        String(rowMilestoneId)
                       : "—";
 
                     return (
                       <tr key={rowId}>
-                        <td className="border-t p-2">{e.at ? new Date(e.at).toLocaleString() : "—"}</td>
+                        <td className="border-t p-2">
+                          {e.at ? new Date(e.at).toLocaleString() : "—"}
+                        </td>
                         <td className="border-t p-2">{e.action}</td>
                         <td className="border-t p-2">{milestoneName}</td>
                         <td className="border-t p-2">{by}</td>
-                        <td className="border-t p-2" style={{maxWidth: 480}}>
+                        <td className="border-t p-2" style={{ maxWidth: 480 }}>
                           <div className="flex items-center gap-3">
                             {thumb}
-                            <div className="whitespace-pre-wrap">{e.note || "—"}</div>
+                            <div className="whitespace-pre-wrap">
+                              {e.note || "—"}
+                            </div>
                           </div>
                         </td>
                         <td className="border-t p-2 text-right whitespace-nowrap">
                           <button
                             className="px-2 py-1 border rounded mr-2"
-                            onClick={()=>{
+                            onClick={() => {
                               setLogErr("");
-                              setLogType(String(e.action) === "photo" ? "attachment" : "productivity");
-                              setLogAction(["start","pause","resume","complete"].includes(String(e.action)) ? String(e.action) : "start");
+                              setLogType(
+                                String(e.action) === "photo"
+                                  ? "attachment"
+                                  : "productivity",
+                              );
+                              setLogAction(
+                                [
+                                  "start",
+                                  "pause",
+                                  "resume",
+                                  "complete",
+                                ].includes(String(e.action))
+                                  ? String(e.action)
+                                  : "start",
+                              );
                               setLogAt(toLocalDateInputValue(e.at));
                               setLogNote(e.note || "");
-                              setLogMilestoneId(rowMilestoneId ? String(rowMilestoneId) : "");
+                              setLogMilestoneId(
+                                rowMilestoneId ? String(rowMilestoneId) : "",
+                              );
                               setEditingLogId(rowId);
                               setLogOpen(true);
                             }}
                           >
                             Edit
                           </button>
-                          <button className="px-2 py-1 border rounded" onClick={()=>{
-                            if (!window.confirm("Delete this log entry?")) return;
-                            (async ()=>{
-                              try { await api.delete(`/tasks/${id}/logs/${rowId}`); await loadTask(); }
-                              catch(er){ setErr(er?.response?.data?.error || String(er)); }
-                            })();
-                          }}>Delete</button>
+                          <button
+                            className="px-2 py-1 border rounded"
+                            onClick={() => {
+                              if (!window.confirm("Delete this log entry?"))
+                                return;
+                              (async () => {
+                                try {
+                                  await api.delete(
+                                    `/tasks/${id}/logs/${rowId}`,
+                                  );
+                                  await loadTask();
+                                } catch (er) {
+                                  setErr(
+                                    er?.response?.data?.error || String(er),
+                                  );
+                                }
+                              })();
+                            }}
+                          >
+                            Delete
+                          </button>
                         </td>
                       </tr>
                     );
                   })
               ) : (
-                <tr><td className="p-4 text-center" colSpan={6}>No progress yet</td></tr>
+                <tr>
+                  <td className="p-4 text-center" colSpan={6}>
+                    No progress yet
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
@@ -2602,31 +3379,76 @@ const inInspectionWindow = (s) => {
       <Modal
         open={msModalOpen}
         title="Add Deliverable"
-        onClose={()=>setMsModalOpen(false)}
+        onClose={() => setMsModalOpen(false)}
         footer={
           <>
-            <button className="px-3 py-2 border rounded" onClick={()=>setMsModalOpen(false)}>Cancel</button>
-            <button className="px-3 py-2 border rounded" onClick={createMilestone}>Add</button>
+            <button
+              className="px-3 py-2 border rounded"
+              onClick={() => setMsModalOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="px-3 py-2 border rounded"
+              onClick={createMilestone}
+            >
+              Add
+            </button>
           </>
         }
       >
         <div className="grid gap-3 md:grid-cols-2">
-          <label className="text-sm md:col-span-2">Title
-            <input className="border p-2 w-full rounded mt-1" value={msForm.title} onChange={e=>setMsForm({...msForm, title:e.target.value})} placeholder="Deliverable Title" />
+          <label className="text-sm md:col-span-2">
+            Title
+            <input
+              className="border p-2 w-full rounded mt-1"
+              value={msForm.title}
+              onChange={(e) => setMsForm({ ...msForm, title: e.target.value })}
+              placeholder="Deliverable Title"
+            />
           </label>
-          <label className="text-sm">Start date
-            <input className="border p-2 w-full rounded mt-1" type="date" value={msForm.startAt} onChange={e=>setMsForm({...msForm, startAt:e.target.value})} />
+          <label className="text-sm">
+            Start date
+            <input
+              className="border p-2 w-full rounded mt-1"
+              type="date"
+              value={msForm.startAt}
+              onChange={(e) =>
+                setMsForm({ ...msForm, startAt: e.target.value })
+              }
+            />
           </label>
-          <label className="text-sm">End date
-            <input className="border p-2 w-full rounded mt-1" type="date" value={msForm.endAt} onChange={e=>setMsForm({...msForm, endAt:e.target.value})} />
+          <label className="text-sm">
+            End date
+            <input
+              className="border p-2 w-full rounded mt-1"
+              type="date"
+              value={msForm.endAt}
+              onChange={(e) => setMsForm({ ...msForm, endAt: e.target.value })}
+            />
           </label>
-          <label className="text-sm">Status
-            <select className="border p-2 w-full rounded mt-1" value={msForm.status} onChange={e=>setMsForm({...msForm, status:e.target.value})}>
-              {MS_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+          <label className="text-sm">
+            Status
+            <select
+              className="border p-2 w-full rounded mt-1"
+              value={msForm.status}
+              onChange={(e) => setMsForm({ ...msForm, status: e.target.value })}
+            >
+              {MS_STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
             </select>
           </label>
           <label className="text-sm inline-flex items-center gap-2">
-            <input type="checkbox" checked={msForm.isRoadblock} onChange={e=>setMsForm({...msForm, isRoadblock: e.target.checked})} />
+            <input
+              type="checkbox"
+              checked={msForm.isRoadblock}
+              onChange={(e) =>
+                setMsForm({ ...msForm, isRoadblock: e.target.checked })
+              }
+            />
             Roadblock
           </label>
         </div>
@@ -2636,26 +3458,51 @@ const inInspectionWindow = (s) => {
       <Modal
         open={logOpen}
         title={editingLogId ? "Edit Log Entry" : "Add Log Entry"}
-        onClose={()=>{ setLogOpen(false); setEditingLogId(null); }}
+        onClose={() => {
+          setLogOpen(false);
+          setEditingLogId(null);
+        }}
         footer={
           <>
-            <button className="px-3 py-2 border rounded" onClick={()=>{ setLogOpen(false); setEditingLogId(null); }}>Cancel</button>
-            <button className="px-3 py-2 border rounded" onClick={submitLog}>Save</button>
+            <button
+              className="px-3 py-2 border rounded"
+              onClick={() => {
+                setLogOpen(false);
+                setEditingLogId(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button className="px-3 py-2 border rounded" onClick={submitLog}>
+              Save
+            </button>
           </>
         }
       >
         {logErr && <div className="text-red-600 text-sm">{logErr}</div>}
         <div className="space-y-3">
-          <label className="text-sm">Type
-            <select className="border p-2 w-full rounded mt-1" value={logType} onChange={e=>setLogType(e.target.value)}>
-              <option value="productivity">Productivity (start/pause/resume/complete)</option>
+          <label className="text-sm">
+            Type
+            <select
+              className="border p-2 w-full rounded mt-1"
+              value={logType}
+              onChange={(e) => setLogType(e.target.value)}
+            >
+              <option value="productivity">
+                Productivity (start/pause/resume/complete)
+              </option>
               <option value="attachment">Photo</option>
             </select>
           </label>
 
           {logType === "productivity" && (
-            <label className="text-sm">Action
-              <select className="border p-2 w-full rounded mt-1" value={logAction} onChange={e=>setLogAction(e.target.value)}>
+            <label className="text-sm">
+              Action
+              <select
+                className="border p-2 w-full rounded mt-1"
+                value={logAction}
+                onChange={(e) => setLogAction(e.target.value)}
+              >
                 <option value="start">start</option>
                 <option value="pause">pause</option>
                 <option value="resume">resume</option>
@@ -2664,23 +3511,25 @@ const inInspectionWindow = (s) => {
             </label>
           )}
 
-          <label className="text-sm">When
+          <label className="text-sm">
+            When
             <input
               className="border p-2 w-full rounded mt-1"
               type="datetime-local"
               value={logAt}
-              onChange={e=>setLogAt(e.target.value)}
+              onChange={(e) => setLogAt(e.target.value)}
             />
           </label>
 
-          <label className="text-sm">Milestone (optional)
+          <label className="text-sm">
+            Milestone (optional)
             <select
               className="border p-2 w-full rounded mt-1"
               value={logMilestoneId}
-              onChange={(e)=>setLogMilestoneId(e.target.value)}
+              onChange={(e) => setLogMilestoneId(e.target.value)}
             >
               <option value="">— none —</option>
-              {(milestones || []).map(ms => (
+              {(milestones || []).map((ms) => (
                 <option key={ms._id || ms.id} value={ms._id || ms.id}>
                   {ms.title || "Milestone"}
                 </option>
@@ -2688,23 +3537,29 @@ const inInspectionWindow = (s) => {
             </select>
           </label>
 
-          <label className="text-sm">Note
+          <label className="text-sm">
+            Note
             <textarea
               className="border p-2 w-full rounded mt-1"
               rows={3}
               value={logNote}
-              onChange={e=>setLogNote(e.target.value)}
-              placeholder={logType === "attachment" ? "Optional note about the photo…" : "Optional note…"}
+              onChange={(e) => setLogNote(e.target.value)}
+              placeholder={
+                logType === "attachment"
+                  ? "Optional note about the photo…"
+                  : "Optional note…"
+              }
             />
           </label>
 
           {logType === "attachment" && !editingLogId && (
-            <label className="text-sm">Photo
+            <label className="text-sm">
+              Photo
               <input
                 className="border p-2 w-full rounded mt-1"
                 type="file"
                 accept="image/*"
-                onChange={(e)=>setLogFile(e.target.files?.[0] || null)}
+                onChange={(e) => setLogFile(e.target.files?.[0] || null)}
               />
               {logFile && (
                 <div className="text-xs text-gray-600 mt-1">
@@ -2715,7 +3570,8 @@ const inInspectionWindow = (s) => {
           )}
 
           <div className="text-xs text-gray-600">
-            Location is already enforced for Start/Resume when enabled on the task.
+            Location is already enforced for Start/Resume when enabled on the
+            task.
           </div>
         </div>
       </Modal>
@@ -2724,72 +3580,109 @@ const inInspectionWindow = (s) => {
       <Modal
         open={imgOpen}
         title={imgCaption || "Photo"}
-        onClose={()=>setImgOpen(false)}
+        onClose={() => setImgOpen(false)}
         size="xl"
-        footer={<button className="px-3 py-2 border rounded" onClick={()=>setImgOpen(false)}>Close</button>}
+        footer={
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => setImgOpen(false)}
+          >
+            Close
+          </button>
+        }
       >
         <div className="w-full">
-          {imgSrc ? <img src={imgSrc} alt={imgCaption||"photo"} className="max-h-[70vh] w-auto mx-auto" /> : "No image"}
+          {imgSrc ? (
+            <img
+              src={imgSrc}
+              alt={imgCaption || "photo"}
+              className="max-h-[70vh] w-auto mx-auto"
+            />
+          ) : (
+            "No image"
+          )}
         </div>
       </Modal>
 
       {/* Submission viewer lightbox */}
       <Modal
         open={subViewOpen}
-        title={subView?.form?.title || subView?.formTitle || subView?.templateTitle || "Submission"}
+        title={
+          subView?.form?.title ||
+          subView?.formTitle ||
+          subView?.templateTitle ||
+          "Submission"
+        }
         onClose={() => {
-           setSubViewOpen(false);
-           setSubViewIframeUrl("");
+          setSubViewOpen(false);
+          setSubViewIframeUrl("");
         }}
         size="xl"
-        footer={<button className="px-3 py-2 border rounded" onClick={()=>setSubViewOpen(false)}>Close</button>}
+        footer={
+          <button
+            className="px-3 py-2 border rounded"
+            onClick={() => setSubViewOpen(false)}
+          >
+            Close
+          </button>
+        }
       >
-{subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
+        {subViewErr && <div className="text-red-600 text-sm">{subViewErr}</div>}
 
-{subViewIframeUrl ? (
-  <div className="w-full">
-    <iframe
-      title="Inspection Submission"
-      src={subViewIframeUrl}
-      className="w-full border rounded"
-      style={{ height: "70vh" }}
-    />
-  </div>
-) : subView ? (
-  <div className="space-y-2 text-sm">
-    <div className="text-gray-600">
-      Submitted: {subView.submittedAt ? new Date(subView.submittedAt).toLocaleString() : "—"}
-      {" • "}
-      Inspector: {usersById.get(String(subView?.actor?.userId || ""))?.name
-        || subView?.actor?.name
-        || subView?.actor?.email
-        || "—"}
-      {" • "}
-      Manager note: {subView?.managerNote || subView?.note || subView?.meta?.managerNote || "—"}
-    </div>
-
-    {Array.isArray(subView.answers) && subView.answers.length ? (
-      <div className="space-y-1">
-        {subView.answers.map((a, i) => (
-          <div key={i} className="border rounded p-2">
-            <div className="font-medium">
-              {a?.label || a?.question || `Q${i + 1}`}
-            </div>
-            <div className="text-gray-700 whitespace-pre-wrap">
-              {typeof a?.value === "string"
-                ? a.value
-                : JSON.stringify(a?.value ?? "", null, 2)}
-            </div>
+        {subViewIframeUrl ? (
+          <div className="w-full">
+            <iframe
+              title="Inspection Submission"
+              src={subViewIframeUrl}
+              className="w-full border rounded"
+              style={{ height: "70vh" }}
+            />
           </div>
-        ))}
-      </div>
-    ) : (
-      <div className="text-gray-600">No answers on this submission.</div>
-    )}
-  </div>
-) : (
-  <div className="text-sm text-gray-600">Loading…</div>
-)}
+        ) : subView ? (
+          <div className="space-y-2 text-sm">
+            <div className="text-gray-600">
+              Submitted:{" "}
+              {subView.submittedAt
+                ? new Date(subView.submittedAt).toLocaleString()
+                : "—"}
+              {" • "}
+              Inspector:{" "}
+              {usersById.get(String(subView?.actor?.userId || ""))?.name ||
+                subView?.actor?.name ||
+                subView?.actor?.email ||
+                "—"}
+              {" • "}
+              Manager note:{" "}
+              {subView?.managerNote ||
+                subView?.note ||
+                subView?.meta?.managerNote ||
+                "—"}
+            </div>
+
+            {Array.isArray(subView.answers) && subView.answers.length ? (
+              <div className="space-y-1">
+                {subView.answers.map((a, i) => (
+                  <div key={i} className="border rounded p-2">
+                    <div className="font-medium">
+                      {a?.label || a?.question || `Q${i + 1}`}
+                    </div>
+                    <div className="text-gray-700 whitespace-pre-wrap">
+                      {typeof a?.value === "string"
+                        ? a.value
+                        : JSON.stringify(a?.value ?? "", null, 2)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-gray-600">
+                No answers on this submission.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="text-sm text-gray-600">Loading…</div>
+        )}
       </Modal>
     </div>
   );
