@@ -1,27 +1,5 @@
 // moat-smartops-mobile/production.jsx
-// FULL DROP-IN REPLACEMENT
-//
-// ✅ Uses OFFLINE-CACHED dropdown lists (projects / tasks / milestones)
-// ✅ Uses SAME cache keys as offline.jsx:
-//    @moat:cache:projects
-//    @moat:cache:tasks
-//    @moat:cache:milestonesByTask
-// ✅ REMOVES the Refresh button + all refresh/network code from this screen
-// ✅ REMOVES the task selector from Project Management (per request)
-// ✅ Project Status dropdown is derived from the SELECTED PROJECT (tries many safe places)
-// ✅ Task Status dropdown is derived from the SELECTED TASK (tries many safe places)
-// ✅ Milestones load from cached task payload OR cached milestonesByTask OR (optional) from API if you want later
-// ✅ Saves updates to SQLite outbox exactly like before (offline-first)
-// ✅ Best-effort sync after each save
-//
-// NOTE about your screenshot (web console):
-// The request you showed is a WEB frontend call:
-//   /tasks/:id/milestones
-// Mobile offline mode won’t automatically have that unless we cache milestones.
-// This screen tries to use offline-cached milestones first.
-//
-// If statuses are still “wrong”, it means your project/task objects do NOT contain status options,
-// and we’re falling back to generic lists. Then we need to cache models/definitions offline too.
+// FULL DROP-IN REPLACEMENT (milestone-robust + project-filtered task mgmt + milestone status)
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
@@ -33,6 +11,7 @@ import {
   FlatList,
   Image,
   Modal,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -58,13 +37,48 @@ import {
 const CACHE_PROJECTS_KEY = "@moat:cache:projects";
 const CACHE_TASKS_KEY = "@moat:cache:tasks";
 const CACHE_MILESTONES_KEY = "@moat:cache:milestonesByTask";
-
-// Optional (if you already store it on login)
-const USER_ID_KEY = "@moat:userId";
+const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
 
 /* ---------------------------------------------
    HELPERS
 ----------------------------------------------*/
+function safeJsonParse(s) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+// Basic JWT decode without extra libraries.
+// If decoding fails, we still show you the raw token start.
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return null;
+
+    // base64url -> base64
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+
+    // atob might not exist in RN; try global Buffer fallback
+    if (typeof atob === "function") {
+      const json = atob(pad);
+      return safeJsonParse(json);
+    }
+
+    // Buffer fallback (works in many RN setups)
+    if (typeof Buffer !== "undefined") {
+      const json = Buffer.from(pad, "base64").toString("utf8");
+      return safeJsonParse(json);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function pickId(x) {
   return String(x?._id || x?.id || x?.taskId || x?.projectId || "");
 }
@@ -80,6 +94,19 @@ function pickName(x) {
     x?.number ||
     pickId(x)
   );
+}
+
+function pickTaskProjectId(task) {
+  // tolerate task.projectId = ObjectId | string | { _id }
+  const v =
+    task?.projectId?._id ||
+    task?.projectId?.id ||
+    task?.project?._id ||
+    task?.project?.id ||
+    task?.projectId ||
+    task?.project ||
+    "";
+  return String(v || "");
 }
 
 async function loadCache(key, fallback = null) {
@@ -112,10 +139,6 @@ function asStringArray(input) {
   return [];
 }
 
-/**
- * Extract a list of allowed statuses from a model-like object.
- * We keep this conservative to avoid accidentally using milestones/stages.
- */
 function extractStatusesFromModel(modelObj) {
   if (!modelObj || typeof modelObj !== "object") return [];
 
@@ -134,7 +157,6 @@ function extractStatusesFromModel(modelObj) {
     if (arr.length) return arr;
   }
 
-  // nested: model.status.options / model.status.values / model.status.enum
   const nested =
     modelObj?.status?.options ||
     modelObj?.status?.values ||
@@ -146,7 +168,6 @@ function extractStatusesFromModel(modelObj) {
     if (arr.length) return arr;
   }
 
-  // object map shape: { Open: {...}, Closed: {...} }
   const maybeObj =
     modelObj?.statusMap ||
     modelObj?.workflow?.statusMap ||
@@ -161,7 +182,6 @@ function extractStatusesFromModel(modelObj) {
   return [];
 }
 
-// Where the model might live inside project/task objects
 function getProjectModelFromProject(project) {
   if (!project) return null;
   return (
@@ -192,17 +212,31 @@ function getTaskModelFromTask(task) {
   );
 }
 
-// Fallbacks ONLY if we cannot find model-based options
 function fallbackProjectStatuses() {
   return ["Planned", "In Progress", "On Hold", "Completed", "Cancelled"];
 }
 function fallbackTaskStatuses() {
-  return ["Not Started", "In Progress", "Blocked", "Done"];
+  return ["pending", "in-progress", "paused", "paused-problem", "completed"];
+}
+function fallbackMilestoneStatuses() {
+  // matches your TaskMilestone.js STATUS
+  return ["pending", "started", "paused", "paused - problem", "finished"];
+}
+
+function pickUserId(u) {
+  return String(u?._id || u?.id || "");
+}
+
+function pickUserLabel(u) {
+  if (!u) return "";
+  const name = u?.name || "";
+  const email = u?.email || "";
+  if (name && email) return `${name} (${email})`;
+  return name || email || pickUserId(u);
 }
 
 /* ---------------------------------------------
    AUTH + OPTIONAL MILESTONE FETCH
-   (We keep it here but DO NOT call unless you want later)
 ----------------------------------------------*/
 async function getAuthHeaders() {
   const token = await AsyncStorage.getItem(TOKEN_KEY);
@@ -215,7 +249,6 @@ async function getAuthHeaders() {
   return { headers, token, orgId };
 }
 
-// Your web frontend hits /tasks/:id/milestones (no /api). We support both.
 function milestoneEndpoints(taskId) {
   return [
     `/tasks/${taskId}/milestones`,
@@ -340,13 +373,117 @@ function SelectField({ label, valueText, onPress }) {
 
 export default function ProductionScreen() {
   const router = useRouter();
-
   const [mode, setMode] = useState("project");
+
+  // ----- DEBUG PANEL (shows AsyncStorage + JWT on screen) -----
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugText, setDebugText] = useState(
+    "Tap 'Debug' to load storage info...",
+  );
+
+  async function loadDebugInfo() {
+    try {
+      const lines = []; // ✅ MUST be first
+
+      const keys = await AsyncStorage.getAllKeys();
+
+      const token = await AsyncStorage.getItem(TOKEN_KEY);
+      const orgId = await AsyncStorage.getItem(ORG_KEY);
+
+      // ✅ Try multiple userId keys
+      let storedUserId = null;
+      for (const k of USER_ID_KEYS) {
+        const v = await AsyncStorage.getItem(k);
+        if (v) {
+          storedUserId = v;
+          break;
+        }
+      }
+
+      const payload = token ? decodeJwtPayload(token) : null;
+
+      const preview = (v) => {
+        if (!v) return "";
+        const s = String(v);
+        return s.length > 250 ? s.slice(0, 250) + "..." : s;
+      };
+
+      // ✅ Show sample cached data shapes (tasks/users)
+      const cachedTasksRaw = await AsyncStorage.getItem(CACHE_TASKS_KEY);
+      const cachedUsersRaw = await AsyncStorage.getItem("@moat:cache:users");
+
+      const cachedTasks = safeJsonParse(cachedTasksRaw) || [];
+      const cachedUsers = safeJsonParse(cachedUsersRaw) || [];
+
+      const firstTask = Array.isArray(cachedTasks) ? cachedTasks[0] : null;
+      const firstUser = Array.isArray(cachedUsers) ? cachedUsers[0] : null;
+
+      lines.push("=== ASYNC STORAGE KEYS ===");
+      lines.push(keys.join("\n") || "(no keys found)");
+      lines.push("");
+
+      lines.push("=== IMPORTANT VALUES ===");
+      lines.push(`ORG_KEY (${ORG_KEY}): ${orgId || "(missing)"}`);
+      lines.push(
+        `USER_ID (from ${USER_ID_KEYS.join(", ")}): ${storedUserId || "(missing)"}`,
+      );
+      lines.push(
+        `TOKEN_KEY (${TOKEN_KEY}): ${token ? preview(token) : "(missing)"}`,
+      );
+      lines.push("");
+
+      lines.push("=== JWT PAYLOAD (decoded) ===");
+      lines.push(
+        payload
+          ? JSON.stringify(payload, null, 2)
+          : "(could not decode token payload)",
+      );
+      lines.push("");
+
+      lines.push("=== SAMPLE TASK (first item) ===");
+      lines.push(
+        firstTask ? JSON.stringify(firstTask, null, 2) : "(no tasks cached)",
+      );
+      lines.push("");
+
+      lines.push("=== SAMPLE USER (first item) ===");
+      lines.push(
+        firstUser ? JSON.stringify(firstUser, null, 2) : "(no users cached)",
+      );
+
+      setDebugText(lines.join("\n"));
+      setDebugOpen(true);
+    } catch (e) {
+      setDebugText("DEBUG ERROR: " + (e?.message || String(e)));
+      setDebugOpen(true);
+    }
+  }
 
   /* -------------------- OFFLINE LIST STATE -------------------- */
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
-  const [milestonesByTask, setMilestonesByTask] = useState({}); // { [taskId]: [...] }
+  const [milestonesByTask, setMilestonesByTask] = useState({}); // can be object OR array; we handle both
+
+  // Users (for Attach User Document)
+  const [users, setUsers] = useState([]);
+  const [userPickerOpen, setUserPickerOpen] = useState(false);
+  const [userSearch, setUserSearch] = useState("");
+  const filteredUsers = users.filter((u) => {
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return true;
+
+    return (
+      String(u?.name || "")
+        .toLowerCase()
+        .includes(q) ||
+      String(u?.email || "")
+        .toLowerCase()
+        .includes(q) ||
+      String(u?.staffNumber || "")
+        .toLowerCase()
+        .includes(q)
+    );
+  });
 
   // selection modals
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -355,20 +492,22 @@ export default function ProductionScreen() {
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
 
   const [activeMilestoneTaskId, setActiveMilestoneTaskId] = useState(null);
-  const [statusPickerContext, setStatusPickerContext] = useState("project"); // 'project' | 'task'
+  const [statusPickerContext, setStatusPickerContext] = useState("project"); // 'project' | 'task' | 'milestone'
 
   // Project management form state
   const [projectId, setProjectId] = useState("");
   const [projectStatus, setProjectStatus] = useState("");
   const [managerNote, setManagerNote] = useState("");
 
-  // Task management form state
+  // Task management form state (NEW ordering)
+  const [taskProjectId, setTaskProjectId] = useState(""); // project selector for task mgmt
   const [taskId, setTaskId] = useState("");
-  const [taskMilestoneId, setTaskMilestoneId] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
   const [taskNote, setTaskNote] = useState("");
+  const [taskMilestoneId, setTaskMilestoneId] = useState("");
+  const [milestoneStatus, setMilestoneStatus] = useState("");
 
-  // Activity log state
+  // Activity log state (kept as before)
   const [activityTaskId, setActivityTaskId] = useState("");
   const [activityMilestoneId, setActivityMilestoneId] = useState("");
   const [activityNote, setActivityNote] = useState("");
@@ -397,24 +536,31 @@ export default function ProductionScreen() {
       const cachedProjects = await loadCache(CACHE_PROJECTS_KEY, []);
       const cachedTasks = await loadCache(CACHE_TASKS_KEY, []);
       const cachedMilestones = await loadCache(CACHE_MILESTONES_KEY, {});
+      const cachedUsers = await loadCache("@moat:cache:users", []);
 
       setProjects(Array.isArray(cachedProjects) ? cachedProjects : []);
       setTasks(Array.isArray(cachedTasks) ? cachedTasks : []);
-      setMilestonesByTask(
-        cachedMilestones && typeof cachedMilestones === "object"
-          ? cachedMilestones
-          : {},
-      );
+      setMilestonesByTask(cachedMilestones ?? {});
+      setUsers(Array.isArray(cachedUsers) ? cachedUsers : []);
     })();
   }, []);
 
   /* -------------------- SELECTED OBJECTS -------------------- */
   const selectedProject = projects.find((p) => pickId(p) === projectId) || null;
+
   const selectedTask = tasks.find((t) => pickId(t) === taskId) || null;
   const selectedActivityTask =
     tasks.find((t) => pickId(t) === activityTaskId) || null;
 
-  /* -------------------- STATUS OPTIONS (MODEL-BASED IF AVAILABLE) -------------------- */
+  const selectedTaskProject =
+    projects.find((p) => pickId(p) === taskProjectId) || null;
+
+  /* -------------------- TASK LIST FILTERED BY PROJECT (Task Mgmt) -------------------- */
+  const tasksForSelectedTaskProject = taskProjectId
+    ? tasks.filter((t) => pickTaskProjectId(t) === String(taskProjectId))
+    : [];
+
+  /* -------------------- STATUS OPTIONS -------------------- */
   const projectStatusOptions = (() => {
     const model = getProjectModelFromProject(selectedProject);
     const fromModel = extractStatusesFromModel(model);
@@ -437,35 +583,83 @@ export default function ProductionScreen() {
     return fallbackTaskStatuses();
   })();
 
-  function openStatusPicker(context) {
-    setStatusPickerContext(context);
-    setStatusPickerOpen(true);
-  }
+  const milestoneStatusOptions = (() => {
+    // If the milestone object has statuses somewhere, use it; else fallback to TaskMilestone STATUS
+    const ms =
+      getMilestonesForTask(taskId).find(
+        (m) => pickMilestoneId(m) === taskMilestoneId,
+      ) || null;
+    const fromRecord = extractStatusesFromModel(ms);
+    if (fromRecord.length) return fromRecord;
+    return fallbackMilestoneStatuses();
+  })();
 
   function onSelectStatus(statusValue) {
     const v =
       typeof statusValue === "string" ? statusValue : String(statusValue);
     if (statusPickerContext === "project") setProjectStatus(v);
     if (statusPickerContext === "task") setTaskStatus(v);
+    if (statusPickerContext === "milestone") setMilestoneStatus(v);
     setStatusPickerOpen(false);
   }
 
-  /* -------------------- MILESTONES -------------------- */
-  function getMilestonesForTask(taskIdValue) {
-    const list = milestonesByTask?.[taskIdValue] || [];
-    return list;
-  }
-
+  /* -------------------- MILESTONES (ROBUST LOOKUP) -------------------- */
   function pickMilestoneId(m) {
     if (m == null) return "";
     if (typeof m === "string") return m;
-    return String(m?._id || m?.id || m?.code || m?.name || "");
+    return String(
+      m?._id || m?.id || m?.milestoneId || m?.code || m?.name || "",
+    );
   }
 
   function pickMilestoneName(m) {
     if (m == null) return "";
     if (typeof m === "string") return m;
     return m?.name || m?.title || m?.code || pickMilestoneId(m);
+  }
+
+  function milestoneTaskId(m) {
+    if (!m || typeof m === "string") return "";
+    return String(
+      m?.taskId?._id || m?.taskId?.id || m?.taskId || m?.task || "",
+    );
+  }
+
+  function getMilestonesForTask(taskIdValue) {
+    if (!taskIdValue) return [];
+    const tid = String(taskIdValue);
+
+    const store = milestonesByTask;
+
+    // Case 1: stored as array of milestones
+    if (Array.isArray(store)) {
+      return store.filter((m) => milestoneTaskId(m) === tid);
+    }
+
+    // Case 2: stored as object map: { [taskId]: [...] }
+    if (store && typeof store === "object") {
+      // direct
+      let list =
+        store[tid] ||
+        store[String(tid)] ||
+        // common nesting patterns
+        store?.byTask?.[tid] ||
+        store?.milestonesByTask?.[tid] ||
+        null;
+
+      // list might be {items:[...]} etc.
+      if (list && Array.isArray(list.items)) list = list.items;
+      if (list && Array.isArray(list.data)) list = list.data;
+
+      if (Array.isArray(list)) return list;
+
+      // fallback: if object contains "items" as flat list
+      if (Array.isArray(store.items)) {
+        return store.items.filter((m) => milestoneTaskId(m) === tid);
+      }
+    }
+
+    return [];
   }
 
   function selectedMilestoneText(taskIdValue, milestoneId) {
@@ -475,17 +669,11 @@ export default function ProductionScreen() {
     return found ? pickMilestoneName(found) : milestoneId;
   }
 
-  /**
-   * Ensure milestones are available offline:
-   * 1) If cached in milestonesByTask -> use.
-   * 2) If embedded in task object -> cache them into milestonesByTask for next time.
-   * 3) OPTIONAL: if still missing and you are online, we try API once and cache (best-effort).
-   */
   async function ensureMilestonesLoaded(taskObj) {
     const tid = pickId(taskObj);
     if (!tid) return;
 
-    const existing = milestonesByTask?.[tid];
+    const existing = getMilestonesForTask(tid);
     if (Array.isArray(existing) && existing.length) return;
 
     // Embedded on task?
@@ -496,20 +684,33 @@ export default function ProductionScreen() {
         : null;
 
     if (embedded && embedded.length) {
-      const next = { ...(milestonesByTask || {}), [tid]: embedded };
+      // Write into a map under tid (even if storage was weird, we normalize it)
+      const next =
+        milestonesByTask &&
+        typeof milestonesByTask === "object" &&
+        !Array.isArray(milestonesByTask)
+          ? { ...(milestonesByTask || {}), [tid]: embedded }
+          : { [tid]: embedded };
+
       setMilestonesByTask(next);
       await saveCache(CACHE_MILESTONES_KEY, next);
       return;
     }
 
-    // OPTIONAL fetch (only if online + endpoint exists)
+    // OPTIONAL fetch
     try {
       for (const ep of milestoneEndpoints(tid)) {
         const r = await fetchJsonTry(ep);
         if (!r.ok) continue;
         const list = normalizeListFromUnknownShape(r.json);
         if (list?.length) {
-          const next = { ...(milestonesByTask || {}), [tid]: list };
+          const next =
+            milestonesByTask &&
+            typeof milestonesByTask === "object" &&
+            !Array.isArray(milestonesByTask)
+              ? { ...(milestonesByTask || {}), [tid]: list }
+              : { [tid]: list };
+
           setMilestonesByTask(next);
           await saveCache(CACHE_MILESTONES_KEY, next);
           return;
@@ -523,12 +724,37 @@ export default function ProductionScreen() {
   /* -------------------- ORG / USER from storage -------------------- */
   async function getOrgAndUser() {
     const orgId = await AsyncStorage.getItem(ORG_KEY);
-    if (!orgId)
+    if (!orgId) {
       throw new Error(
         "Missing orgId on device. Please set ORG_KEY after login.",
       );
-    const userId = await AsyncStorage.getItem(USER_ID_KEY);
-    return { orgId, userId: userId || null };
+    }
+
+    // Try multiple storage keys
+    let userId = null;
+    for (const k of USER_ID_KEYS) {
+      const v = await AsyncStorage.getItem(k);
+      if (v) {
+        userId = v;
+        break;
+      }
+    }
+
+    // Fallback: decode Firebase token payload
+    if (!userId) {
+      const token = await AsyncStorage.getItem(TOKEN_KEY);
+      const payload = token ? decodeJwtPayload(token) : null;
+      userId = payload?.sub || payload?.user_id || null;
+
+      // If we found it, store it for next time (helps everything)
+      if (userId) {
+        try {
+          await AsyncStorage.setItem("@moat:userId", String(userId));
+        } catch {}
+      }
+    }
+
+    return { orgId, userId };
   }
 
   /* -------------------- Attach Modal -------------------- */
@@ -609,10 +835,17 @@ export default function ProductionScreen() {
   /* -------------------- SAVE: TASK MANAGEMENT -------------------- */
   const handleSaveTaskManagement = async () => {
     try {
-      if (!taskId && !taskNote && !taskStatus) {
+      if (!taskProjectId || !taskId) {
+        Alert.alert(
+          "Missing task",
+          "Please select a project and then a task before saving.",
+        );
+        return;
+      }
+      if (!taskNote && !taskStatus && !taskMilestoneId && !milestoneStatus) {
         Alert.alert(
           "Missing details",
-          "Please select a task and/or a status and/or enter a note before saving.",
+          "Please select a status and/or enter a note and/or choose a deliverable.",
         );
         return;
       }
@@ -623,11 +856,19 @@ export default function ProductionScreen() {
       const update = {
         orgId,
         userId,
-        projectId: projectId || null,
+        projectId: taskProjectId || null,
         taskId: taskId || null,
+
+        // keep legacy field name "milestone" that your outbox already uses
         milestone: taskMilestoneId || null,
+
+        // NEW extra: milestoneStatus (safe if backend ignores)
+        milestoneStatus: milestoneStatus || null,
+
+        // task status
         status: taskStatus || null,
         note: taskNote || "",
+
         syncStatus: "pending",
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -638,9 +879,10 @@ export default function ProductionScreen() {
       Alert.alert("Saved", "Task update stored on this device.");
 
       setTaskId("");
-      setTaskMilestoneId("");
       setTaskStatus("");
       setTaskNote("");
+      setTaskMilestoneId("");
+      setMilestoneStatus("");
 
       try {
         await syncOutbox({ limit: 10 });
@@ -672,7 +914,7 @@ export default function ProductionScreen() {
         orgId,
         userId,
         projectId: projectId || null,
-        taskId: null, // removed per request
+        taskId: null,
         status: projectStatus || null,
         managerNote: managerNote || "",
         syncStatus: "pending",
@@ -755,9 +997,7 @@ export default function ProductionScreen() {
         longitude: loc.coords.longitude,
       };
       setActivityFencePoints((prev) => [...prev, firstPoint]);
-    } catch (e) {
-      console.log("Error getting initial location", e);
-    }
+    } catch {}
 
     const timer = setInterval(async () => {
       try {
@@ -769,9 +1009,7 @@ export default function ProductionScreen() {
           longitude: loc.coords.longitude,
         };
         setActivityFencePoints((prev) => [...prev, point]);
-      } catch (e) {
-        console.log("Error getting location in interval", e);
-      }
+      } catch {}
     }, 5000);
 
     captureTimerRef.current = timer;
@@ -826,7 +1064,7 @@ export default function ProductionScreen() {
       const log = {
         orgId,
         userId,
-        projectId: projectId || null,
+        projectId: null,
         taskId: activityTaskId || null,
         milestone: activityMilestoneId || null,
         note: activityNote || "",
@@ -867,30 +1105,50 @@ export default function ProductionScreen() {
     const id = pickId(p);
     setProjectId(id);
     setProjectPickerOpen(false);
-
-    // Keep attach project in sync
     setAttachProjectId(id);
 
-    // If current status not valid anymore, clear it
+    const chosenStatus = String(p?.status || "");
     const model = getProjectModelFromProject(p);
     const allowed = extractStatusesFromModel(model);
-    if (allowed.length && projectStatus && !allowed.includes(projectStatus)) {
-      setProjectStatus("");
-    }
+
+    // If project has a status that's not allowed by the model, blank it out
+    setProjectStatus(
+      allowed.length && chosenStatus && !allowed.includes(chosenStatus)
+        ? ""
+        : chosenStatus,
+    );
+  }
+
+  async function onSelectTaskProject(p) {
+    const id = pickId(p);
+    setTaskProjectId(id);
+    setTaskId("");
+    setTaskStatus("");
+    setTaskNote("");
+    setTaskMilestoneId("");
+    setMilestoneStatus("");
+    setProjectPickerOpen(false);
   }
 
   async function onSelectTask(t) {
     const id = pickId(t);
     setTaskId(id);
     setTaskMilestoneId("");
+    setMilestoneStatus("");
     setTaskPickerOpen(false);
-    await ensureMilestonesLoaded(t);
 
+    const chosenStatus = String(t?.status || "");
     const model = getTaskModelFromTask(t);
     const allowed = extractStatusesFromModel(model);
-    if (allowed.length && taskStatus && !allowed.includes(taskStatus)) {
-      setTaskStatus("");
-    }
+
+    // If task has a status that's not allowed by the model, blank it out
+    setTaskStatus(
+      allowed.length && chosenStatus && !allowed.includes(chosenStatus)
+        ? ""
+        : chosenStatus,
+    );
+
+    await ensureMilestonesLoaded(t);
   }
 
   async function onSelectActivityTask(t) {
@@ -905,7 +1163,7 @@ export default function ProductionScreen() {
     if (!taskIdValue) {
       Alert.alert(
         "Select task first",
-        "Please select a task before choosing a milestone.",
+        "Please select a task before choosing a deliverable.",
       );
       return;
     }
@@ -925,6 +1183,7 @@ export default function ProductionScreen() {
 
     if (activeMilestoneTaskId === taskId) {
       setTaskMilestoneId(id);
+      setMilestoneStatus(m?.status || "");
     } else if (activeMilestoneTaskId === activityTaskId) {
       setActivityMilestoneId(id);
     }
@@ -954,7 +1213,13 @@ export default function ProductionScreen() {
   const statusItems =
     statusPickerContext === "project"
       ? projectStatusOptions
-      : taskStatusOptions;
+      : statusPickerContext === "task"
+        ? taskStatusOptions
+        : milestoneStatusOptions;
+
+  // Task picker items depend on context:
+  const taskPickerItems =
+    taskPickerContext === "task" ? tasksForSelectedTaskProject : tasks; // activity log still shows all tasks (unchanged)
 
   return (
     <>
@@ -974,6 +1239,30 @@ export default function ProductionScreen() {
               style={styles.homeIcon}
             />
           </TouchableOpacity>
+        </View>
+
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "flex-end",
+            marginBottom: 10,
+          }}
+        >
+          <Pressable
+            onPress={loadDebugInfo}
+            style={{
+              paddingVertical: 6,
+              paddingHorizontal: 10,
+              borderRadius: 6,
+              borderWidth: 1,
+              borderColor: "#999",
+              backgroundColor: "#fff",
+            }}
+          >
+            <Text style={{ fontSize: 12, color: "#333", fontWeight: "700" }}>
+              Debug
+            </Text>
+          </Pressable>
         </View>
 
         <View style={styles.modeRow}>
@@ -1007,8 +1296,6 @@ export default function ProductionScreen() {
               valueText={selectedProject ? pickName(selectedProject) : ""}
               onPress={() => setProjectPickerOpen(true)}
             />
-
-            {/* Task selector removed per request */}
 
             <SelectField
               label="Status"
@@ -1055,28 +1342,40 @@ export default function ProductionScreen() {
           </View>
         )}
 
-        {/* ---------------- Task Management ---------------- */}
+        {/* ---------------- Task Management (NEW ORDER) ---------------- */}
         {mode === "task" && (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Task management update</Text>
             <Text style={styles.cardSubtitle}>
-              Tasks are loaded from offline cache (from Offline screen refresh).
+              Select Project → Task → Task Status/Note → Milestone (optional) →
+              Milestone Status
             </Text>
+
+            <SelectField
+              label="Project"
+              valueText={
+                selectedTaskProject ? pickName(selectedTaskProject) : ""
+              }
+              onPress={() => setProjectPickerOpen(true)}
+            />
 
             <SelectField
               label="Task"
               valueText={selectedTask ? pickName(selectedTask) : ""}
-              onPress={() => openTaskPicker("task")}
+              onPress={() => {
+                if (!taskProjectId) {
+                  Alert.alert(
+                    "Select project first",
+                    "Please select a project before choosing a task.",
+                  );
+                  return;
+                }
+                openTaskPicker("task");
+              }}
             />
 
             <SelectField
-              label="Milestone (optional)"
-              valueText={selectedMilestoneText(taskId, taskMilestoneId)}
-              onPress={() => openMilestonePickerFor(taskId)}
-            />
-
-            <SelectField
-              label="Status"
+              label="Task status"
               valueText={taskStatus}
               onPress={() => {
                 if (!taskId) {
@@ -1098,6 +1397,28 @@ export default function ProductionScreen() {
               value={taskNote}
               onChangeText={setTaskNote}
               multiline
+            />
+
+            <SelectField
+              label="Deliverable (optional)"
+              valueText={selectedMilestoneText(taskId, taskMilestoneId)}
+              onPress={() => openMilestonePickerFor(taskId)}
+            />
+
+            <SelectField
+              label="Deliverable status"
+              valueText={milestoneStatus}
+              onPress={() => {
+                if (!taskMilestoneId) {
+                  Alert.alert(
+                    "Select deliverable first",
+                    "Please select a deliverable before choosing milestone status.",
+                  );
+                  return;
+                }
+                setStatusPickerContext("milestone");
+                setStatusPickerOpen(true);
+              }}
             />
 
             <TouchableOpacity
@@ -1126,7 +1447,7 @@ export default function ProductionScreen() {
             />
 
             <SelectField
-              label="Milestone (optional)"
+              label="Deliverable (optional)"
               valueText={selectedMilestoneText(
                 activityTaskId,
                 activityMilestoneId,
@@ -1199,12 +1520,17 @@ export default function ProductionScreen() {
       </ScrollView>
 
       {/* -------------------- Select Modals -------------------- */}
+
+      {/* Project picker is used by BOTH project mgmt and task mgmt */}
       <SelectModal
         visible={projectPickerOpen}
         title="Select Project"
         items={projects}
-        selectedId={projectId}
-        onSelect={onSelectProject}
+        selectedId={mode === "task" ? taskProjectId : projectId}
+        onSelect={(p) => {
+          if (mode === "task") return onSelectTaskProject(p);
+          return onSelectProject(p);
+        }}
         onClose={() => setProjectPickerOpen(false)}
         emptyText="No projects cached yet. Go to Offline screen and tap Refresh lists."
       />
@@ -1212,11 +1538,30 @@ export default function ProductionScreen() {
       <SelectModal
         visible={taskPickerOpen}
         title="Select Task"
-        items={tasks}
+        items={taskPickerItems}
         selectedId={taskPickerContext === "task" ? taskId : activityTaskId}
         onSelect={handleTaskPicked}
         onClose={() => setTaskPickerOpen(false)}
-        emptyText="No tasks cached yet. Go to Offline screen and tap Refresh lists."
+        emptyText={
+          taskPickerContext === "task"
+            ? "No tasks cached for this project yet. Go to Offline screen and refresh lists."
+            : "No tasks cached yet. Go to Offline screen and refresh lists."
+        }
+      />
+
+      <SelectModal
+        visible={userPickerOpen}
+        title="Select User"
+        items={filteredUsers}
+        selectedId={attachUser}
+        onSelect={(u) => {
+          setAttachUser(pickUserId(u));
+          setUserPickerOpen(false);
+        }}
+        onClose={() => setUserPickerOpen(false)}
+        emptyText="No users cached yet. Go to Offline screen and Refresh lists."
+        getId={pickUserId}
+        getLabel={pickUserLabel}
       />
 
       <SelectModal
@@ -1235,7 +1580,7 @@ export default function ProductionScreen() {
           setMilestonePickerOpen(false);
           setActiveMilestoneTaskId(null);
         }}
-        emptyText="No milestones cached for this task yet."
+        emptyText="No milestones found for this task (offline cache)."
         getId={pickMilestoneId}
         getLabel={pickMilestoneName}
       />
@@ -1245,14 +1590,43 @@ export default function ProductionScreen() {
         title="Select Status"
         items={statusItems}
         selectedId={
-          statusPickerContext === "project" ? projectStatus : taskStatus
+          statusPickerContext === "project"
+            ? projectStatus
+            : statusPickerContext === "task"
+              ? taskStatus
+              : milestoneStatus
         }
         onSelect={onSelectStatus}
         onClose={() => setStatusPickerOpen(false)}
-        emptyText="No status options found on this record/model."
+        emptyText="No status options found."
         getId={(s) => (typeof s === "string" ? s : String(s))}
         getLabel={(s) => (typeof s === "string" ? s : String(s))}
       />
+
+      {/* -------------------- DEBUG MODAL -------------------- */}
+      <Modal
+        visible={debugOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDebugOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { maxHeight: "85%" }]}>
+            <Text style={styles.modalTitle}>Debug info</Text>
+
+            <ScrollView style={{ marginBottom: 10 }}>
+              <Text style={{ fontSize: 12, color: "#111" }}>{debugText}</Text>
+            </ScrollView>
+
+            <TouchableOpacity
+              style={styles.saveButton}
+              onPress={() => setDebugOpen(false)}
+            >
+              <Text style={styles.saveButtonText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* -------------------- Attach User Document Modal -------------------- */}
       <Modal
@@ -1280,11 +1654,25 @@ export default function ProductionScreen() {
               onPress={() => setProjectPickerOpen(true)}
             />
 
+            <SelectField
+              label="User"
+              valueText={
+                attachUser
+                  ? pickUserLabel(
+                      users.find(
+                        (u) => pickUserId(u) === String(attachUser),
+                      ) || { _id: attachUser },
+                    )
+                  : ""
+              }
+              onPress={() => setUserPickerOpen(true)}
+            />
+
             <TextInput
               style={styles.input}
-              placeholder="Select user (temporary: type userId/email)"
-              value={attachUser}
-              onChangeText={setAttachUser}
+              placeholder="Search user by name / email / staff #"
+              value={userSearch}
+              onChangeText={setUserSearch}
             />
 
             <TextInput
@@ -1459,6 +1847,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 32,
     backgroundColor: "#f5f5f5",
+    flexGrow: 1,
   },
   topBar: {
     flexDirection: "row",
@@ -1466,18 +1855,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 12,
   },
-  topBarLogo: {
-    flex: 1,
-    height: 48,
-  },
-  homeButton: {
-    padding: 4,
-    marginLeft: 8,
-  },
-  homeIcon: {
-    width: 32,
-    height: 32,
-  },
+  topBarLogo: { flex: 1, height: 48 },
+  homeButton: { padding: 4, marginLeft: 8 },
+  homeIcon: { width: 32, height: 32 },
 
   modeRow: {
     flexDirection: "row",
@@ -1493,23 +1873,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     elevation: 2,
   },
-  modeButtonSelected: {
-    borderWidth: 2,
-    borderColor: THEME_COLOR,
-  },
-  modeIcon: {
-    width: 48,
-    height: 48,
-    marginBottom: 4,
-  },
-  modeLabel: {
-    fontSize: 11,
-    textAlign: "center",
-  },
-  modeLabelSelected: {
-    color: THEME_COLOR,
-    fontWeight: "600",
-  },
+  modeButtonSelected: { borderWidth: 2, borderColor: THEME_COLOR },
+  modeIcon: { width: 48, height: 48, marginBottom: 4 },
+  modeLabel: { fontSize: 11, textAlign: "center" },
+  modeLabelSelected: { color: THEME_COLOR, fontWeight: "600" },
+
   card: {
     backgroundColor: "#ffffff",
     borderRadius: 10,
@@ -1517,16 +1885,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     elevation: 2,
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
-  cardSubtitle: {
-    fontSize: 12,
-    color: "#666",
-    marginBottom: 12,
-  },
+  cardTitle: { fontSize: 16, fontWeight: "600", marginBottom: 4 },
+  cardSubtitle: { fontSize: 12, color: "#666", marginBottom: 12 },
 
   input: {
     borderWidth: 1,
@@ -1536,10 +1896,7 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     backgroundColor: "#fafafa",
   },
-  textArea: {
-    height: 80,
-    textAlignVertical: "top",
-  },
+  textArea: { height: 80, textAlignVertical: "top" },
 
   selectField: {
     borderWidth: 1,
@@ -1549,16 +1906,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     backgroundColor: "#fafafa",
   },
-  selectFieldLabel: {
-    fontSize: 11,
-    color: "#777",
-    marginBottom: 4,
-  },
-  selectFieldValue: {
-    fontSize: 14,
-    color: "#111",
-    fontWeight: "600",
-  },
+  selectFieldLabel: { fontSize: 11, color: "#777", marginBottom: 4 },
+  selectFieldValue: { fontSize: 14, color: "#111", fontWeight: "600" },
 
   attachButton: {
     flexDirection: "row",
@@ -1571,16 +1920,8 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 12,
   },
-  attachIcon: {
-    width: 32,
-    height: 32,
-    marginRight: 8,
-  },
-  attachText: {
-    fontSize: 13,
-    color: THEME_COLOR,
-    fontWeight: "500",
-  },
+  attachIcon: { width: 32, height: 32, marginRight: 8 },
+  attachText: { fontSize: 13, color: THEME_COLOR, fontWeight: "500" },
 
   takePhotoButton: {
     flexDirection: "row",
@@ -1591,15 +1932,8 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     marginBottom: 12,
   },
-  takePhotoText: {
-    marginLeft: 8,
-    color: THEME_COLOR,
-    fontWeight: "600",
-  },
-  cameraIcon: {
-    width: 32,
-    height: 32,
-  },
+  takePhotoText: { marginLeft: 8, color: THEME_COLOR, fontWeight: "600" },
+  cameraIcon: { width: 32, height: 32 },
 
   photoPreview: {
     padding: 10,
@@ -1620,10 +1954,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: "#f39c12",
   },
-  retryPhotoText: {
-    color: "#fff",
-    fontWeight: "600",
-  },
+  retryPhotoText: { color: "#fff", fontWeight: "600" },
 
   saveButton: {
     backgroundColor: THEME_COLOR,
@@ -1632,11 +1963,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginTop: 4,
   },
-  saveButtonText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "600",
-  },
+  saveButtonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
 
   modalOverlay: {
     flex: 1,
@@ -1644,11 +1971,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 24,
   },
-  modalCard: {
-    backgroundColor: "#fff",
-    borderRadius: 10,
-    padding: 20,
-  },
+  modalCard: { backgroundColor: "#fff", borderRadius: 10, padding: 20 },
   modalTitle: {
     fontSize: 18,
     fontWeight: "600",
@@ -1661,16 +1984,9 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 16,
   },
-  modalCloseText: {
-    color: "#555",
-    fontSize: 12,
-  },
+  modalCloseText: { color: "#555", fontSize: 12 },
 
-  selectModalCard: {
-    backgroundColor: "#fff",
-    borderRadius: 10,
-    padding: 16,
-  },
+  selectModalCard: { backgroundColor: "#fff", borderRadius: 10, padding: 16 },
   selectModalTitle: {
     fontSize: 16,
     fontWeight: "700",
@@ -1683,37 +1999,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: "#eee",
   },
-  selectRowActive: {
-    backgroundColor: "#e8f8fa",
-  },
-  selectRowText: {
-    fontSize: 14,
-    color: "#111",
-  },
-  selectRowTextActive: {
-    color: THEME_COLOR,
-    fontWeight: "700",
-  },
+  selectRowActive: { backgroundColor: "#e8f8fa" },
+  selectRowText: { fontSize: 14, color: "#111" },
+  selectRowTextActive: { color: THEME_COLOR, fontWeight: "700" },
 
-  fenceContainer: {
-    flex: 1,
-    backgroundColor: "#fff",
-  },
-  fenceMap: {
-    flex: 1,
-  },
-  fenceControls: {
-    flexDirection: "row",
-    padding: 12,
-    backgroundColor: "#fff",
-  },
-  fenceControlButton: {
-    flex: 1,
-    marginHorizontal: 4,
-  },
-  fenceLoading: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  fenceContainer: { flex: 1, backgroundColor: "#fff" },
+  fenceMap: { flex: 1 },
+  fenceControls: { flexDirection: "row", padding: 12, backgroundColor: "#fff" },
+  fenceControlButton: { flex: 1, marginHorizontal: 4 },
+  fenceLoading: { flex: 1, alignItems: "center", justifyContent: "center" },
 });

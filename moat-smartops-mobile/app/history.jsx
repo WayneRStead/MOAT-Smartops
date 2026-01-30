@@ -1,3 +1,4 @@
+// moat-smartops-mobile/History.jsx
 import { useRouter } from "expo-router";
 import * as SQLite from "expo-sqlite";
 import { useEffect, useMemo, useState } from "react";
@@ -60,7 +61,7 @@ function summarizePayload(eventType, payloadJson) {
   }
   if (eventType === "project-update") {
     return (
-      (p.note ? `Note: ${p.note}` : "") ||
+      (p.managerNote ? `Note: ${p.managerNote}` : "") ||
       (p.status ? `Status: ${p.status}` : "") ||
       (p.projectId ? `Project: ${p.projectId}` : "") ||
       "Project update"
@@ -77,12 +78,48 @@ function summarizePayload(eventType, payloadJson) {
   if (eventType === "user-document") {
     return (
       (p.title ? `Title: ${p.title}` : "") ||
-      (p.docCategory ? `Tag: ${p.docCategory}` : "") ||
+      (p.tag ? `Tag: ${p.tag}` : "") ||
       (p.projectId ? `Project: ${p.projectId}` : "") ||
       "User document"
     );
   }
   return p?.note ? `Note: ${p.note}` : "Saved event";
+}
+
+function normalizeServerStage(row) {
+  // Support either serverStage or server_stage (in case schema differs)
+  const v = row?.serverStage ?? row?.server_stage ?? null;
+  if (!v) return "";
+  return String(v).toLowerCase();
+}
+
+function getBadgeStyle(syncStatus, serverStage) {
+  // syncStatus: pending | synced | failed
+  // serverStage: received | applied (optional)
+  let backgroundColor = "#ccc";
+  if (syncStatus === "pending") backgroundColor = "#f39c12";
+  else if (syncStatus === "failed") backgroundColor = "#e74c3c";
+  else if (syncStatus === "synced") {
+    // Applied should look "stronger" but we won't change colors unless you want.
+    // We'll keep same green to avoid confusing users.
+    backgroundColor = "#27ae60";
+  }
+  return {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor,
+  };
+}
+
+function getBadgeText(syncStatus, serverStage) {
+  if (syncStatus === "pending") return "Pending";
+  if (syncStatus === "failed") return "Failed";
+
+  // syncStatus === "synced"
+  // If backend later confirms it applied, show Applied.
+  if (serverStage === "applied") return "Applied";
+  return "Sent to server";
 }
 
 export default function HistoryScreen() {
@@ -102,7 +139,9 @@ export default function HistoryScreen() {
     () => [
       { key: "all", label: "All" },
       { key: "pending", label: "Pending" },
-      { key: "synced", label: "Synced" },
+      // Keep filter key "synced" for your existing system and cleanup timer logic.
+      // The label is improved.
+      { key: "synced", label: "Sent" },
       { key: "failed", label: "Failed" },
     ],
     [],
@@ -135,14 +174,32 @@ export default function HistoryScreen() {
       // Events list
       const where = filter === "all" ? "" : `WHERE syncStatus = '${filter}'`;
 
-      const list = await db.getAllAsync(
-        `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
-                syncStatus, errorText, createdAt, updatedAt
-         FROM offline_events
-         ${where}
-         ORDER BY createdAt DESC
-         LIMIT 200`,
-      );
+      // NOTE:
+      // We attempt to read serverStage/server_stage if it exists.
+      // If it doesn't exist in your table yet, SQLite will throw.
+      // So we do a safe fallback query.
+      let list = [];
+      try {
+        list = await db.getAllAsync(
+          `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
+                  syncStatus, errorText, createdAt, updatedAt,
+                  serverStage, server_stage
+           FROM offline_events
+           ${where}
+           ORDER BY createdAt DESC
+           LIMIT 200`,
+        );
+      } catch {
+        // Fallback if serverStage columns don't exist yet
+        list = await db.getAllAsync(
+          `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
+                  syncStatus, errorText, createdAt, updatedAt
+           FROM offline_events
+           ${where}
+           ORDER BY createdAt DESC
+           LIMIT 200`,
+        );
+      }
 
       setRows(list || []);
     } catch (e) {
@@ -158,13 +215,13 @@ export default function HistoryScreen() {
       const db = await getDb();
 
       if ((counts.synced || 0) === 0) {
-        Alert.alert("Nothing to clear", "No synced items to delete.");
+        Alert.alert("Nothing to clear", "No sent items to delete.");
         return;
       }
 
       Alert.alert(
-        "Clear synced history?",
-        `This will delete ${counts.synced} synced item(s) from this device history.\nPending/failed items will be kept.`,
+        "Clear sent history?",
+        `This will delete ${counts.synced} sent item(s) from this device history.\nPending/failed items will be kept.`,
         [
           { text: "Cancel", style: "cancel" },
           {
@@ -175,11 +232,11 @@ export default function HistoryScreen() {
                 await db.runAsync(
                   `DELETE FROM offline_events WHERE syncStatus='synced'`,
                 );
-                Alert.alert("Cleared", "Synced history has been removed.");
+                Alert.alert("Cleared", "Sent history has been removed.");
                 await loadData();
               } catch (err) {
                 console.log("[History] clear error", err);
-                Alert.alert("Error", "Could not clear synced items.");
+                Alert.alert("Error", "Could not clear sent items.");
               }
             },
           },
@@ -187,7 +244,7 @@ export default function HistoryScreen() {
       );
     } catch (e) {
       console.log("[History] clear error", e);
-      Alert.alert("Error", "Could not clear synced items.");
+      Alert.alert("Error", "Could not clear sent items.");
     }
   };
 
@@ -195,19 +252,6 @@ export default function HistoryScreen() {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
-
-  const getBadgeStyle = (status) => {
-    let backgroundColor = "#ccc";
-    if (status === "pending") backgroundColor = "#f39c12";
-    else if (status === "synced") backgroundColor = "#27ae60";
-    else if (status === "failed") backgroundColor = "#e74c3c";
-    return {
-      paddingHorizontal: 10,
-      paddingVertical: 4,
-      borderRadius: 12,
-      backgroundColor,
-    };
-  };
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -233,8 +277,12 @@ export default function HistoryScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>History</Text>
         <Text style={styles.cardSubtitle}>
-          This shows what has been captured on the device. Synced items can be
-          cleared to save space.
+          Pending = still on device.
+          {"\n"}
+          Sent to server = successfully uploaded.
+          {"\n"}
+          Applied = server confirmed it updated a real record (will appear once
+          backend applier is added).
         </Text>
 
         {/* Filter chips */}
@@ -281,7 +329,7 @@ export default function HistoryScreen() {
             style={[styles.primaryButton, styles.rowButton]}
             onPress={handleClearSynced}
           >
-            <Text style={styles.primaryButtonText}>Clear synced</Text>
+            <Text style={styles.primaryButtonText}>Clear sent</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -297,6 +345,7 @@ export default function HistoryScreen() {
         ) : (
           rows.map((r) => {
             const status = (r.syncStatus || "pending").toLowerCase();
+            const serverStage = normalizeServerStage(r); // "" | "received" | "applied"
             const summary = summarizePayload(r.eventType, r.payloadJson);
             const when = fmtWhen(r.createdAt);
 
@@ -316,6 +365,12 @@ export default function HistoryScreen() {
                     {summary}
                   </Text>
 
+                  {status === "synced" && serverStage === "applied" ? (
+                    <Text style={styles.rowAppliedHint} numberOfLines={1}>
+                      Applied on server
+                    </Text>
+                  ) : null}
+
                   {status === "failed" && r.errorText ? (
                     <Text style={styles.rowError} numberOfLines={2}>
                       Error: {String(r.errorText)}
@@ -323,13 +378,9 @@ export default function HistoryScreen() {
                   ) : null}
                 </View>
 
-                <View style={getBadgeStyle(status)}>
+                <View style={getBadgeStyle(status, serverStage)}>
                   <Text style={styles.badgeText}>
-                    {status === "pending"
-                      ? "Pending"
-                      : status === "synced"
-                        ? "Synced"
-                        : "Failed"}
+                    {getBadgeText(status, serverStage)}
                   </Text>
                 </View>
               </View>
@@ -339,8 +390,8 @@ export default function HistoryScreen() {
       </View>
 
       <Text style={styles.hintText}>
-        Note: auto-delete (30–90 days after sync) can be added once backend sync
-        is wired.
+        Your existing auto-delete (30 days after “sent”) can stay exactly the
+        same. When we add “Applied”, it won’t break cleanup.
       </Text>
     </ScrollView>
   );
@@ -387,6 +438,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#666",
     marginBottom: 12,
+    lineHeight: 16,
   },
   chipRow: {
     flexDirection: "row",
@@ -480,6 +532,12 @@ const styles = StyleSheet.create({
     color: "#333",
     marginTop: 6,
   },
+  rowAppliedHint: {
+    fontSize: 11,
+    color: "#27ae60",
+    marginTop: 6,
+    fontWeight: "700",
+  },
   rowError: {
     fontSize: 11,
     color: "#e74c3c",
@@ -495,5 +553,6 @@ const styles = StyleSheet.create({
     color: "#777",
     textAlign: "center",
     marginTop: 4,
+    lineHeight: 16,
   },
 });
