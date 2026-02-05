@@ -30,7 +30,7 @@ try {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-02";
+const ROUTER_VERSION = "mobile-router-v2026-02-05-03";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -353,13 +353,23 @@ router.post(
       if (eventType === "biometric-enroll") {
         const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
 
+        const targetUserId = payload?.targetUserId || entityRef;
+
         await BiometricEnrollmentRequest.create({
           orgId,
-          targetUserId: payload?.targetUserId || entityRef,
+          targetUserId,
           requestedBy: userId,
           offlineEventId: doc._id,
           status: "pending",
           createdAtClient,
+
+          // ✅ copy uploaded files so the request directly references them
+          uploadedFiles: Array.isArray(doc.uploadedFiles)
+            ? doc.uploadedFiles
+            : [],
+          uploadedFilesCount: Array.isArray(doc.uploadedFiles)
+            ? doc.uploadedFiles.length
+            : 0,
         });
       }
 
