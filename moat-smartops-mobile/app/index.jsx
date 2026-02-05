@@ -22,6 +22,26 @@ import { initDatabase } from "../database";
 
 const THEME_COLOR = "#22a6b3";
 
+/**
+ * ✅ Stable auth/session keys (used by onboarding/debug and other screens)
+ * These do NOT replace Mongo userId; they store Firebase identity so we can map reliably.
+ */
+const FIREBASE_UID_KEY = "@moat:auth:firebaseUid";
+const FIREBASE_EMAIL_KEY = "@moat:auth:email";
+const AUTH_SESSION_KEY = "@moat:auth:session";
+
+/**
+ * ✅ Compatibility token key (some screens previously read this)
+ */
+const TOKEN_KEY_COMPAT = "@moat:cache:token";
+
+function safeTokenPreview(token) {
+  if (!token) return "(missing)";
+  const t = String(token);
+  if (t.length <= 24) return t;
+  return `${t.slice(0, 12)}...${t.slice(-12)} (len=${t.length})`;
+}
+
 export default function LoginScreen() {
   const router = useRouter();
 
@@ -46,15 +66,43 @@ export default function LoginScreen() {
       const email = username.trim();
       const pass = password;
 
+      // ✅ Firebase sign-in
       const cred = await signInWithEmailAndPassword(auth, email, pass);
-      const token = await cred.user.getIdToken();
 
-      // Save token for API calls
-      await AsyncStorage.setItem(TOKEN_KEY, token);
-      console.log("TOKEN:", token);
+      // ✅ Firebase JWT (used for backend Authorization: Bearer <token>)
+      // Force refresh to ensure we always get a current token
+      const token = await cred.user.getIdToken(true);
 
-      // Clear org so user must select (prevents wrong-org issues during testing)
+      // ✅ Store token in BOTH keys (compat with older code that expects @moat:cache:token)
+      await AsyncStorage.setItem(TOKEN_KEY, token); // @moat:token (apiClient reads this)
+      await AsyncStorage.setItem(TOKEN_KEY_COMPAT, token); // @moat:cache:token (older screens)
+
+      // ✅ Store firebase identity for consistent role/user resolution
+      const firebaseUid = String(cred.user.uid || "");
+      const firebaseEmail = String(cred.user.email || email || "");
+
+      await AsyncStorage.setItem(FIREBASE_UID_KEY, firebaseUid);
+      await AsyncStorage.setItem(FIREBASE_EMAIL_KEY, firebaseEmail);
+
+      // ✅ Optional: store a small session object (nice for debugging / future mapping)
+      await AsyncStorage.setItem(
+        AUTH_SESSION_KEY,
+        JSON.stringify({
+          firebaseUid,
+          email: firebaseEmail,
+          tokenSavedAt: new Date().toISOString(),
+        }),
+      );
+
+      // ✅ Clear org so user must select (prevents wrong-org issues during testing)
       await AsyncStorage.removeItem(ORG_KEY);
+
+      // ✅ DEBUG LOGS (won’t crash)
+      console.log("[AUTH] login ok:", { firebaseUid, firebaseEmail });
+      console.log("[AUTH] token preview:", safeTokenPreview(token));
+
+      // If you REALLY need the full token printed, uncomment this line:
+      console.log("[AUTH] FULL TOKEN:", token);
 
       // Go select org (bootstrap endpoint does not require x-org-id)
       router.replace("/org-select");

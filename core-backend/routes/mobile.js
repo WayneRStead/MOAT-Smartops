@@ -348,6 +348,64 @@ router.post(
         createdAtClient,
       });
 
+      // ------------------------------------------------------------
+      // BIOMETRICS: if this is a biometric-enroll event, create a
+      // BiometricEnrollmentRequest record (workflow record).
+      // ------------------------------------------------------------
+      if (eventType === "biometric-enroll") {
+        try {
+          const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
+
+          const targetUserIdStr = String(
+            payload?.targetUserId || entityRef || "",
+          ).trim();
+
+          const performedByUserIdStr = String(
+            payload?.performedByUserId || userId || "",
+          ).trim();
+
+          // Only create if we have the minimum IDs
+          if (
+            mongoose.isValidObjectId(targetUserIdStr) &&
+            mongoose.isValidObjectId(performedByUserIdStr)
+          ) {
+            await BiometricEnrollmentRequest.create({
+              orgId,
+              targetUserId: new mongoose.Types.ObjectId(targetUserIdStr),
+              performedByUserId: new mongoose.Types.ObjectId(
+                performedByUserIdStr,
+              ),
+              performedByEmail: payload?.performedByEmail || null,
+              performedByRoles: Array.isArray(payload?.performedByRoles)
+                ? payload.performedByRoles
+                : [],
+              groupId: mongoose.isValidObjectId(payload?.groupId)
+                ? new mongoose.Types.ObjectId(String(payload.groupId))
+                : undefined,
+              status: "pending",
+              uploadedFiles: Array.isArray(uploadedFiles) ? uploadedFiles : [],
+              sourceOfflineEventId: doc?._id,
+              createdAtClient: payload?.createdAt
+                ? new Date(String(payload.createdAt))
+                : createdAtClient
+                  ? new Date(String(createdAtClient))
+                  : undefined,
+            });
+          } else {
+            console.warn(
+              "[biometrics] biometric-enroll received but missing valid IDs",
+              { targetUserIdStr, performedByUserIdStr },
+            );
+          }
+        } catch (e2) {
+          console.error(
+            "[biometrics] failed to create BiometricEnrollmentRequest",
+            e2,
+          );
+          // Do not fail the main offline-events endpoint — it must remain reliable
+        }
+      }
+
       return res.json({
         ok: true,
         stage: "received",

@@ -4,8 +4,6 @@ import * as SQLite from "expo-sqlite";
 /**
  * Expo SDK 54 / expo-sqlite ~16 uses the async API:
  *   const db = await SQLite.openDatabaseAsync('name.db')
- *
- * Do NOT use SQLite.openDatabase(...) or expo-sqlite/legacy.
  */
 
 let dbPromise = null;
@@ -14,6 +12,8 @@ async function getDb() {
   if (!dbPromise) {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync("moatSmartOps.db");
+      // WAL is good for concurrent reads/writes
+      await db.execAsync(`PRAGMA journal_mode = WAL;`);
       return db;
     })();
   }
@@ -41,109 +41,76 @@ function safeJsonArray(value) {
 }
 
 async function ensureOfflineEventsSchema(db) {
-  // Create the table if it doesn't exist
+  // Create table + indexes
   await db.execAsync(`
-    PRAGMA journal_mode = WAL;
-
     CREATE TABLE IF NOT EXISTS offline_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  eventType TEXT NOT NULL,         -- e.g. 'activity-log', 'project-update', ...
-  orgId TEXT,
-  userId TEXT,
-  entityRef TEXT,                 -- optional: projectId/taskId/docId/etc
-  payloadJson TEXT NOT NULL,       -- JSON string
-  fileUrisJson TEXT NOT NULL,      -- JSON array of file URIs
-  syncStatus TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'synced' | 'failed'
-  serverStage TEXT,               -- 'received' | 'applied' (optional)
-  errorText TEXT,
-  createdAt TEXT NOT NULL,
-  updatedAt TEXT NOT NULL
-);
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      eventType TEXT NOT NULL,         -- e.g. 'activity-log', 'clock-batch-v2', 'biometric-enroll'
+      orgId TEXT,
+      userId TEXT,
+      entityRef TEXT,                  -- optional: projectId/taskId/targetUserId/etc
+      payloadJson TEXT NOT NULL,        -- JSON string
+      fileUrisJson TEXT NOT NULL,       -- JSON array of file URIs
+      syncStatus TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'synced' | 'failed'
+      serverStage TEXT,                -- 'received' | 'applied' (optional)
+      errorText TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
 
     CREATE INDEX IF NOT EXISTS idx_offline_events_sync
       ON offline_events(syncStatus, createdAt);
 
     CREATE INDEX IF NOT EXISTS idx_offline_events_type
       ON offline_events(eventType, createdAt);
+
+    CREATE INDEX IF NOT EXISTS idx_offline_events_org
+      ON offline_events(orgId, createdAt);
+
+    CREATE INDEX IF NOT EXISTS idx_offline_events_entityRef
+      ON offline_events(entityRef, createdAt);
   `);
 
-  // Lightweight "migration guard":
-  // If you ever add a column in future, this prevents "no such column" crashes.
+  // Migration guard: add missing columns safely (older DBs)
   try {
     const cols = await db.getAllAsync(`PRAGMA table_info(offline_events);`);
     const colNames = new Set((cols || []).map((c) => c?.name).filter(Boolean));
 
-    // Example: if an older DB was created without eventType (rare now, but you saw this once)
-    if (!colNames.has("eventType")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN eventType TEXT;`,
-      );
-    }
-    if (!colNames.has("syncStatus")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN syncStatus TEXT NOT NULL DEFAULT 'pending';`,
-      );
-    }
-    if (!colNames.has("errorText")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN errorText TEXT;`,
-      );
-    }
-    if (!colNames.has("entityRef")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN entityRef TEXT;`,
-      );
-    }
-    if (!colNames.has("payloadJson")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN payloadJson TEXT NOT NULL DEFAULT '{}';`,
-      );
-    }
-    if (!colNames.has("fileUrisJson")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN fileUrisJson TEXT NOT NULL DEFAULT '[]';`,
-      );
-    }
-    if (!colNames.has("createdAt")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN createdAt TEXT NOT NULL DEFAULT '';`,
-      );
-    }
-    if (!colNames.has("updatedAt")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN updatedAt TEXT NOT NULL DEFAULT '';`,
-      );
-    }
-    if (!colNames.has("serverStage")) {
-      await db.execAsync(
-        `ALTER TABLE offline_events ADD COLUMN serverStage TEXT;`,
-      );
-    }
+    const addCol = async (name, ddl) => {
+      if (!colNames.has(name)) {
+        await db.execAsync(`ALTER TABLE offline_events ADD COLUMN ${ddl};`);
+      }
+    };
+
+    await addCol("eventType", "eventType TEXT");
+    await addCol("orgId", "orgId TEXT");
+    await addCol("userId", "userId TEXT");
+    await addCol("entityRef", "entityRef TEXT");
+    await addCol("payloadJson", "payloadJson TEXT NOT NULL DEFAULT '{}'");
+    await addCol("fileUrisJson", "fileUrisJson TEXT NOT NULL DEFAULT '[]'");
+    await addCol("syncStatus", "syncStatus TEXT NOT NULL DEFAULT 'pending'");
+    await addCol("serverStage", "serverStage TEXT");
+    await addCol("errorText", "errorText TEXT");
+    await addCol("createdAt", "createdAt TEXT NOT NULL DEFAULT ''");
+    await addCol("updatedAt", "updatedAt TEXT NOT NULL DEFAULT ''");
   } catch (e) {
-    // If ALTER fails (older SQLite quirks), we still don't want init to crash hard
     console.log("[DB] schema guard warning", e);
   }
 }
 
 /**
- * Initialize the outbox table. Everything offline gets stored here first.
- * Later, your sync worker will POST pending rows to backend and mark them synced.
+ * Initialize SQLite + offline_events outbox table.
  */
 export async function initDatabase() {
-  try {
-    const db = await getDb();
-    await ensureOfflineEventsSchema(db);
+  const db = await getDb();
+  await ensureOfflineEventsSchema(db);
 
-    console.log("[DB] SQLite initialised (offline_events table ready)");
-    console.log("[DB] initDatabase complete (SQLite ready).");
-  } catch (e) {
-    console.log("[DB] initDatabase error", e);
-    throw e;
-  }
+  console.log("[DB] initDatabase complete (offline_events ready)");
+  return true;
 }
 
 /**
- * Generic insert into outbox
+ * Generic insert into offline_events outbox.
  */
 async function insertOfflineEvent({
   eventType,
@@ -165,10 +132,10 @@ async function insertOfflineEvent({
       (eventType, orgId, userId, entityRef, payloadJson, fileUrisJson, syncStatus, createdAt, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
-      eventType,
+      String(eventType || "unknown"),
       orgId ?? null,
       userId ?? null,
-      entityRef,
+      entityRef ?? null,
       payloadJson,
       fileUrisJson,
       createdAt,
@@ -176,7 +143,7 @@ async function insertOfflineEvent({
     ],
   );
 
-  return result.lastInsertRowId;
+  return result?.lastInsertRowId ?? null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -246,26 +213,51 @@ export async function saveUserDocumentAttachment(doc) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  BIOMETRICS MODULE SAVES                                            */
+/* ------------------------------------------------------------------ */
+/**
+ * If your onboarding screen wants to save directly via database.js
+ * (instead of its own insertOfflineEvent), use this helper.
+ */
+export async function saveBiometricEnrollment(enrollment) {
+  // enrollment: { orgId, userId, targetUserId, groupId?, profilePhotoUri, biometricPhotoUris:[...], ... }
+  const fileUris = [];
+  if (enrollment?.profilePhotoUri) fileUris.push(enrollment.profilePhotoUri);
+  const bios = Array.isArray(enrollment?.biometricPhotoUris)
+    ? enrollment.biometricPhotoUris
+    : [];
+  for (const u of bios) if (u) fileUris.push(u);
+
+  const rowId = await insertOfflineEvent({
+    eventType: "biometric-enroll",
+    orgId: enrollment?.orgId,
+    userId: enrollment?.userId,
+    entityRef: enrollment?.targetUserId || null,
+    payload: enrollment,
+    fileUris,
+  });
+
+  console.log("[DB] biometric-enroll saved locally with rowId:", rowId);
+  return rowId;
+}
+
+/* ------------------------------------------------------------------ */
 /*  COMPAT EXPORTS (so existing screens don’t break)                   */
 /* ------------------------------------------------------------------ */
 
-// If some screens import these older names, keep them working:
 export const saveProjectNote = saveProjectUpdate;
 export const saveTaskNote = saveTaskUpdate;
 export const saveUserDocument = saveUserDocumentAttachment;
 
 /* ------------------------------------------------------------------ */
-/*  DB VIEWER / DEBUG HELPERS (NEXT STEP IN OUR ORDER)                 */
+/*  DB VIEWER / DEBUG HELPERS                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * Returns newest events first, ready for a "Debug DB" screen.
- * Each row includes a parsed preview field (payloadPreview) for quick display.
- */
 export async function listOfflineEvents(limit = 50) {
   const db = await getDb();
   const rows = await db.getAllAsync(
-    `SELECT id, eventType, orgId, userId, entityRef, syncStatus, errorText, createdAt, updatedAt, payloadJson, fileUrisJson
+    `SELECT id, eventType, orgId, userId, entityRef, syncStatus, serverStage, errorText,
+            createdAt, updatedAt, payloadJson, fileUrisJson
      FROM offline_events
      ORDER BY id DESC
      LIMIT ?`,
@@ -276,28 +268,21 @@ export async function listOfflineEvents(limit = 50) {
     let payloadPreview = null;
     try {
       const obj = JSON.parse(r.payloadJson || "{}");
-      // keep it light for UI: a couple useful fields if present
       payloadPreview = {
-        projectId: obj.projectId ?? null,
-        taskId: obj.taskId ?? null,
-        milestone: obj.milestone ?? null,
-        note: obj.note ?? obj.managerNote ?? null,
+        projectId: obj.projectId ?? obj?.batch?.projectId ?? null,
+        taskId: obj.taskId ?? obj?.batch?.taskId ?? null,
+        groupId: obj.groupId ?? obj?.batch?.groupId ?? null,
+        targetUserId: obj.targetUserId ?? null,
+        note: obj.note ?? obj?.batch?.note ?? null,
         title: obj.title ?? null,
       };
     } catch {
       payloadPreview = null;
     }
 
-    return {
-      ...r,
-      payloadPreview,
-    };
+    return { ...r, payloadPreview };
   });
 }
-
-/* ------------------------------------------------------------------ */
-/*  SYNC QUEUE HELPERS (used when wiring backend sync)                 */
-/* ------------------------------------------------------------------ */
 
 export async function getPendingEvents(limit = 50) {
   const db = await getDb();
@@ -312,8 +297,6 @@ export async function getPendingEvents(limit = 50) {
 }
 
 export async function markEventSynced(id) {
-  // "Synced" in your DB means: it successfully left the phone and reached the server.
-  // It does NOT necessarily mean "applied to real project/task records" yet.
   const db = await getDb();
   const updatedAt = nowIso();
   await db.runAsync(
@@ -346,7 +329,9 @@ export async function markEventFailed(id, errorText) {
   const updatedAt = nowIso();
   await db.runAsync(
     `UPDATE offline_events
-     SET syncStatus='failed', errorText=?, updatedAt=?
+     SET syncStatus='failed',
+         errorText=?,
+         updatedAt=?
      WHERE id=?`,
     [String(errorText || "Unknown error"), updatedAt, id],
   );
@@ -357,7 +342,9 @@ export async function resetFailedToPending() {
   const updatedAt = nowIso();
   await db.runAsync(
     `UPDATE offline_events
-     SET syncStatus='pending', errorText=NULL, updatedAt=?
+     SET syncStatus='pending',
+         errorText=NULL,
+         updatedAt=?
      WHERE syncStatus='failed'`,
     [updatedAt],
   );
@@ -373,6 +360,10 @@ export async function countEventsByType() {
   );
   return rows || [];
 }
+
+/* ------------------------------------------------------------------ */
+/*  VEHICLES / ASSETS MODULE SAVES                                     */
+/* ------------------------------------------------------------------ */
 
 export async function saveVehicleCreate(vehicle) {
   const {
@@ -403,15 +394,15 @@ export async function saveVehicleCreate(vehicle) {
     year: year || null,
     source,
     discRaw,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
   };
 
   const rowId = await insertOfflineEvent({
     eventType: "vehicle-create",
     orgId,
     userId,
-    entityRef: regNumber, // critical for dedupe
+    entityRef: regNumber, // for dedupe
     payload,
     fileUris: [],
   });
@@ -421,7 +412,6 @@ export async function saveVehicleCreate(vehicle) {
 }
 
 export async function saveVehicleTrip(trip) {
-  // trip: { kind: 'trip-start'|'trip-end', regNumber, vehicle, odometer/photo, coords, ... }
   const fileUris = [];
   if (trip?.photoUri) fileUris.push(trip.photoUri);
   if (trip?.odometerPhotoUri) fileUris.push(trip.odometerPhotoUri);
@@ -440,7 +430,6 @@ export async function saveVehicleTrip(trip) {
 }
 
 export async function saveVehiclePurchase(purchase) {
-  // purchase: { regNumber, vendor/type/cost, odometerPhotoUri, coords, ... }
   const fileUris = [];
   if (purchase?.odometerPhotoUri) fileUris.push(purchase.odometerPhotoUri);
 
@@ -458,7 +447,6 @@ export async function saveVehiclePurchase(purchase) {
 }
 
 export async function saveVehicleLog(log) {
-  // log: { regNumber, type, cost, notes, photoUri, coords, ... }
   const fileUris = [];
   if (log?.photoUri) fileUris.push(log.photoUri);
 
@@ -503,5 +491,58 @@ export async function saveAssetLog(log) {
   });
 
   console.log("[DB] asset-log saved locally with rowId:", rowId);
+  return rowId;
+}
+
+/* ------------------------------------------------------------------ */
+/*  CLOCKING MODULE SAVES                                              */
+/* ------------------------------------------------------------------ */
+/**
+ * Save a clocking batch (header + people) into offline_events outbox.
+ *
+ * batch: { orgId, projectId?, taskId?, groupId, clockType, note, createdAt, updatedAt, capturedByUserId? }
+ * people: [{ userId, name, method, status, note, manualPhotoUri? }]
+ */
+export async function saveClockBatch(batch, people) {
+  const safeBatch = batch || {};
+  const safePeople = Array.isArray(people) ? people : [];
+
+  const fileUris = [];
+  for (const p of safePeople) {
+    if (p?.manualPhotoUri) fileUris.push(p.manualPhotoUri);
+  }
+
+  const payload = {
+    batch: {
+      orgId: safeBatch.orgId ?? null,
+      projectId: safeBatch.projectId ?? null,
+      taskId: safeBatch.taskId ?? null,
+      groupId: safeBatch.groupId ?? null,
+      clockType: safeBatch.clockType ?? null,
+      note: safeBatch.note ?? "",
+      createdAt: safeBatch.createdAt ?? nowIso(),
+      updatedAt: safeBatch.updatedAt ?? nowIso(),
+    },
+    people: safePeople.map((p) => ({
+      userId: p?.userId ?? null,
+      name: p?.name ?? "",
+      method: p?.method ?? "list",
+      status: p?.status ?? "present",
+      note: p?.note ?? "",
+      manualPhotoUri: p?.manualPhotoUri ?? null,
+    })),
+  };
+
+  const rowId = await insertOfflineEvent({
+    eventType: "clock-batch-v2",
+    orgId: safeBatch.orgId,
+    userId: safeBatch?.capturedByUserId || safeBatch?.userId || null,
+    entityRef:
+      safeBatch?.groupId || safeBatch?.taskId || safeBatch?.projectId || null,
+    payload,
+    fileUris,
+  });
+
+  console.log("[DB] clock-batch saved locally with rowId:", rowId);
   return rowId;
 }

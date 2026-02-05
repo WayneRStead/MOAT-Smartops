@@ -12,10 +12,12 @@ import {
   View,
 } from "react-native";
 
+import { resetFailedToPending } from "../database";
+import { syncOutbox } from "../syncOutbox";
+
 const THEME_COLOR = "#22a6b3";
 
 async function getDb() {
-  // Same DB name as your database.js
   return await SQLite.openDatabaseAsync("moatSmartOps.db");
 }
 
@@ -50,7 +52,15 @@ function safeParse(json) {
 
 function summarizePayload(eventType, payloadJson) {
   const p = safeParse(payloadJson) || {};
-  // Keep it short + useful
+
+  if (eventType === "biometric-enroll") {
+    return (
+      (p?.targetUserId ? `Target: ${p.targetUserId}` : "") ||
+      (p?.performedByEmail ? `By: ${p.performedByEmail}` : "") ||
+      "Biometric enroll"
+    );
+  }
+
   if (eventType === "activity-log") {
     return (
       (p.note ? `Note: ${p.note}` : "") ||
@@ -59,6 +69,7 @@ function summarizePayload(eventType, payloadJson) {
       "Activity log"
     );
   }
+
   if (eventType === "project-update") {
     return (
       (p.managerNote ? `Note: ${p.managerNote}` : "") ||
@@ -67,6 +78,7 @@ function summarizePayload(eventType, payloadJson) {
       "Project update"
     );
   }
+
   if (eventType === "task-update") {
     return (
       (p.note ? `Note: ${p.note}` : "") ||
@@ -75,6 +87,7 @@ function summarizePayload(eventType, payloadJson) {
       "Task update"
     );
   }
+
   if (eventType === "user-document") {
     return (
       (p.title ? `Title: ${p.title}` : "") ||
@@ -83,27 +96,21 @@ function summarizePayload(eventType, payloadJson) {
       "User document"
     );
   }
+
   return p?.note ? `Note: ${p.note}` : "Saved event";
 }
 
 function normalizeServerStage(row) {
-  // Support either serverStage or server_stage (in case schema differs)
   const v = row?.serverStage ?? row?.server_stage ?? null;
   if (!v) return "";
   return String(v).toLowerCase();
 }
 
-function getBadgeStyle(syncStatus, serverStage) {
-  // syncStatus: pending | synced | failed
-  // serverStage: received | applied (optional)
+function getBadgeStyle(syncStatus) {
   let backgroundColor = "#ccc";
   if (syncStatus === "pending") backgroundColor = "#f39c12";
   else if (syncStatus === "failed") backgroundColor = "#e74c3c";
-  else if (syncStatus === "synced") {
-    // Applied should look "stronger" but we won't change colors unless you want.
-    // We'll keep same green to avoid confusing users.
-    backgroundColor = "#27ae60";
-  }
+  else if (syncStatus === "synced") backgroundColor = "#27ae60";
   return {
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -115,9 +122,6 @@ function getBadgeStyle(syncStatus, serverStage) {
 function getBadgeText(syncStatus, serverStage) {
   if (syncStatus === "pending") return "Pending";
   if (syncStatus === "failed") return "Failed";
-
-  // syncStatus === "synced"
-  // If backend later confirms it applied, show Applied.
   if (serverStage === "applied") return "Applied";
   return "Sent to server";
 }
@@ -133,14 +137,15 @@ export default function HistoryScreen() {
     failed: 0,
   });
   const [rows, setRows] = useState([]);
+
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const filterOptions = useMemo(
     () => [
       { key: "all", label: "All" },
       { key: "pending", label: "Pending" },
-      // Keep filter key "synced" for your existing system and cleanup timer logic.
-      // The label is improved.
       { key: "synced", label: "Sent" },
       { key: "failed", label: "Failed" },
     ],
@@ -172,12 +177,8 @@ export default function HistoryScreen() {
       setCounts(nextCounts);
 
       // Events list
-      const where = filter === "all" ? "" : `WHERE syncStatus = '${filter}'`;
+      const where = filter === "all" ? "" : `WHERE syncStatus='${filter}'`;
 
-      // NOTE:
-      // We attempt to read serverStage/server_stage if it exists.
-      // If it doesn't exist in your table yet, SQLite will throw.
-      // So we do a safe fallback query.
       let list = [];
       try {
         list = await db.getAllAsync(
@@ -187,17 +188,16 @@ export default function HistoryScreen() {
            FROM offline_events
            ${where}
            ORDER BY createdAt DESC
-           LIMIT 200`,
+           LIMIT 250`,
         );
       } catch {
-        // Fallback if serverStage columns don't exist yet
         list = await db.getAllAsync(
           `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
                   syncStatus, errorText, createdAt, updatedAt
            FROM offline_events
            ${where}
            ORDER BY createdAt DESC
-           LIMIT 200`,
+           LIMIT 250`,
         );
       }
 
@@ -208,6 +208,55 @@ export default function HistoryScreen() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncOutbox({ limit: 50 });
+      await loadData();
+
+      Alert.alert(
+        "Sync complete",
+        `Synced: ${res?.synced ?? 0}\nFailed: ${res?.failed ?? 0}`,
+      );
+    } catch (e) {
+      console.log("[History] sync error", e);
+      Alert.alert("Sync failed", e?.message || "Could not sync outbox.");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleResetFailed = async () => {
+    if ((counts.failed || 0) === 0) {
+      Alert.alert("Nothing to reset", "No failed items to retry.");
+      return;
+    }
+
+    Alert.alert(
+      "Retry failed items?",
+      `This will move ${counts.failed} failed item(s) back to Pending so Sync can retry.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Retry",
+          onPress: async () => {
+            setResetting(true);
+            try {
+              await resetFailedToPending();
+              await loadData();
+              Alert.alert("Ready", "Failed items were reset to Pending.");
+            } catch (e) {
+              console.log("[History] reset failed error", e);
+              Alert.alert("Error", "Could not reset failed items.");
+            } finally {
+              setResetting(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   const handleClearSynced = async () => {
@@ -255,7 +304,7 @@ export default function HistoryScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      {/* Top bar with History logo + home */}
+      {/* Top bar */}
       <View style={styles.topBar}>
         <Image
           source={require("../assets/history-screen.png")}
@@ -281,8 +330,7 @@ export default function HistoryScreen() {
           {"\n"}
           Sent to server = successfully uploaded.
           {"\n"}
-          Applied = server confirmed it updated a real record (will appear once
-          backend applier is added).
+          Applied = server confirmed it updated a real record (later).
         </Text>
 
         {/* Filter chips */}
@@ -318,7 +366,7 @@ export default function HistoryScreen() {
           <TouchableOpacity
             style={[styles.secondaryButton, styles.rowButton]}
             onPress={loadData}
-            disabled={loading}
+            disabled={loading || syncing}
           >
             <Text style={styles.secondaryButtonText}>
               {loading ? "Refreshing…" : "Refresh"}
@@ -327,7 +375,30 @@ export default function HistoryScreen() {
 
           <TouchableOpacity
             style={[styles.primaryButton, styles.rowButton]}
+            onPress={handleSyncNow}
+            disabled={syncing || loading}
+          >
+            <Text style={styles.primaryButtonText}>
+              {syncing ? "Syncing…" : "Sync now"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={[styles.buttonRow, { marginTop: 10 }]}>
+          <TouchableOpacity
+            style={[styles.secondaryButton, styles.rowButton]}
+            onPress={handleResetFailed}
+            disabled={resetting || syncing || loading}
+          >
+            <Text style={styles.secondaryButtonText}>
+              {resetting ? "Resetting…" : "Retry failed"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.primaryButton, styles.rowButton]}
             onPress={handleClearSynced}
+            disabled={syncing || loading}
           >
             <Text style={styles.primaryButtonText}>Clear sent</Text>
           </TouchableOpacity>
@@ -345,7 +416,7 @@ export default function HistoryScreen() {
         ) : (
           rows.map((r) => {
             const status = (r.syncStatus || "pending").toLowerCase();
-            const serverStage = normalizeServerStage(r); // "" | "received" | "applied"
+            const serverStage = normalizeServerStage(r);
             const summary = summarizePayload(r.eventType, r.payloadJson);
             const when = fmtWhen(r.createdAt);
 
@@ -378,7 +449,7 @@ export default function HistoryScreen() {
                   ) : null}
                 </View>
 
-                <View style={getBadgeStyle(status, serverStage)}>
+                <View style={getBadgeStyle(status)}>
                   <Text style={styles.badgeText}>
                     {getBadgeText(status, serverStage)}
                   </Text>
@@ -390,8 +461,8 @@ export default function HistoryScreen() {
       </View>
 
       <Text style={styles.hintText}>
-        Your existing auto-delete (30 days after “sent”) can stay exactly the
-        same. When we add “Applied”, it won’t break cleanup.
+        Tip: If items fail with “Missing token”, your multipart upload path
+        isn’t sending Authorization. Fix syncOutbox.js, then tap “Retry failed”.
       </Text>
     </ScrollView>
   );
@@ -410,18 +481,10 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 8,
   },
-  topBarLogo: {
-    flex: 1,
-    height: 48,
-  },
-  homeButton: {
-    padding: 4,
-    marginLeft: 8,
-  },
-  homeIcon: {
-    width: 32,
-    height: 32,
-  },
+  topBarLogo: { flex: 1, height: 48 },
+  homeButton: { padding: 4, marginLeft: 8 },
+  homeIcon: { width: 32, height: 32 },
+
   card: {
     backgroundColor: "#ffffff",
     borderRadius: 10,
@@ -429,22 +492,15 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     elevation: 2,
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 4,
-  },
+  cardTitle: { fontSize: 16, fontWeight: "600", marginBottom: 4 },
   cardSubtitle: {
     fontSize: 12,
     color: "#666",
     marginBottom: 12,
     lineHeight: 16,
   },
-  chipRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    marginBottom: 10,
-  },
+
+  chipRow: { flexDirection: "row", flexWrap: "wrap", marginBottom: 10 },
   chip: {
     borderWidth: 1,
     borderColor: "#ccc",
@@ -455,27 +511,13 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     backgroundColor: "#fafafa",
   },
-  chipSelected: {
-    borderColor: THEME_COLOR,
-    backgroundColor: "#e6f9fb",
-  },
-  chipText: {
-    fontSize: 12,
-    color: "#555",
-    fontWeight: "500",
-  },
-  chipTextSelected: {
-    color: THEME_COLOR,
-    fontWeight: "600",
-  },
-  buttonRow: {
-    flexDirection: "row",
-    marginTop: 6,
-  },
-  rowButton: {
-    flex: 1,
-    marginHorizontal: 4,
-  },
+  chipSelected: { borderColor: THEME_COLOR, backgroundColor: "#e6f9fb" },
+  chipText: { fontSize: 12, color: "#555", fontWeight: "500" },
+  chipTextSelected: { color: THEME_COLOR, fontWeight: "600" },
+
+  buttonRow: { flexDirection: "row", marginTop: 6 },
+  rowButton: { flex: 1, marginHorizontal: 4 },
+
   primaryButton: {
     backgroundColor: THEME_COLOR,
     paddingVertical: 10,
@@ -483,11 +525,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  primaryButtonText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "600",
-  },
+  primaryButtonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+
   secondaryButton: {
     borderWidth: 1,
     borderColor: THEME_COLOR,
@@ -497,15 +536,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#fff",
   },
-  secondaryButtonText: {
-    color: THEME_COLOR,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  emptyText: {
-    fontSize: 12,
-    color: "#999",
-  },
+  secondaryButtonText: { color: THEME_COLOR, fontSize: 14, fontWeight: "600" },
+
+  emptyText: { fontSize: 12, color: "#999" },
+
   row: {
     flexDirection: "row",
     alignItems: "flex-start",
@@ -513,41 +547,20 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#ddd",
   },
-  rowTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  rowMeta: {
-    fontSize: 12,
-    fontWeight: "500",
-    color: "#777",
-  },
-  rowSub: {
-    fontSize: 11,
-    color: "#777",
-    marginTop: 2,
-  },
-  rowBody: {
-    fontSize: 12,
-    color: "#333",
-    marginTop: 6,
-  },
+  rowTitle: { fontSize: 14, fontWeight: "600" },
+  rowMeta: { fontSize: 12, fontWeight: "500", color: "#777" },
+  rowSub: { fontSize: 11, color: "#777", marginTop: 2 },
+  rowBody: { fontSize: 12, color: "#333", marginTop: 6 },
   rowAppliedHint: {
     fontSize: 11,
     color: "#27ae60",
     marginTop: 6,
     fontWeight: "700",
   },
-  rowError: {
-    fontSize: 11,
-    color: "#e74c3c",
-    marginTop: 6,
-  },
-  badgeText: {
-    color: "#fff",
-    fontSize: 11,
-    fontWeight: "700",
-  },
+  rowError: { fontSize: 11, color: "#e74c3c", marginTop: 6 },
+
+  badgeText: { color: "#fff", fontSize: 11, fontWeight: "700" },
+
   hintText: {
     fontSize: 11,
     color: "#777",
