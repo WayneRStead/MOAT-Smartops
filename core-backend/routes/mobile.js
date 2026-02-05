@@ -30,7 +30,7 @@ try {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-03";
+const ROUTER_VERSION = "mobile-router-v2026-02-05-04";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -353,17 +353,27 @@ router.post(
       if (eventType === "biometric-enroll") {
         const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
 
+        // target user (the worker being enrolled)
         const targetUserId = payload?.targetUserId || entityRef;
+
+        // who performed the onboarding
+        // Prefer the explicit mongo id captured in payload from the phone,
+        // otherwise fall back to the authenticated userId.
+        const performedByUserId =
+          payload?.performedByUserId ||
+          payload?.performedByMongoUserId ||
+          userId;
 
         await BiometricEnrollmentRequest.create({
           orgId,
           targetUserId,
-          requestedBy: userId,
+          performedByUserId, // ✅ REQUIRED by your schema
+          requestedBy: userId, // who submitted the event (usually same as performedBy)
           offlineEventId: doc._id,
           status: "pending",
           createdAtClient,
 
-          // ✅ copy uploaded files so the request directly references them
+          // carry uploads over
           uploadedFiles: Array.isArray(doc.uploadedFiles)
             ? doc.uploadedFiles
             : [],
