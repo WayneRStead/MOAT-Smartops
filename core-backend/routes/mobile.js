@@ -3,6 +3,19 @@ const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
 
+/**
+ * 🔎 Router version header so we can prove Render is running THIS file.
+ * Change the string if you ever need to confirm another deploy.
+ */
+const ROUTER_VERSION = "mobile-router-v2026-02-05-05";
+
+router.use((req, res, next) => {
+  res.setHeader("x-mobile-router-version", ROUTER_VERSION);
+  next();
+});
+
+router.use(requireAuth, resolveOrgContext);
+
 // ✅ Multer for multipart/form-data
 let multer = null;
 try {
@@ -25,19 +38,6 @@ let Org = null;
 try {
   Org = require("../models/Org");
 } catch {}
-
-/**
- * 🔎 Router version header so we can prove Render is running THIS file.
- * Change the string if you ever need to confirm another deploy.
- */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-04";
-
-router.use((req, res, next) => {
-  res.setHeader("x-mobile-router-version", ROUTER_VERSION);
-  next();
-});
-
-router.use(requireAuth, resolveOrgContext);
 
 /* -----------------------------
    Helpers
