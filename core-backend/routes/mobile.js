@@ -456,4 +456,49 @@ router.post(
   },
 );
 
+// -----------------------------
+//  DOWNLOAD GRIDFS FILE (mobileOffline bucket)
+//  GET /api/mobile/offline-files/:fileId
+// -----------------------------
+router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
+  try {
+    const bucket = getMobileOfflineBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const fileIdStr = String(req.params.fileId || "").trim();
+    if (!mongoose.isValidObjectId(fileIdStr)) {
+      return res.status(400).json({ error: "Invalid fileId" });
+    }
+
+    const fileId = new mongoose.Types.ObjectId(fileIdStr);
+
+    // Optional: you can enforce org ownership by checking files collection metadata.
+    // For now, just stream it if it exists.
+    const filesColl = mongoose.connection.db.collection("mobileOffline.files");
+    const fileDoc = await filesColl.findOne({ _id: fileId });
+    if (!fileDoc) return res.status(404).json({ error: "File not found" });
+
+    // Set content headers
+    res.setHeader(
+      "Content-Type",
+      fileDoc.contentType || "application/octet-stream",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${fileDoc.filename || "file"}"`,
+    );
+
+    const stream = bucket.openDownloadStream(fileId);
+    stream.on("error", (err) => {
+      console.error("[mobile/offline-files] stream error", err);
+      if (!res.headersSent) res.status(500).end("Stream error");
+    });
+
+    stream.pipe(res);
+  } catch (e) {
+    console.error("[mobile/offline-files] error", e);
+    return res.status(500).json({ error: e?.message || "Download failed" });
+  }
+});
+
 module.exports = router;
