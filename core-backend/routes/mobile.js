@@ -30,7 +30,7 @@ try {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-04-01";
+const ROUTER_VERSION = "mobile-router-v2026-02-05-01";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
