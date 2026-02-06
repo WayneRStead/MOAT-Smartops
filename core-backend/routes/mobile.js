@@ -3,20 +3,31 @@ const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
 
+// ✅ GridFS support (MongoDB file storage)
+const { GridFSBucket } = require("mongodb");
+
+// ✅ Auth middleware MUST be imported before router.use(...)
+const {
+  requireAuth,
+  resolveOrgContext,
+  requireOrg,
+} = require("../middleware/auth");
+
 /**
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-05";
+const ROUTER_VERSION = "mobile-router-v2026-02-05-06";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
 });
 
+// ✅ Attach auth + org context for all routes in this router
 router.use(requireAuth, resolveOrgContext);
 
-// ✅ Multer for multipart/form-data
+// ✅ Multer for multipart/form-data (optional)
 let multer = null;
 try {
   // eslint-disable-next-line global-require
@@ -24,15 +35,6 @@ try {
 } catch (e) {
   multer = null;
 }
-
-// ✅ GridFS support (MongoDB file storage)
-const { GridFSBucket } = require("mongodb");
-
-const {
-  requireAuth,
-  resolveOrgContext,
-  requireOrg,
-} = require("../middleware/auth");
 
 let Org = null;
 try {
@@ -57,7 +59,6 @@ function getMobileOfflineBucket() {
 }
 
 async function saveBuffersToGridFS({ orgId, userId, files }) {
-  // files from multer memoryStorage: [{ originalname, mimetype, buffer, size }]
   const bucket = getMobileOfflineBucket();
   if (!bucket) throw new Error("MongoDB not ready for file uploads");
 
@@ -91,15 +92,11 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
       uploadStream.end(f.buffer);
     });
 
-    // Build a stable reference the app/backend can use later
     out.push({
       fileId: String(uploadStream.id),
       filename,
       contentType: f.mimetype || null,
       size: f.size || null,
-      // You already serve documents via /api/files/documents/:fileId.
-      // For this bucket, we will add a route later if needed.
-      // For now: store fileId and serve via a dedicated endpoint later.
     });
   }
 
@@ -119,9 +116,7 @@ router.get("/bootstrap", async (req, res) => {
 
     const orgId = user.orgId ? String(user.orgId) : null;
 
-    if (!orgId) {
-      return res.json({ ok: true, orgs: [] });
-    }
+    if (!orgId) return res.json({ ok: true, orgs: [] });
 
     let orgDoc = null;
     if (Org?.findById && mongoose.isValidObjectId(orgId)) {
@@ -235,7 +230,7 @@ router.get("/lists", requireOrg, async (req, res) => {
    ✅ Accepts JSON OR multipart/form-data (files[])
 ------------------------------*/
 
-// Model: OfflineEvent
+// Model: OfflineEvent (kept inside this router for now)
 const OfflineEventSchema = new mongoose.Schema(
   {
     orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", index: true },
@@ -243,8 +238,8 @@ const OfflineEventSchema = new mongoose.Schema(
     eventType: { type: String, index: true },
     entityRef: { type: String },
     payload: { type: Object },
-    fileUris: { type: [String], default: [] }, // legacy: local URIs / remote refs
-    uploadedFiles: { type: [Object], default: [] }, // ✅ new: {fileId, filename, contentType, size}
+    fileUris: { type: [String], default: [] }, // legacy
+    uploadedFiles: { type: [Object], default: [] }, // {fileId, filename, contentType, size}
     createdAtClient: { type: String },
     receivedAt: { type: Date, default: Date.now },
   },
@@ -277,18 +272,17 @@ const upload =
  *      - createdAt
  *      - payloadJson  (JSON string)
  *    files:
- *      - files[]      (images)
+ *      - files        (repeatable)
  */
 router.post(
   "/offline-events",
   requireOrg,
   (req, res, next) => {
-    // If multer isn't installed, just skip multipart parsing.
-    // JSON will still work.
     if (!upload) return next();
-    // Try parse multipart if Content-Type indicates it
+
     const ct = String(req.headers["content-type"] || "").toLowerCase();
     if (!ct.includes("multipart/form-data")) return next();
+
     return upload.array("files")(req, res, next);
   },
   async (req, res) => {
@@ -296,7 +290,6 @@ router.post(
       const orgId = req.orgObjectId || req.user?.orgId;
       const userId = req.user?._id || null;
 
-      // Detect whether this was JSON or multipart
       const ct = String(req.headers["content-type"] || "").toLowerCase();
       const isMultipart = ct.includes("multipart/form-data");
 
@@ -315,9 +308,8 @@ router.post(
           : null;
 
         payload = safeJsonParse(req.body?.payloadJson || "{}", {}) || {};
-        fileUris = []; // with multipart we store real uploads instead
+        fileUris = []; // we store uploads instead
 
-        // Save uploaded files to GridFS (if any)
         const files = Array.isArray(req.files) ? req.files : [];
         if (files.length) {
           uploadedFiles = await saveBuffersToGridFS({
@@ -327,7 +319,6 @@ router.post(
           });
         }
       } else {
-        // JSON mode
         const body = req.body || {};
         eventType = String(body.eventType || "unknown");
         entityRef = body.entityRef ? String(body.entityRef) : null;
@@ -347,45 +338,9 @@ router.post(
         uploadedFiles,
         createdAtClient,
       });
-      // ----------------------------------------------------
-      // BIOMETRIC ENROLLMENT REQUEST (offline -> request)
-      // ----------------------------------------------------
-      if (eventType === "biometric-enroll") {
-        const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
-
-        // target user (the worker being enrolled)
-        const targetUserId = payload?.targetUserId || entityRef;
-
-        // who performed the onboarding
-        // Prefer the explicit mongo id captured in payload from the phone,
-        // otherwise fall back to the authenticated userId.
-        const performedByUserId =
-          payload?.performedByUserId ||
-          payload?.performedByMongoUserId ||
-          userId;
-
-        await BiometricEnrollmentRequest.create({
-          orgId,
-          targetUserId,
-          performedByUserId, // ✅ REQUIRED by your schema
-          requestedBy: userId, // who submitted the event (usually same as performedBy)
-          offlineEventId: doc._id,
-          status: "pending",
-          createdAtClient,
-
-          // carry uploads over
-          uploadedFiles: Array.isArray(doc.uploadedFiles)
-            ? doc.uploadedFiles
-            : [],
-          uploadedFilesCount: Array.isArray(doc.uploadedFiles)
-            ? doc.uploadedFiles.length
-            : 0,
-        });
-      }
 
       // ------------------------------------------------------------
-      // BIOMETRICS: if this is a biometric-enroll event, create a
-      // BiometricEnrollmentRequest record (workflow record).
+      // BIOMETRICS: create ONE BiometricEnrollmentRequest (workflow row)
       // ------------------------------------------------------------
       if (eventType === "biometric-enroll") {
         try {
@@ -394,16 +349,22 @@ router.post(
           const targetUserIdStr = String(
             payload?.targetUserId || entityRef || "",
           ).trim();
-
           const performedByUserIdStr = String(
-            payload?.performedByUserId || userId || "",
+            payload?.performedByUserId ||
+              payload?.performedByMongoUserId ||
+              userId ||
+              "",
           ).trim();
 
-          // Only create if we have the minimum IDs
-          if (
-            mongoose.isValidObjectId(targetUserIdStr) &&
-            mongoose.isValidObjectId(performedByUserIdStr)
-          ) {
+          if (!mongoose.isValidObjectId(targetUserIdStr)) {
+            console.warn("[biometrics] missing/invalid targetUserId", {
+              targetUserIdStr,
+            });
+          } else if (!mongoose.isValidObjectId(performedByUserIdStr)) {
+            console.warn("[biometrics] missing/invalid performedByUserId", {
+              performedByUserIdStr,
+            });
+          } else {
             await BiometricEnrollmentRequest.create({
               orgId,
               targetUserId: new mongoose.Types.ObjectId(targetUserIdStr),
@@ -414,30 +375,25 @@ router.post(
               performedByRoles: Array.isArray(payload?.performedByRoles)
                 ? payload.performedByRoles
                 : [],
-              groupId: mongoose.isValidObjectId(payload?.groupId)
+              groupId: mongoose.isValidObjectId(String(payload?.groupId || ""))
                 ? new mongoose.Types.ObjectId(String(payload.groupId))
                 : undefined,
               status: "pending",
-              uploadedFiles: Array.isArray(uploadedFiles) ? uploadedFiles : [],
+              uploadedFiles: Array.isArray(doc?.uploadedFiles)
+                ? doc.uploadedFiles
+                : [],
               sourceOfflineEventId: doc?._id,
-              createdAtClient: payload?.createdAt
-                ? new Date(String(payload.createdAt))
-                : createdAtClient
-                  ? new Date(String(createdAtClient))
-                  : undefined,
+              createdAtClient: createdAtClient
+                ? new Date(String(createdAtClient))
+                : undefined,
             });
-          } else {
-            console.warn(
-              "[biometrics] biometric-enroll received but missing valid IDs",
-              { targetUserIdStr, performedByUserIdStr },
-            );
           }
         } catch (e2) {
           console.error(
             "[biometrics] failed to create BiometricEnrollmentRequest",
             e2,
           );
-          // Do not fail the main offline-events endpoint — it must remain reliable
+          // Do not fail offline ingest — keep mobile reliable
         }
       }
 
@@ -445,7 +401,9 @@ router.post(
         ok: true,
         stage: "received",
         id: doc._id,
-        uploadedFilesCount: uploadedFiles.length,
+        uploadedFilesCount: Array.isArray(doc.uploadedFiles)
+          ? doc.uploadedFiles.length
+          : 0,
       });
     } catch (e) {
       console.error("[mobile/offline-events] error", e);
@@ -472,13 +430,10 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
 
     const fileId = new mongoose.Types.ObjectId(fileIdStr);
 
-    // Optional: you can enforce org ownership by checking files collection metadata.
-    // For now, just stream it if it exists.
     const filesColl = mongoose.connection.db.collection("mobileOffline.files");
     const fileDoc = await filesColl.findOne({ _id: fileId });
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
-    // Set content headers
     res.setHeader(
       "Content-Type",
       fileDoc.contentType || "application/octet-stream",
@@ -489,6 +444,7 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
     );
 
     const stream = bucket.openDownloadStream(fileId);
+
     stream.on("error", (err) => {
       console.error("[mobile/offline-files] stream error", err);
       if (!res.headersSent) res.status(500).end("Stream error");
