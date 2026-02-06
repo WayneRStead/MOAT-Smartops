@@ -365,28 +365,39 @@ router.post(
               performedByUserIdStr,
             });
           } else {
-            await BiometricEnrollmentRequest.create({
-              orgId,
-              targetUserId: new mongoose.Types.ObjectId(targetUserIdStr),
-              performedByUserId: new mongoose.Types.ObjectId(
-                performedByUserIdStr,
-              ),
-              performedByEmail: payload?.performedByEmail || null,
-              performedByRoles: Array.isArray(payload?.performedByRoles)
-                ? payload.performedByRoles
-                : [],
-              groupId: mongoose.isValidObjectId(String(payload?.groupId || ""))
-                ? new mongoose.Types.ObjectId(String(payload.groupId))
-                : undefined,
-              status: "pending",
-              uploadedFiles: Array.isArray(doc?.uploadedFiles)
-                ? doc.uploadedFiles
-                : [],
-              sourceOfflineEventId: doc?._id,
-              createdAtClient: createdAtClient
-                ? new Date(String(createdAtClient))
-                : undefined,
-            });
+            await BiometricEnrollmentRequest.findOneAndUpdate(
+              { orgId, sourceOfflineEventId: doc._id },
+              {
+                $setOnInsert: {
+                  orgId,
+                  sourceOfflineEventId: doc._id,
+                  status: "pending",
+                  createdAtClient: createdAtClient
+                    ? new Date(String(createdAtClient))
+                    : undefined,
+                },
+                $set: {
+                  targetUserId: new mongoose.Types.ObjectId(targetUserIdStr),
+                  performedByUserId: new mongoose.Types.ObjectId(
+                    performedByUserIdStr,
+                  ),
+                  performedByEmail: payload?.performedByEmail || null,
+                  performedByRoles: Array.isArray(payload?.performedByRoles)
+                    ? payload.performedByRoles
+                    : [],
+                  groupId: mongoose.isValidObjectId(
+                    String(payload?.groupId || ""),
+                  )
+                    ? new mongoose.Types.ObjectId(String(payload.groupId))
+                    : undefined,
+                  uploadedFiles: Array.isArray(doc?.uploadedFiles)
+                    ? doc.uploadedFiles
+                    : [],
+                  updatedAt: new Date(),
+                },
+              },
+              { upsert: true, new: true },
+            );
           }
         } catch (e2) {
           console.error(
