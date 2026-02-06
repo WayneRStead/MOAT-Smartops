@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-06-01";
+const ROUTER_VERSION = "mobile-router-v2026-02-06-02";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -484,5 +484,98 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
     return res.status(500).json({ error: e?.message || "Download failed" });
   }
 });
+
+// ------------------------------------------------------------
+// BIOMETRICS WORKFLOW: APPROVE ENROLLMENT REQUEST
+// POST /api/mobile/biometric-requests/:requestId/approve
+// - Marks request approved
+// - Creates/updates BiometricEnrollment (status pending)
+// - Copies uploaded fileIds into BiometricEnrollment.photoFileIds
+// ------------------------------------------------------------
+router.post(
+  "/biometric-requests/:requestId/approve",
+  requireOrg,
+  async (req, res) => {
+    try {
+      const orgId = req.orgObjectId || req.user?.orgId;
+      const userId = req.user?._id || null;
+
+      const requestIdStr = String(req.params.requestId || "").trim();
+      if (!mongoose.isValidObjectId(requestIdStr)) {
+        return res.status(400).json({ error: "Invalid requestId" });
+      }
+
+      const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
+      const BiometricEnrollment = require("../models/BiometricEnrollment");
+
+      const requestDoc = await BiometricEnrollmentRequest.findOne({
+        _id: new mongoose.Types.ObjectId(requestIdStr),
+        orgId,
+      });
+
+      if (!requestDoc) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      // Only allow approving pending requests (idempotent safety)
+      if (String(requestDoc.status || "").toLowerCase() !== "pending") {
+        return res.json({
+          ok: true,
+          message: `Request already ${requestDoc.status}`,
+          requestStatus: requestDoc.status,
+        });
+      }
+
+      // Pull fileIds out of uploadedFiles
+      const uploadedFiles = Array.isArray(requestDoc.uploadedFiles)
+        ? requestDoc.uploadedFiles
+        : [];
+
+      const photoFileIds = uploadedFiles
+        .map((f) => f?.fileId)
+        .filter(Boolean)
+        .map((id) => {
+          const s = String(id).trim();
+          return mongoose.isValidObjectId(s)
+            ? new mongoose.Types.ObjectId(s)
+            : null;
+        })
+        .filter(Boolean);
+
+      // Create/Update enrollment (PENDING — no embedding yet)
+      const enrollment = await BiometricEnrollment.findOneAndUpdate(
+        { orgId, userId: requestDoc.targetUserId },
+        {
+          $set: {
+            status: "pending",
+            photoFileIds,
+            sourceRequestId: requestDoc._id,
+            approvedBy: userId,
+            approvedAt: new Date(),
+          },
+        },
+        { new: true, upsert: true },
+      );
+
+      // Mark request approved
+      requestDoc.status = "approved";
+      requestDoc.approvedByUserId = userId;
+      requestDoc.approvedAt = new Date();
+      await requestDoc.save();
+
+      return res.json({
+        ok: true,
+        requestId: requestDoc._id,
+        requestStatus: requestDoc.status,
+        enrollmentId: enrollment._id,
+        enrollmentStatus: enrollment.status,
+        photoFileIdsCount: photoFileIds.length,
+      });
+    } catch (e) {
+      console.error("[biometrics] approve request error", e);
+      return res.status(500).json({ error: e?.message || "Approve failed" });
+    }
+  },
+);
 
 module.exports = router;
