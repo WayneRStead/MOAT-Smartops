@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-06";
+const ROUTER_VERSION = "mobile-router-v2026-02-05-07";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -431,7 +431,10 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
     const fileId = new mongoose.Types.ObjectId(fileIdStr);
 
     const filesColl = mongoose.connection.db.collection("mobileOffline.files");
-    const fileDoc = await filesColl.findOne({ _id: fileId });
+    const fileDoc = await filesColl.findOne({
+      _id: fileId,
+      "metadata.orgId": String(orgId || ""),
+    });
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
     res.setHeader(
