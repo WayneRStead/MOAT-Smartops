@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-05-07";
+const ROUTER_VERSION = "mobile-router-v2026-02-06-01";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -416,12 +416,19 @@ router.post(
 
 // -----------------------------
 //  DOWNLOAD GRIDFS FILE (mobileOffline bucket)
-//  GET /api/mobile/offline-files/:fileId
+//  GET/HEAD /api/mobile/offline-files/:fileId
+//  ✅ Enforces org ownership via GridFS metadata.orgId
+//  ✅ HEAD requests return headers only (no stream)
 // -----------------------------
 router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
   try {
     const bucket = getMobileOfflineBucket();
     if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const orgId = req.orgObjectId || req.user?.orgId; // ✅ define orgId
+    const orgIdStr = String(orgId || "").trim();
+    if (!orgIdStr)
+      return res.status(400).json({ error: "Missing org context" });
 
     const fileIdStr = String(req.params.fileId || "").trim();
     if (!mongoose.isValidObjectId(fileIdStr)) {
@@ -430,13 +437,16 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
 
     const fileId = new mongoose.Types.ObjectId(fileIdStr);
 
+    // Enforce org ownership
     const filesColl = mongoose.connection.db.collection("mobileOffline.files");
     const fileDoc = await filesColl.findOne({
       _id: fileId,
-      "metadata.orgId": String(orgId || ""),
+      "metadata.orgId": orgIdStr,
     });
+
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
+    // Set content headers
     res.setHeader(
       "Content-Type",
       fileDoc.contentType || "application/octet-stream",
@@ -446,8 +456,12 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
       `inline; filename="${fileDoc.filename || "file"}"`,
     );
 
-    const stream = bucket.openDownloadStream(fileId);
+    // ✅ If this is a HEAD request (curl -I), do NOT stream the body
+    if (req.method === "HEAD") {
+      return res.status(200).end();
+    }
 
+    const stream = bucket.openDownloadStream(fileId);
     stream.on("error", (err) => {
       console.error("[mobile/offline-files] stream error", err);
       if (!res.headersSent) res.status(500).end("Stream error");
