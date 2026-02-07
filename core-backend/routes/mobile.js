@@ -6,7 +6,7 @@ const mongoose = require("mongoose");
 // ✅ GridFS support (MongoDB file storage)
 const { GridFSBucket } = require("mongodb");
 
-// ✅ Auth middleware MUST be imported before router.use(...)
+// ✅ Auth middleware
 const {
   requireAuth,
   resolveOrgContext,
@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-06-02";
+const ROUTER_VERSION = "mobile-router-v2026-02-06-03";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -103,6 +103,29 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
   return out;
 }
 
+function canApproveBiometrics(user) {
+  const roles = []
+    .concat(user?.roles || [])
+    .concat(user?.role ? [user.role] : [])
+    .map((r) =>
+      String(r || "")
+        .toLowerCase()
+        .trim(),
+    )
+    .filter(Boolean);
+
+  const allow = new Set([
+    "admin",
+    "superadmin",
+    "owner",
+    "manager",
+    "project-manager",
+    "pm",
+  ]);
+
+  return roles.some((r) => allow.has(r));
+}
+
 /* -----------------------------
    BOOTSTRAP (NO ORG REQUIRED)
 ------------------------------*/
@@ -115,7 +138,6 @@ router.get("/bootstrap", async (req, res) => {
     if (!user?._id) return res.status(401).json({ error: "Not authenticated" });
 
     const orgId = user.orgId ? String(user.orgId) : null;
-
     if (!orgId) return res.json({ ok: true, orgs: [] });
 
     let orgDoc = null;
@@ -259,30 +281,13 @@ const upload =
       })
     : null;
 
-/**
- * POST /api/mobile/offline-events
- * Supports:
- * 1) JSON:
- *    { eventType, entityRef, payload, fileUris, createdAt }
- *
- * 2) multipart/form-data:
- *    fields:
- *      - eventType
- *      - entityRef
- *      - createdAt
- *      - payloadJson  (JSON string)
- *    files:
- *      - files        (repeatable)
- */
 router.post(
   "/offline-events",
   requireOrg,
   (req, res, next) => {
     if (!upload) return next();
-
     const ct = String(req.headers["content-type"] || "").toLowerCase();
     if (!ct.includes("multipart/form-data")) return next();
-
     return upload.array("files")(req, res, next);
   },
   async (req, res) => {
@@ -308,15 +313,11 @@ router.post(
           : null;
 
         payload = safeJsonParse(req.body?.payloadJson || "{}", {}) || {};
-        fileUris = []; // we store uploads instead
+        fileUris = [];
 
         const files = Array.isArray(req.files) ? req.files : [];
         if (files.length) {
-          uploadedFiles = await saveBuffersToGridFS({
-            orgId,
-            userId,
-            files,
-          });
+          uploadedFiles = await saveBuffersToGridFS({ orgId, userId, files });
         }
       } else {
         const body = req.body || {};
@@ -340,7 +341,8 @@ router.post(
       });
 
       // ------------------------------------------------------------
-      // BIOMETRICS: create ONE BiometricEnrollmentRequest (workflow row)
+      // BIOMETRICS: create/upsert ONE BiometricEnrollmentRequest
+      // keyed by sourceOfflineEventId so resync won't create duplicates
       // ------------------------------------------------------------
       if (eventType === "biometric-enroll") {
         try {
@@ -375,6 +377,7 @@ router.post(
                   createdAtClient: createdAtClient
                     ? new Date(String(createdAtClient))
                     : undefined,
+                  createdAt: new Date(),
                 },
                 $set: {
                   targetUserId: new mongoose.Types.ObjectId(targetUserIdStr),
@@ -401,10 +404,9 @@ router.post(
           }
         } catch (e2) {
           console.error(
-            "[biometrics] failed to create BiometricEnrollmentRequest",
+            "[biometrics] failed to upsert BiometricEnrollmentRequest",
             e2,
           );
-          // Do not fail offline ingest — keep mobile reliable
         }
       }
 
@@ -425,18 +427,17 @@ router.post(
   },
 );
 
-// -----------------------------
-//  DOWNLOAD GRIDFS FILE (mobileOffline bucket)
-//  GET/HEAD /api/mobile/offline-files/:fileId
-//  ✅ Enforces org ownership via GridFS metadata.orgId
-//  ✅ HEAD requests return headers only (no stream)
-// -----------------------------
-router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
+/* -----------------------------
+   DOWNLOAD GRIDFS FILE (mobileOffline bucket)
+   GET/HEAD /api/mobile/offline-files/:fileId
+   ✅ Enforces org ownership via GridFS metadata.orgId
+------------------------------*/
+router.all("/offline-files/:fileId", requireOrg, async (req, res) => {
   try {
     const bucket = getMobileOfflineBucket();
     if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
 
-    const orgId = req.orgObjectId || req.user?.orgId; // ✅ define orgId
+    const orgId = req.orgObjectId || req.user?.orgId;
     const orgIdStr = String(orgId || "").trim();
     if (!orgIdStr)
       return res.status(400).json({ error: "Missing org context" });
@@ -448,16 +449,13 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
 
     const fileId = new mongoose.Types.ObjectId(fileIdStr);
 
-    // Enforce org ownership
     const filesColl = mongoose.connection.db.collection("mobileOffline.files");
     const fileDoc = await filesColl.findOne({
       _id: fileId,
       "metadata.orgId": orgIdStr,
     });
-
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
-    // Set content headers
     res.setHeader(
       "Content-Type",
       fileDoc.contentType || "application/octet-stream",
@@ -467,10 +465,9 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
       `inline; filename="${fileDoc.filename || "file"}"`,
     );
 
-    // ✅ If this is a HEAD request (curl -I), do NOT stream the body
-    if (req.method === "HEAD") {
-      return res.status(200).end();
-    }
+    if (req.method === "HEAD") return res.status(200).end();
+    if (req.method !== "GET")
+      return res.status(405).json({ error: "Method not allowed" });
 
     const stream = bucket.openDownloadStream(fileId);
     stream.on("error", (err) => {
@@ -485,20 +482,48 @@ router.get("/offline-files/:fileId", requireOrg, async (req, res) => {
   }
 });
 
-// ------------------------------------------------------------
-// BIOMETRICS WORKFLOW: APPROVE ENROLLMENT REQUEST
-// POST /api/mobile/biometric-requests/:requestId/approve
-// - Marks request approved
-// - Creates/updates BiometricEnrollment (status pending)
-// - Copies uploaded fileIds into BiometricEnrollment.photoFileIds
-// ------------------------------------------------------------
+/* -----------------------------
+   BIOMETRIC REQUEST WORKFLOW
+------------------------------*/
+
+// GET a request (debug + UI)
+router.get("/biometric-requests/:requestId", requireOrg, async (req, res) => {
+  try {
+    const orgId = req.orgObjectId || req.user?.orgId;
+
+    const requestIdStr = String(req.params.requestId || "").trim();
+    if (!mongoose.isValidObjectId(requestIdStr)) {
+      return res.status(400).json({ error: "Invalid requestId" });
+    }
+
+    const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
+    const requestDoc = await BiometricEnrollmentRequest.findOne({
+      _id: new mongoose.Types.ObjectId(requestIdStr),
+      orgId,
+    }).lean();
+
+    if (!requestDoc)
+      return res.status(404).json({ error: "Request not found" });
+
+    return res.json({ ok: true, request: requestDoc });
+  } catch (e) {
+    console.error("[biometrics] get request error", e);
+    return res.status(500).json({ error: e?.message || "Fetch failed" });
+  }
+});
+
+// APPROVE
 router.post(
   "/biometric-requests/:requestId/approve",
   requireOrg,
   async (req, res) => {
     try {
+      if (!canApproveBiometrics(req.user)) {
+        return res.status(403).json({ error: "Not allowed" });
+      }
+
       const orgId = req.orgObjectId || req.user?.orgId;
-      const userId = req.user?._id || null;
+      const approverUserId = req.user?._id || null;
 
       const requestIdStr = String(req.params.requestId || "").trim();
       if (!mongoose.isValidObjectId(requestIdStr)) {
@@ -513,11 +538,9 @@ router.post(
         orgId,
       });
 
-      if (!requestDoc) {
+      if (!requestDoc)
         return res.status(404).json({ error: "Request not found" });
-      }
 
-      // Only allow approving pending requests (idempotent safety)
       if (String(requestDoc.status || "").toLowerCase() !== "pending") {
         return res.json({
           ok: true,
@@ -526,40 +549,33 @@ router.post(
         });
       }
 
-      // Pull fileIds out of uploadedFiles
       const uploadedFiles = Array.isArray(requestDoc.uploadedFiles)
         ? requestDoc.uploadedFiles
         : [];
-
-      const photoFileIds = uploadedFiles
-        .map((f) => f?.fileId)
-        .filter(Boolean)
-        .map((id) => {
-          const s = String(id).trim();
-          return mongoose.isValidObjectId(s)
-            ? new mongoose.Types.ObjectId(s)
-            : null;
-        })
+      const photoIds = uploadedFiles
+        .map((f) => String(f?.fileId || "").trim())
         .filter(Boolean);
 
-      // Create/Update enrollment (PENDING — no embedding yet)
+      // Create/Update enrollment (still "pending" until embeddings exist)
       const enrollment = await BiometricEnrollment.findOneAndUpdate(
         { orgId, userId: requestDoc.targetUserId },
         {
           $set: {
             status: "pending",
-            photoFileIds,
+            // store in multiple common field names so schema mismatch doesn't break you
+            photoFileIds: photoIds,
+            photoObjectIds: photoIds,
+            photoGridFsIds: photoIds,
             sourceRequestId: requestDoc._id,
-            approvedBy: userId,
+            approvedBy: approverUserId,
             approvedAt: new Date(),
           },
         },
         { new: true, upsert: true },
       );
 
-      // Mark request approved
       requestDoc.status = "approved";
-      requestDoc.approvedByUserId = userId;
+      requestDoc.approvedByUserId = approverUserId;
       requestDoc.approvedAt = new Date();
       await requestDoc.save();
 
@@ -569,11 +585,66 @@ router.post(
         requestStatus: requestDoc.status,
         enrollmentId: enrollment._id,
         enrollmentStatus: enrollment.status,
-        photoFileIdsCount: photoFileIds.length,
+        photosCount: photoIds.length,
       });
     } catch (e) {
       console.error("[biometrics] approve request error", e);
       return res.status(500).json({ error: e?.message || "Approve failed" });
+    }
+  },
+);
+
+// REJECT
+router.post(
+  "/biometric-requests/:requestId/reject",
+  requireOrg,
+  async (req, res) => {
+    try {
+      if (!canApproveBiometrics(req.user)) {
+        return res.status(403).json({ error: "Not allowed" });
+      }
+
+      const orgId = req.orgObjectId || req.user?.orgId;
+      const rejectorUserId = req.user?._id || null;
+
+      const requestIdStr = String(req.params.requestId || "").trim();
+      if (!mongoose.isValidObjectId(requestIdStr)) {
+        return res.status(400).json({ error: "Invalid requestId" });
+      }
+
+      const reason = String(req.body?.reason || "").trim();
+
+      const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
+      const requestDoc = await BiometricEnrollmentRequest.findOne({
+        _id: new mongoose.Types.ObjectId(requestIdStr),
+        orgId,
+      });
+
+      if (!requestDoc)
+        return res.status(404).json({ error: "Request not found" });
+
+      if (String(requestDoc.status || "").toLowerCase() !== "pending") {
+        return res.json({
+          ok: true,
+          message: `Request already ${requestDoc.status}`,
+          requestStatus: requestDoc.status,
+        });
+      }
+
+      requestDoc.status = "rejected";
+      requestDoc.rejectedByUserId = rejectorUserId;
+      requestDoc.rejectedAt = new Date();
+      requestDoc.rejectReason = reason || null;
+      await requestDoc.save();
+
+      return res.json({
+        ok: true,
+        requestId: requestDoc._id,
+        requestStatus: requestDoc.status,
+      });
+    } catch (e) {
+      console.error("[biometrics] reject request error", e);
+      return res.status(500).json({ error: e?.message || "Reject failed" });
     }
   },
 );
