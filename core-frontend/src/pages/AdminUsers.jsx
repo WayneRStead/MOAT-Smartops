@@ -135,6 +135,32 @@ export default function AdminUsers() {
     return () => clearTimeout(t);
   }, [q]);
 
+  <div className="flex items-center gap-3">
+    {editUser?.photo?.url ? (
+      <img
+        src={editUser.photo.url}
+        alt=""
+        className="w-20 h-20 rounded-2xl object-cover border"
+      />
+    ) : (
+      <div className="w-20 h-20 rounded-2xl bg-gray-200 grid place-items-center text-sm text-gray-600 border">
+        —
+      </div>
+    )}
+
+    <div className="text-sm">
+      <div className="font-semibold">{editUser.name}</div>
+      <div className="text-gray-600">
+        {editUser.email || editUser.username || "—"}
+      </div>
+      <div className="mt-1">
+        <Pill tone={statusTone(editUser?.biometric?.status || "not-enrolled")}>
+          {editUser?.biometric?.status || "not-enrolled"}
+        </Pill>
+      </div>
+    </div>
+  </div>;
+
   /* ----------------------- data loading (consistent) ----------------------- */
   async function loadUsers() {
     const params = new URLSearchParams();
@@ -483,20 +509,23 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
   async function rejectEnrollment(u) {
-    const enrollmentId = prompt("Enter enrollmentId to reject:");
-    if (!enrollmentId) return;
+    const requestId = prompt("Enter BiometricEnrollmentRequest _id to reject:");
+    if (!requestId) return;
     const reason = prompt("Reason for rejection (optional):") || "";
+
     try {
-      await api.post(`/users/${u._id}/biometric/reject`, {
-        enrollmentId,
+      setErr("");
+      setInfo("");
+      await api.post(`/mobile/biometric-requests/${requestId}/reject`, {
         reason,
       });
       await load();
-      setInfo("Enrollment rejected.");
+      setInfo("Request rejected.");
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
+
   async function revokeEnrollment(u) {
     if (!confirm("Revoke biometric enrollment for this user?")) return;
     const reason = prompt("Reason for revoke (optional):") || "";

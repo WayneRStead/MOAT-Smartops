@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-09-01";
+const ROUTER_VERSION = "mobile-router-v2026-02-09-03";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -67,9 +67,9 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
   for (const f of files || []) {
     if (!f?.buffer) continue;
 
-    const filename = `${Date.now()}_${Math.random()
-      .toString(16)
-      .slice(2)}_${String(f.originalname || "upload.bin")}`;
+    const filename = `${Date.now()}_${Math.random().toString(16).slice(2)}_${String(
+      f.originalname || "upload.bin",
+    )}`;
 
     const meta = {
       orgId: String(orgId || ""),
@@ -122,8 +122,14 @@ function canApproveBiometrics(user) {
     "project-manager",
     "pm",
   ]);
-
   return roles.some((r) => allow.has(r));
+}
+
+function boolish(v) {
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "y" || s === "on";
 }
 
 /* -----------------------------
@@ -277,7 +283,7 @@ const upload =
   multer && typeof multer === "function"
     ? multer({
         storage: multer.memoryStorage(),
-        limits: { fileSize: 15 * 1024 * 1024 }, // 15MB per file
+        limits: { fileSize: 15 * 1024 * 1024 },
       })
     : null;
 
@@ -485,6 +491,68 @@ router.all("/offline-files/:fileId", requireOrg, async (req, res) => {
 /* -----------------------------
    BIOMETRIC REQUEST WORKFLOW
 ------------------------------*/
+
+/**
+ * ✅ NEW: LIST biometric requests
+ * GET /api/mobile/biometric-requests?status=pending&targetUserId=<id>&limit=200&includeApproved=0
+ *
+ * Default behaviour:
+ * - status defaults to "pending"
+ * - returns recent first
+ * - limits to 200 (max 1000)
+ */
+router.get("/biometric-requests", requireOrg, async (req, res) => {
+  try {
+    const orgId = req.orgObjectId || req.user?.orgId;
+
+    // Only admin-ish should list all requests; otherwise allow self-view only.
+    // (If you want it fully open to all authenticated users, remove this block.)
+    if (!canApproveBiometrics(req.user)) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    const BiometricEnrollmentRequest = require("../models/BiometricEnrollmentRequest");
+
+    const limit = Math.min(parseInt(req.query.limit || "200", 10) || 200, 1000);
+
+    const statusRaw = String(req.query.status || "")
+      .trim()
+      .toLowerCase();
+    const status = statusRaw || "pending";
+
+    const targetUserIdStr = String(req.query.targetUserId || "").trim();
+
+    const includeApproved = boolish(req.query.includeApproved);
+
+    const find = { orgId };
+
+    // status filter
+    if (status && status !== "all") {
+      find.status = status;
+    } else if (!includeApproved) {
+      // if "all" but includeApproved not set, default to excluding approved/rejected
+      find.status = "pending";
+    }
+
+    // optional targetUser filter
+    if (targetUserIdStr) {
+      if (!mongoose.isValidObjectId(targetUserIdStr)) {
+        return res.status(400).json({ error: "Invalid targetUserId" });
+      }
+      find.targetUserId = new mongoose.Types.ObjectId(targetUserIdStr);
+    }
+
+    const rows = await BiometricEnrollmentRequest.find(find)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .lean();
+
+    return res.json({ ok: true, requests: rows });
+  } catch (e) {
+    console.error("[biometrics] list requests error", e);
+    return res.status(500).json({ error: e?.message || "List failed" });
+  }
+});
 
 // GET a request (debug + UI)
 router.get("/biometric-requests/:requestId", requireOrg, async (req, res) => {
