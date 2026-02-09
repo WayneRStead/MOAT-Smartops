@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-06-03";
+const ROUTER_VERSION = "mobile-router-v2026-02-09-01";
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -574,6 +574,25 @@ router.post(
         { new: true, upsert: true },
       );
 
+      try {
+        const User = require("../models/User");
+        await User.updateOne(
+          { _id: requestDoc.targetUserId, orgId },
+          {
+            $set: {
+              "biometric.status": "pending",
+              "biometric.lastUpdatedAt": new Date(),
+            },
+          },
+        );
+      } catch (e3) {
+        console.error(
+          "[biometrics] failed to update User.biometric summary",
+          e3,
+        );
+      }
+
+      // Mark request approved
       requestDoc.status = "approved";
       requestDoc.approvedByUserId = approverUserId;
       requestDoc.approvedAt = new Date();
