@@ -552,9 +552,11 @@ router.post(
       const uploadedFiles = Array.isArray(requestDoc.uploadedFiles)
         ? requestDoc.uploadedFiles
         : [];
-      const photoIds = uploadedFiles
+
+      const photoFileIds = uploadedFiles
         .map((f) => String(f?.fileId || "").trim())
-        .filter(Boolean);
+        .filter((s) => mongoose.isValidObjectId(s))
+        .map((s) => new mongoose.Types.ObjectId(s));
 
       // Create/Update enrollment (still "pending" until embeddings exist)
       const enrollment = await BiometricEnrollment.findOneAndUpdate(
@@ -562,10 +564,7 @@ router.post(
         {
           $set: {
             status: "pending",
-            // store in multiple common field names so schema mismatch doesn't break you
-            photoFileIds: photoIds,
-            photoObjectIds: photoIds,
-            photoGridFsIds: photoIds,
+            photoFileIds,
             sourceRequestId: requestDoc._id,
             approvedBy: approverUserId,
             approvedAt: new Date(),
@@ -604,7 +603,7 @@ router.post(
         requestStatus: requestDoc.status,
         enrollmentId: enrollment._id,
         enrollmentStatus: enrollment.status,
-        photosCount: photoIds.length,
+        photosCount: photoFileIds.length,
       });
     } catch (e) {
       console.error("[biometrics] approve request error", e);
