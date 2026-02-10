@@ -84,7 +84,7 @@ export default function AdminUsers() {
   const [statusFilter, setStatusFilter] = useState("");
   const [missingPhotoOnly, setMissingPhotoOnly] = useState(false);
 
-  // NEW: show deleted toggle (drives includeDeleted=1)
+  // show deleted
   const [showDeleted, setShowDeleted] = useState(false);
 
   // reset password modal target
@@ -115,13 +115,15 @@ export default function AdminUsers() {
   });
   const [editing, setEditing] = useState(false);
 
-  // Photo + biometric quick modals (kept)
+  // Photo modal
   const [photoModal, setPhotoModal] = useState({
     open: false,
     user: null,
     objectId: "",
     url: "",
   });
+
+  // Enrollment helper modal
   const [enrollModal, setEnrollModal] = useState({
     open: false,
     user: null,
@@ -130,61 +132,44 @@ export default function AdminUsers() {
     action: "",
   });
 
+  // ✅ NEW: biometric requests state
+  const [bioReqs, setBioReqs] = useState([]); // raw list
+  const [bioReqsLoading, setBioReqsLoading] = useState(false);
+
   useEffect(() => {
     const t = setTimeout(() => setQDeb(q.trim().toLowerCase()), 200);
     return () => clearTimeout(t);
   }, [q]);
 
-  <div className="flex items-center gap-3">
-    {editUser?.photo?.url ? (
-      <img
-        src={editUser.photo.url}
-        alt=""
-        className="w-20 h-20 rounded-2xl object-cover border"
-      />
-    ) : (
-      <div className="w-20 h-20 rounded-2xl bg-gray-200 grid place-items-center text-sm text-gray-600 border">
-        —
-      </div>
-    )}
+  function statusTone(s) {
+    if (s === "enrolled") return "ok";
+    if (s === "pending") return "warn";
+    if (s === "rejected" || s === "revoked") return "bad";
+    return "default";
+  }
 
-    <div className="text-sm">
-      <div className="font-semibold">{editUser.name}</div>
-      <div className="text-gray-600">
-        {editUser.email || editUser.username || "—"}
-      </div>
-      <div className="mt-1">
-        <Pill tone={statusTone(editUser?.biometric?.status || "not-enrolled")}>
-          {editUser?.biometric?.status || "not-enrolled"}
-        </Pill>
-      </div>
-    </div>
-  </div>;
-
-  /* ----------------------- data loading (consistent) ----------------------- */
+  /* ----------------------- data loading ----------------------- */
   async function loadUsers() {
     const params = new URLSearchParams();
     if (statusFilter) params.set("status", statusFilter);
     if (missingPhotoOnly) params.set("missingPhoto", "true");
-    if (showDeleted) params.set("includeDeleted", "1"); // NEW
+    if (showDeleted) params.set("includeDeleted", "1");
     const qs = params.toString() ? `?${params.toString()}` : "";
     const { data } = await api.get(`/users${qs}`);
     return Array.isArray(data) ? data : [];
   }
 
   async function loadGroups() {
-    // groups are not needed for deleted restore; keep standard list
     const { data } = await api.get("/groups?limit=1000");
     return Array.isArray(data) ? data : [];
   }
 
   function buildGroupsDict(gs) {
-    const dict = {}; // { userId: [groupName, ...] }
+    const dict = {};
     for (const g of gs || []) {
       const gname = (g && g.name) || "";
       if (!gname) continue;
 
-      // members
       for (const uid of g.memberUserIds || []) {
         const key = idStr(uid);
         if (!key) continue;
@@ -192,7 +177,6 @@ export default function AdminUsers() {
         if (!dict[key].includes(gname)) dict[key].push(gname);
       }
 
-      // leader (ensure included)
       const leaderId =
         (Array.isArray(g.leaderUserIds) && g.leaderUserIds[0]) ||
         g.leaderUserId ||
@@ -204,6 +188,25 @@ export default function AdminUsers() {
       }
     }
     return dict;
+  }
+
+  // ✅ NEW: load pending biometric requests (admin-only endpoint)
+  async function loadBiometricRequests() {
+    setBioReqsLoading(true);
+    try {
+      // default pending on backend; we pass status=pending anyway for clarity
+      const { data } = await api.get(
+        "/mobile/biometric-requests?status=pending&limit=500",
+      );
+      const list = Array.isArray(data?.requests) ? data.requests : [];
+      setBioReqs(list);
+    } catch (e) {
+      // If endpoint is locked down or not deployed yet, don't crash the page.
+      // Show error only when user is trying to use it.
+      setBioReqs([]);
+    } finally {
+      setBioReqsLoading(false);
+    }
   }
 
   async function load() {
@@ -224,10 +227,18 @@ export default function AdminUsers() {
 
   useEffect(() => {
     load();
+    // pre-load requests once (admin users will have access)
+    loadBiometricRequests();
   }, []);
+
   useEffect(() => {
     load();
   }, [statusFilter, missingPhotoOnly, showDeleted]);
+
+  // If edit modal opens, refresh pending requests so it’s always current
+  useEffect(() => {
+    if (editUser && !editUser?.isDeleted) loadBiometricRequests();
+  }, [editUser?._id]);
 
   const filtered = useMemo(() => {
     const needle = qDeb;
@@ -238,12 +249,25 @@ export default function AdminUsers() {
       if (!needle) return true;
       const gList = groupsByUser[idStr(u._id || u.id)] || [];
       const hay =
-        `${u.name || ""} ${u.email || u.username || ""} ${u.staffNumber || ""} ${u.role || ""} ${gList.join(" ")}`.toLowerCase();
+        `${u.name || ""} ${u.email || u.username || ""} ${u.staffNumber || ""} ${
+          u.role || ""
+        } ${gList.join(" ")}`.toLowerCase();
       return hay.includes(needle);
     });
   }, [rows, qDeb, roleFilter, groupsByUser]);
 
-  // --- CSV template (includes groupName) ---
+  // ✅ Map pending requests to selected user
+  const pendingReqsForEditUser = useMemo(() => {
+    if (!editUser?._id) return [];
+    const uid = idStr(editUser._id);
+    return (bioReqs || []).filter(
+      (r) =>
+        idStr(r?.targetUserId) === uid &&
+        String(r?.status || "").toLowerCase() === "pending",
+    );
+  }, [bioReqs, editUser?._id]);
+
+  // --- CSV template ---
   function downloadTemplate() {
     const csv = `name,email,username,staffNumber,role,groupName
 Jane Doe,jane@example.com,jane,STA-1001,worker,Group A
@@ -295,8 +319,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       setShowCreate(false);
       await load();
       setInfo("User created.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     } finally {
       setCreating(false);
     }
@@ -398,13 +422,12 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       await api.delete(`/users/${id}`);
       await load();
       setInfo("User deleted.");
-      // keep edit modal consistent if currently editing
       if (editUser && String(editUser._id) === String(id)) {
         const updated = { ...editUser, isDeleted: true, active: false };
         setEditUser(updated);
       }
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
 
@@ -416,7 +439,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       const { data } = await api.post(`/users/${id}/restore`);
       await load();
       setInfo("User restored.");
-      // update modal user if open
       if (editUser && String(editUser._id) === String(id)) {
         const restoredUser = data?.user || {
           ...editUser,
@@ -433,12 +455,12 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
           tempPassword: "",
         });
       }
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
 
-  // --- Photo: set via objectId (simple for now) ---
+  // --- Photo: set via objectId ---
   function openPhotoModal(u) {
     setPhotoModal({ open: true, user: u, objectId: "", url: "" });
   }
@@ -461,8 +483,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       closePhotoModal();
       await load();
       setInfo("Photo attached.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
 
@@ -481,38 +503,36 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         enrollmentId: "",
         action: "started",
       });
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
-  async function approveEnrollment(u) {
-    const requestId = prompt(
-      "Enter BiometricEnrollmentRequest _id to approve:",
-    );
-    if (!requestId) return;
 
+  // ✅ NEW: Approve by requestId (no prompt)
+  async function approveRequestById(requestId) {
+    if (!requestId) return;
+    if (!confirm("Approve this biometric request?")) return;
     try {
       setErr("");
       setInfo("");
-      // ✅ NEW: approve the REQUEST (this creates/updates BiometricEnrollment)
       const { data } = await api.post(
         `/mobile/biometric-requests/${requestId}/approve`,
       );
-
       await load();
-
+      await loadBiometricRequests();
       setInfo(
         `Approved request. Enrollment: ${data?.enrollmentId || "—"} (photos: ${data?.photosCount ?? 0})`,
       );
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
-  async function rejectEnrollment(u) {
-    const requestId = prompt("Enter BiometricEnrollmentRequest _id to reject:");
+
+  // ✅ NEW: Reject by requestId (no prompt)
+  async function rejectRequestById(requestId) {
     if (!requestId) return;
     const reason = prompt("Reason for rejection (optional):") || "";
-
+    if (!confirm("Reject this biometric request?")) return;
     try {
       setErr("");
       setInfo("");
@@ -520,12 +540,14 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         reason,
       });
       await load();
+      await loadBiometricRequests();
       setInfo("Request rejected.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
   }
 
+  // Keep your revoke enrollment as-is
   async function revokeEnrollment(u) {
     if (!confirm("Revoke biometric enrollment for this user?")) return;
     const reason = prompt("Reason for revoke (optional):") || "";
@@ -533,16 +555,9 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       await api.post(`/users/${u._id}/biometric/revoke`, { reason });
       await load();
       setInfo("Enrollment revoked.");
-    } catch (e) {
-      setErr(e?.response?.data?.error || String(e));
+    } catch (e2) {
+      setErr(e2?.response?.data?.error || String(e2));
     }
-  }
-
-  function statusTone(s) {
-    if (s === "enrolled") return "ok";
-    if (s === "pending") return "warn";
-    if (s === "rejected" || s === "revoked") return "bad";
-    return "default";
   }
 
   return (
@@ -596,7 +611,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             Missing Photo only
           </label>
 
-          {/* NEW: show deleted */}
           <label
             className="inline-flex items-center gap-2 text-sm"
             title="Include deleted users (admins/managers only)"
@@ -705,7 +719,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                       )}
                     </td>
 
-                    {/* ✅ ONLY EDIT in the table */}
                     <td className="text-right align-top">
                       <button
                         className="btn btn-sm"
@@ -728,14 +741,13 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         </table>
       </div>
 
-      {/* Create modal: single / bulk */}
+      {/* Create modal */}
       <Modal
         open={showCreate}
         onClose={() => setShowCreate(false)}
         title="Add Users"
       >
         <div className="space-y-3">
-          {/* Tabs */}
           <div className="inline-flex overflow-hidden rounded">
             <button
               className={`px-3 py-2 ${createTab === "single" ? "bg-black text-white" : ""}`}
@@ -880,7 +892,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                   type="button"
                   className="px-3 py-2 border rounded"
                   onClick={downloadTemplate}
-                  title="Download CSV template"
                 >
                   Download CSV Template
                 </button>
@@ -897,20 +908,157 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         </div>
       </Modal>
 
-      {/* Edit modal (actions live here now) */}
+      {/* Edit modal */}
       <Modal
         open={!!editUser}
         onClose={closeEdit}
         title={
           editUser
-            ? `Edit User • ${editUser.name || editUser.email || editUser.username || editUser._id}${editUser.isDeleted ? " (DELETED)" : ""}`
+            ? `Edit User • ${editUser.name || editUser.email || editUser.username || editUser._id}${
+                editUser.isDeleted ? " (DELETED)" : ""
+              }`
             : "Edit User"
         }
-        width={860}
+        width={940}
       >
         {editUser && (
           <div className="grid gap-4">
-            {/* Action strip (hidden until edit is open ✅) */}
+            {/* ✅ User header with larger photo */}
+            <div className="flex items-center gap-3">
+              {editUser?.photo?.url ? (
+                <img
+                  src={editUser.photo.url}
+                  alt=""
+                  className="w-20 h-20 rounded-2xl object-cover border"
+                />
+              ) : (
+                <div className="w-20 h-20 rounded-2xl bg-gray-200 grid place-items-center text-sm text-gray-600 border">
+                  —
+                </div>
+              )}
+
+              <div className="text-sm">
+                <div className="font-semibold">{editUser.name || "—"}</div>
+                <div className="text-gray-600">
+                  {editUser.email || editUser.username || "—"}
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  <Pill
+                    tone={statusTone(
+                      editUser?.biometric?.status || "not-enrolled",
+                    )}
+                  >
+                    {editUser?.biometric?.status || "not-enrolled"}
+                  </Pill>
+                  {bioReqsLoading && (
+                    <span className="text-xs text-gray-500">
+                      Loading requests…
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => loadBiometricRequests()}
+                >
+                  Refresh Requests
+                </button>
+              </div>
+            </div>
+
+            {/* ✅ Pending biometric requests panel (NO more prompts) */}
+            {!editUser.isDeleted && (
+              <div className="border rounded-xl p-3 bg-white">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-semibold text-sm">
+                    Pending Biometric Requests{" "}
+                    <span className="text-gray-500">
+                      ({pendingReqsForEditUser.length})
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    Requests come from mobile offline sync and include uploaded
+                    photos.
+                  </div>
+                </div>
+
+                {pendingReqsForEditUser.length ? (
+                  <div className="mt-3 space-y-3">
+                    {pendingReqsForEditUser.map((r) => {
+                      const rid = idStr(r?._id);
+                      const uploaded = Array.isArray(r?.uploadedFiles)
+                        ? r.uploadedFiles
+                        : [];
+                      const thumbs = uploaded
+                        .map((f) => String(f?.fileId || "").trim())
+                        .filter(Boolean)
+                        .slice(0, 6);
+
+                      return (
+                        <div
+                          key={rid}
+                          className="border rounded-xl p-3 bg-gray-50"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Pill tone="warn">pending</Pill>
+                            <div className="text-xs text-gray-700">
+                              Request:{" "}
+                              <code className="bg-white px-1 rounded">
+                                {rid}
+                              </code>
+                            </div>
+                            <div className="ml-auto flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-success"
+                                onClick={() => approveRequestById(rid)}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-error"
+                                onClick={() => rejectRequestById(rid)}
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* thumbnails */}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {thumbs.length ? (
+                              thumbs.map((fid) => (
+                                <img
+                                  key={fid}
+                                  src={`/api/mobile/offline-files/${fid}`}
+                                  alt=""
+                                  className="w-20 h-20 rounded-xl object-cover border bg-white"
+                                  title={fid}
+                                />
+                              ))
+                            ) : (
+                              <div className="text-xs text-gray-600">
+                                No uploaded photos attached to this request.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mt-2 text-sm text-gray-600">
+                    No pending biometric requests found for this user.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Action strip */}
             <div className="flex flex-wrap items-center gap-2 border rounded-xl p-3 bg-gray-50">
               <div className="text-sm text-gray-700 mr-2">Actions:</div>
 
@@ -941,20 +1089,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                   >
                     Start Enroll
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => approveEnrollment(editUser)}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => rejectEnrollment(editUser)}
-                  >
-                    Reject
-                  </button>
+                  {/* Approve/Reject now happen via the pending panel above */}
                   <button
                     type="button"
                     className="btn btn-sm"
@@ -1183,8 +1318,8 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             {enrollModal.token || "—"}
           </pre>
           <div className="text-gray-600">
-            After the mobile submits, approve or reject using the buttons inside
-            the Edit modal.
+            After the mobile submits, approve/reject in the Pending Requests
+            panel inside the Edit modal.
           </div>
         </div>
       </Modal>
