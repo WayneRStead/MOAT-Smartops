@@ -77,6 +77,9 @@ export default function AdminUsers() {
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
+  // ✅ NEW: blob urls for protected thumbnails (fileId -> objectURL)
+  const [thumbUrlByFileId, setThumbUrlByFileId] = useState({});
+
   // filters / search
   const [q, setQ] = useState("");
   const [qDeb, setQDeb] = useState("");
@@ -267,6 +270,71 @@ export default function AdminUsers() {
     );
   }, [bioReqs, editUser?._id]);
 
+  // ✅ Fetch protected images with Authorization (axios/api includes headers)
+  async function fetchThumbObjectUrl(fileId) {
+    const res = await api.get(`/mobile/offline-files/${fileId}`, {
+      responseType: "blob",
+    });
+    const blob = res?.data;
+    if (!blob) throw new Error("No blob");
+    return URL.createObjectURL(blob);
+  }
+
+  // ✅ Whenever pending requests for the edited user changes, load thumbs
+  useEffect(() => {
+    let cancelled = false;
+    const createdUrls = [];
+
+    async function run() {
+      try {
+        // collect unique fileIds from pending requests
+        const fileIds = Array.from(
+          new Set(
+            (pendingReqsForEditUser || [])
+              .flatMap((r) =>
+                Array.isArray(r?.uploadedFiles) ? r.uploadedFiles : [],
+              )
+              .map((f) => String(f?.fileId || "").trim())
+              .filter(Boolean),
+          ),
+        );
+
+        if (!fileIds.length) return;
+
+        // only fetch what we don't already have
+        const missing = fileIds.filter((id) => !thumbUrlByFileId[id]);
+        if (!missing.length) return;
+
+        const newMap = {};
+        for (const fid of missing) {
+          try {
+            const url = await fetchThumbObjectUrl(fid);
+            newMap[fid] = url;
+            createdUrls.push(url);
+          } catch (e) {
+            // leave it missing (we'll show a placeholder)
+            // optional: console.warn("thumb fetch failed", fid, e);
+          }
+        }
+
+        if (!cancelled && Object.keys(newMap).length) {
+          setThumbUrlByFileId((prev) => ({ ...prev, ...newMap }));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    run();
+
+    // cleanup object urls created by this run
+    return () => {
+      cancelled = true;
+      for (const u of createdUrls) URL.revokeObjectURL(u);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editUser?._id, pendingReqsForEditUser.length]);
+
   // --- CSV template ---
   function downloadTemplate() {
     const csv = `name,email,username,staffNumber,role,groupName
@@ -369,6 +437,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
   }
   function closeEdit() {
     setEditUser(null);
+    setThumbUrlByFileId({});
     setEditForm({
       name: "",
       email: "",
@@ -1031,15 +1100,26 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                           {/* thumbnails */}
                           <div className="mt-2 flex flex-wrap gap-2">
                             {thumbs.length ? (
-                              thumbs.map((fid) => (
-                                <img
-                                  key={fid}
-                                  src={`/api/mobile/offline-files/${fid}`}
-                                  alt=""
-                                  className="w-20 h-20 rounded-xl object-cover border bg-white"
-                                  title={fid}
-                                />
-                              ))
+                              thumbs.map((fid) => {
+                                const src = thumbUrlByFileId[fid] || "";
+                                return src ? (
+                                  <img
+                                    key={fid}
+                                    src={src}
+                                    alt=""
+                                    className="w-20 h-20 rounded-xl object-cover border bg-white"
+                                    title={fid}
+                                  />
+                                ) : (
+                                  <div
+                                    key={fid}
+                                    className="w-20 h-20 rounded-xl border bg-gray-100 grid place-items-center text-xs text-gray-500"
+                                    title={`Could not load ${fid}`}
+                                  >
+                                    …
+                                  </div>
+                                );
+                              })
                             ) : (
                               <div className="text-xs text-gray-600">
                                 No uploaded photos attached to this request.
