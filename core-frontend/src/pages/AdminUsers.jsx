@@ -77,8 +77,11 @@ export default function AdminUsers() {
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
-  // ✅ NEW: blob urls for protected thumbnails (fileId -> objectURL)
+  // ✅ blob urls for protected thumbnails (fileId -> objectURL)
   const [thumbUrlByFileId, setThumbUrlByFileId] = useState({});
+
+  // ✅ NEW: blob url for protected PROFILE photo in edit header
+  const [profileBlobUrl, setProfileBlobUrl] = useState("");
 
   // filters / search
   const [q, setQ] = useState("");
@@ -135,7 +138,7 @@ export default function AdminUsers() {
     action: "",
   });
 
-  // ✅ NEW: biometric requests state
+  // ✅ biometric requests state
   const [bioReqs, setBioReqs] = useState([]); // raw list
   const [bioReqsLoading, setBioReqsLoading] = useState(false);
 
@@ -193,19 +196,16 @@ export default function AdminUsers() {
     return dict;
   }
 
-  // ✅ NEW: load pending biometric requests (admin-only endpoint)
+  // ✅ load pending biometric requests (admin-only endpoint)
   async function loadBiometricRequests() {
     setBioReqsLoading(true);
     try {
-      // default pending on backend; we pass status=pending anyway for clarity
       const { data } = await api.get(
         "/mobile/biometric-requests?status=pending&limit=500",
       );
       const list = Array.isArray(data?.requests) ? data.requests : [];
       setBioReqs(list);
     } catch (e) {
-      // If endpoint is locked down or not deployed yet, don't crash the page.
-      // Show error only when user is trying to use it.
       setBioReqs([]);
     } finally {
       setBioReqsLoading(false);
@@ -230,17 +230,19 @@ export default function AdminUsers() {
 
   useEffect(() => {
     load();
-    // pre-load requests once (admin users will have access)
     loadBiometricRequests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter, missingPhotoOnly, showDeleted]);
 
   // If edit modal opens, refresh pending requests so it’s always current
   useEffect(() => {
     if (editUser && !editUser?.isDeleted) loadBiometricRequests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editUser?._id]);
 
   const filtered = useMemo(() => {
@@ -280,14 +282,26 @@ export default function AdminUsers() {
     return URL.createObjectURL(blob);
   }
 
-  // ✅ Whenever pending requests for the edited user changes, load thumbs
+  // ✅ NEW: fetch protected PROFILE photo blob (fallback)
+  async function fetchProfilePhotoBlobUrl(userId) {
+    // Your backend might already have photo.url; this is only a fallback.
+    // This route MUST exist on backend. If it doesn't, this will fail silently.
+    // Recommended backend route: GET /users/:id/photo (streams image with auth).
+    const res = await api.get(`/users/${userId}/photo`, {
+      responseType: "blob",
+    });
+    const blob = res?.data;
+    if (!blob) throw new Error("No blob");
+    return URL.createObjectURL(blob);
+  }
+
+  // ✅ load thumbs when pending reqs change
   useEffect(() => {
     let cancelled = false;
-    const createdUrls = [];
+    const created = [];
 
     async function run() {
       try {
-        // collect unique fileIds from pending requests
         const fileIds = Array.from(
           new Set(
             (pendingReqsForEditUser || [])
@@ -301,7 +315,6 @@ export default function AdminUsers() {
 
         if (!fileIds.length) return;
 
-        // only fetch what we don't already have
         const missing = fileIds.filter((id) => !thumbUrlByFileId[id]);
         if (!missing.length) return;
 
@@ -310,10 +323,9 @@ export default function AdminUsers() {
           try {
             const url = await fetchThumbObjectUrl(fid);
             newMap[fid] = url;
-            createdUrls.push(url);
-          } catch (e) {
-            // leave it missing (we'll show a placeholder)
-            // optional: console.warn("thumb fetch failed", fid, e);
+            created.push(url);
+          } catch {
+            // ignore; placeholder shown
           }
         }
 
@@ -327,13 +339,54 @@ export default function AdminUsers() {
 
     run();
 
-    // cleanup object urls created by this run
     return () => {
       cancelled = true;
-      for (const u of createdUrls) URL.revokeObjectURL(u);
+      for (const u of created) URL.revokeObjectURL(u);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editUser?._id, pendingReqsForEditUser.length]);
+
+  // ✅ Ensure profile photo in edit header renders:
+  // - prefer editUser.photo.url if present
+  // - otherwise try to fetch /users/:id/photo as blob
+  useEffect(() => {
+    let cancelled = false;
+    let createdUrl = "";
+
+    async function run() {
+      // cleanup previous
+      if (profileBlobUrl) {
+        try {
+          URL.revokeObjectURL(profileBlobUrl);
+        } catch {}
+        setProfileBlobUrl("");
+      }
+
+      if (!editUser?._id) return;
+      if (editUser?.photo?.url) return; // already has a direct URL
+      if (editUser?.isDeleted) return;
+
+      try {
+        const url = await fetchProfilePhotoBlobUrl(editUser._id);
+        createdUrl = url;
+        if (!cancelled) setProfileBlobUrl(url);
+      } catch {
+        // no route or no photo; leave blank placeholder
+      }
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+      if (createdUrl) {
+        try {
+          URL.revokeObjectURL(createdUrl);
+        } catch {}
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editUser?._id]);
 
   // --- CSV template ---
   function downloadTemplate() {
@@ -423,8 +476,20 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
+  // ✅ Refresh user from server so edit modal state updates (photo/biometric status)
+  async function refreshEditUser(userId) {
+    try {
+      const { data } = await api.get(`/users/${userId}`);
+      const u = data?.user || data;
+      if (u && u._id) setEditUser(u);
+      return u;
+    } catch {
+      return null;
+    }
+  }
+
   // --- Edit user ---
-  function openEdit(u) {
+  async function openEdit(u) {
     setEditUser(u);
     setEditForm({
       name: u.name || "",
@@ -434,10 +499,27 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       role: u.role || "worker",
       tempPassword: "",
     });
+
+    // Pull the latest server view (ensures biometric.status + photo are current)
+    await refreshEditUser(u._id);
   }
+
   function closeEdit() {
+    // cleanup blob urls
+    for (const k of Object.keys(thumbUrlByFileId || {})) {
+      try {
+        URL.revokeObjectURL(thumbUrlByFileId[k]);
+      } catch {}
+    }
+    if (profileBlobUrl) {
+      try {
+        URL.revokeObjectURL(profileBlobUrl);
+      } catch {}
+    }
+
     setEditUser(null);
     setThumbUrlByFileId({});
+    setProfileBlobUrl("");
     setEditForm({
       name: "",
       email: "",
@@ -550,7 +632,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         url: photoModal.url || undefined,
       });
       closePhotoModal();
+
+      // ✅ refresh list + edit user to show the new profile photo immediately
       await load();
+      await refreshEditUser(photoModal.user._id);
+
       setInfo("Photo attached.");
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
@@ -577,7 +663,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
-  // ✅ NEW: Approve by requestId (no prompt)
+  // ✅ Approve by requestId (no prompt) + refresh edit user so pill updates
   async function approveRequestById(requestId) {
     if (!requestId) return;
     if (!confirm("Approve this biometric request?")) return;
@@ -587,8 +673,27 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       const { data } = await api.post(
         `/mobile/biometric-requests/${requestId}/approve`,
       );
+
+      // refresh everything that drives the UI
       await load();
       await loadBiometricRequests();
+      if (editUser?._id) await refreshEditUser(editUser._id);
+
+      // Optimistic: if backend doesn't immediately reflect approved in user summary,
+      // at least set something visible locally.
+      setEditUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              biometric: {
+                ...(prev.biometric || {}),
+                status: prev?.biometric?.status || "pending",
+                lastUpdatedAt: new Date().toISOString(),
+              },
+            }
+          : prev,
+      );
+
       setInfo(
         `Approved request. Enrollment: ${data?.enrollmentId || "—"} (photos: ${data?.photosCount ?? 0})`,
       );
@@ -597,7 +702,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
-  // ✅ NEW: Reject by requestId (no prompt)
+  // ✅ Reject by requestId (no prompt) + refresh edit user so pill updates
   async function rejectRequestById(requestId) {
     if (!requestId) return;
     const reason = prompt("Reason for rejection (optional):") || "";
@@ -608,8 +713,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       await api.post(`/mobile/biometric-requests/${requestId}/reject`, {
         reason,
       });
+
       await load();
       await loadBiometricRequests();
+      if (editUser?._id) await refreshEditUser(editUser._id);
+
       setInfo("Request rejected.");
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
@@ -623,11 +731,15 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     try {
       await api.post(`/users/${u._id}/biometric/revoke`, { reason });
       await load();
+      if (editUser?._id) await refreshEditUser(editUser._id);
       setInfo("Enrollment revoked.");
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
     }
   }
+
+  // ✅ The profile photo shown in edit header:
+  const editProfileSrc = editUser?.photo?.url || profileBlobUrl || "";
 
   return (
     <div className="max-w-7xl mx-auto p-4">
@@ -819,14 +931,18 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         <div className="space-y-3">
           <div className="inline-flex overflow-hidden rounded">
             <button
-              className={`px-3 py-2 ${createTab === "single" ? "bg-black text-white" : ""}`}
+              className={`px-3 py-2 ${
+                createTab === "single" ? "bg-black text-white" : ""
+              }`}
               onClick={() => setCreateTab("single")}
               type="button"
             >
               Create Individually
             </button>
             <button
-              className={`px-3 py-2 ${createTab === "bulk" ? "bg-black text-white" : ""}`}
+              className={`px-3 py-2 ${
+                createTab === "bulk" ? "bg-black text-white" : ""
+              }`}
               onClick={() => setCreateTab("bulk")}
               type="button"
             >
@@ -983,20 +1099,23 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         onClose={closeEdit}
         title={
           editUser
-            ? `Edit User • ${editUser.name || editUser.email || editUser.username || editUser._id}${
-                editUser.isDeleted ? " (DELETED)" : ""
-              }`
+            ? `Edit User • ${
+                editUser.name ||
+                editUser.email ||
+                editUser.username ||
+                editUser._id
+              }${editUser.isDeleted ? " (DELETED)" : ""}`
             : "Edit User"
         }
         width={940}
       >
         {editUser && (
           <div className="grid gap-4">
-            {/* ✅ User header with larger photo */}
+            {/* User header with larger photo */}
             <div className="flex items-center gap-3">
-              {editUser?.photo?.url ? (
+              {editProfileSrc ? (
                 <img
-                  src={editUser.photo.url}
+                  src={editProfileSrc}
                   alt=""
                   className="w-20 h-20 rounded-2xl object-cover border"
                 />
@@ -1038,7 +1157,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               </div>
             </div>
 
-            {/* ✅ Pending biometric requests panel (NO more prompts) */}
+            {/* Pending biometric requests panel */}
             {!editUser.isDeleted && (
               <div className="border rounded-xl p-3 bg-white">
                 <div className="flex items-center justify-between gap-2">
@@ -1169,7 +1288,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                   >
                     Start Enroll
                   </button>
-                  {/* Approve/Reject now happen via the pending panel above */}
                   <button
                     type="button"
                     className="btn btn-sm"
