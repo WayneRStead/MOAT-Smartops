@@ -1,4 +1,3 @@
-// src/pages/AdminUsers.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import ResetPasswordModal from "../components/ResetPasswordModal.jsx";
 import { api } from "../lib/api";
@@ -73,7 +72,7 @@ const idStr = (v) => {
 export default function AdminUsers() {
   const [rows, setRows] = useState([]);
   const [groups, setGroups] = useState([]);
-  const [groupsByUser, setGroupsByUser] = useState({}); // { [userId]: string[] }
+  const [groupsByUser, setGroupsByUser] = useState({});
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
@@ -131,7 +130,7 @@ export default function AdminUsers() {
     action: "",
   });
 
-  // ✅ Biometric requests list (pending + approved are useful for UI)
+  // ✅ Biometric requests list (cache)
   const [bioReqs, setBioReqs] = useState([]);
   const [bioReqsLoading, setBioReqsLoading] = useState(false);
 
@@ -198,7 +197,36 @@ export default function AdminUsers() {
     return dict;
   }
 
-  // ✅ Load requests (grab both pending + approved so header can show "approved" after you approve)
+  // ✅ Merge helper: keeps existing requests if backend doesn't return them (common if endpoint only returns pending)
+  function mergeRequests(prev, incoming) {
+    const byId = new Map();
+
+    // keep what we already know
+    for (const r of prev || []) byId.set(idStr(r?._id), r);
+
+    // merge/overwrite with fresh data
+    for (const r of incoming || []) {
+      const rid = idStr(r?._id);
+      if (!rid) continue;
+      const old = byId.get(rid) || {};
+      // important: keep uploadedFiles if server omits them
+      const merged = {
+        ...old,
+        ...r,
+        uploadedFiles:
+          Array.isArray(r?.uploadedFiles) && r.uploadedFiles.length
+            ? r.uploadedFiles
+            : Array.isArray(old?.uploadedFiles)
+              ? old.uploadedFiles
+              : [],
+      };
+      byId.set(rid, merged);
+    }
+
+    return Array.from(byId.values());
+  }
+
+  // ✅ Load requests (try status=all, but merge so we never "lose" a request client-side)
   async function loadBiometricRequests() {
     setBioReqsLoading(true);
     try {
@@ -206,9 +234,10 @@ export default function AdminUsers() {
         "/mobile/biometric-requests?status=all&limit=500",
       );
       const list = Array.isArray(data?.requests) ? data.requests : [];
-      setBioReqs(list);
+      setBioReqs((prev) => mergeRequests(prev, list));
     } catch {
-      setBioReqs([]);
+      // Do NOT clear existing cache on error; keep what we have
+      setBioReqs((prev) => prev);
     } finally {
       setBioReqsLoading(false);
     }
@@ -239,7 +268,6 @@ export default function AdminUsers() {
     load();
   }, [statusFilter, missingPhotoOnly, showDeleted]);
 
-  // Refresh requests whenever opening a user (or switching users)
   useEffect(() => {
     if (editUser && !editUser?.isDeleted) loadBiometricRequests();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -272,7 +300,6 @@ export default function AdminUsers() {
     );
   }, [reqsForEditUser]);
 
-  // Most recent non-pending request (so after approve, header can show "approved")
   const latestNonPendingReq = useMemo(() => {
     const nonPending = (reqsForEditUser || []).filter(
       (r) => String(r?.status || "").toLowerCase() !== "pending",
@@ -304,13 +331,10 @@ export default function AdminUsers() {
     return URL.createObjectURL(blob);
   }
 
-  // Collect fileIds we may need:
-  // - pending request thumbs (panel)
-  // - plus one "profile candidate" image from either pending or latest approved request
+  // FileIds we may need:
   const fileIdsNeeded = useMemo(() => {
     const set = new Set();
 
-    // pending panel
     for (const r of pendingReqsForEditUser || []) {
       const uploaded = Array.isArray(r?.uploadedFiles) ? r.uploadedFiles : [];
       for (const f of uploaded) {
@@ -319,7 +343,6 @@ export default function AdminUsers() {
       }
     }
 
-    // profile candidate from latest request (pending OR approved)
     const chooseReq =
       pendingReqsForEditUser?.[0] || latestNonPendingReq || null;
     if (chooseReq) {
@@ -333,7 +356,6 @@ export default function AdminUsers() {
     return Array.from(set);
   }, [pendingReqsForEditUser, latestNonPendingReq]);
 
-  // Fetch any missing objectURLs (DO NOT revoke on effect cleanup; we revoke on closeEdit)
   useEffect(() => {
     let cancelled = false;
 
@@ -352,7 +374,7 @@ export default function AdminUsers() {
           const url = await fetchThumbObjectUrl(fid);
           newMap[fid] = url;
         } catch {
-          // ignore; we show a placeholder
+          // ignore
         }
       }
 
@@ -529,7 +551,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
-  // --- Delete (soft) ---
   async function del(id) {
     if (!confirm("Delete this user? (soft delete)")) return;
     setErr("");
@@ -547,7 +568,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
-  // --- Restore (soft restore) ---
   async function restore(id) {
     setErr("");
     setInfo("");
@@ -576,7 +596,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
-  // --- Biometrics actions ---
   async function startEnrollment(u) {
     try {
       setErr("");
@@ -596,23 +615,43 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     }
   }
 
+  // ✅ IMPORTANT: optimistic update so photos don’t disappear after approve/reject
+  function optimisticUpdateRequest(rid, patch) {
+    setBioReqs((prev) =>
+      (prev || []).map((r) => {
+        if (idStr(r?._id) !== rid) return r;
+        return { ...r, ...patch };
+      }),
+    );
+  }
+
   async function approveRequestById(requestId) {
     if (!requestId) return;
     if (!confirm("Approve this biometric request?")) return;
     try {
       setErr("");
       setInfo("");
+
+      // optimistic: mark approved immediately (keep uploadedFiles for thumbnails/profile)
+      optimisticUpdateRequest(requestId, {
+        status: "approved",
+        approvedAt: new Date().toISOString(),
+      });
+
       const { data } = await api.post(
         `/mobile/biometric-requests/${requestId}/approve`,
       );
+
       await load();
       await loadBiometricRequests();
+
       setInfo(
         `Approved request. Enrollment: ${data?.enrollmentId || "—"} (photos: ${data?.photosCount ?? 0}).`,
       );
-      // IMPORTANT: biometric.status remains "pending" until embeddings run; that's expected.
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
+      // if approve failed, revert back to pending
+      optimisticUpdateRequest(requestId, { status: "pending" });
     }
   }
 
@@ -623,14 +662,23 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
     try {
       setErr("");
       setInfo("");
+
+      optimisticUpdateRequest(requestId, {
+        status: "rejected",
+        rejectedAt: new Date().toISOString(),
+        rejectReason: reason || null,
+      });
+
       await api.post(`/mobile/biometric-requests/${requestId}/reject`, {
         reason,
       });
+
       await load();
       await loadBiometricRequests();
       setInfo("Request rejected.");
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
+      optimisticUpdateRequest(requestId, { status: "pending" });
     }
   }
 
@@ -647,7 +695,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
   }
 
   // ✅ Profile image in Edit view:
-  // Prefer user.photo.url; otherwise use the first uploaded image from pending/approved request (so you never need “Set Photo”)
+  // Prefer user.photo.url; otherwise use first uploaded image from (pending OR latest approved/rejected)
   const profileFallbackFileId = useMemo(() => {
     const chooseReq =
       pendingReqsForEditUser?.[0] || latestNonPendingReq || null;
@@ -664,7 +712,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       ? thumbUrlByFileId[profileFallbackFileId] || ""
       : "";
 
-  // Request status pill shown in edit header (THIS is what changes to approved/rejected)
   const requestHeaderStatus = useMemo(() => {
     if (pendingReqsForEditUser.length) return "pending";
     const s = String(latestNonPendingReq?.status || "").toLowerCase();
@@ -675,7 +722,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
 
   return (
     <div className="max-w-7xl mx-auto p-4">
-      {/* Header row */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-semibold">Admin • Users</h1>
 
@@ -736,11 +782,7 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
             Show deleted
           </label>
 
-          <button
-            className="btn btn-sm"
-            onClick={downloadTemplate}
-            title="Download CSV template"
-          >
+          <button className="btn btn-sm" onClick={downloadTemplate}>
             Download CSV Template
           </button>
 
@@ -789,13 +831,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                         {isDel && <Pill tone="bad">deleted</Pill>}
                       </div>
                     </td>
-
                     <td className="align-top">
                       {u.email || u.username || "—"}
                     </td>
                     <td className="align-top">{u.staffNumber || "—"}</td>
                     <td className="align-top">{u.role || "—"}</td>
-
                     <td className="align-top">
                       {gNames.length ? (
                         gNames.join(", ")
@@ -803,11 +843,9 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                         <span className="text-gray-400">—</span>
                       )}
                     </td>
-
                     <td className="align-top">
                       <Pill tone={statusTone(status)}>{status}</Pill>
                     </td>
-
                     <td className="align-top">
                       {u?.active === false ? (
                         <Pill tone="warn">inactive</Pill>
@@ -815,7 +853,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                         <Pill tone="ok">active</Pill>
                       )}
                     </td>
-
                     <td className="text-right align-top">
                       <button
                         className="btn btn-sm"
@@ -1027,7 +1064,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
       >
         {editUser && (
           <div className="grid gap-4">
-            {/* ✅ User header (profile photo derived from biometric photos if needed) */}
             <div className="flex items-center gap-3">
               {profileSrc ? (
                 <img
@@ -1048,7 +1084,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                 </div>
 
                 <div className="mt-1 flex items-center gap-2">
-                  {/* Biometric status (pending until embeddings exist) */}
                   <Pill
                     tone={statusTone(
                       editUser?.biometric?.status || "not-enrolled",
@@ -1057,7 +1092,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                     {editUser?.biometric?.status || "not-enrolled"}
                   </Pill>
 
-                  {/* ✅ Request status (this is what flips to approved/rejected immediately) */}
                   {requestHeaderStatus ? (
                     <Pill tone={reqTone(requestHeaderStatus)}>
                       request: {requestHeaderStatus}
@@ -1072,27 +1106,19 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
                     </span>
                   )}
                 </div>
-
-                {requestHeaderStatus === "approved" && (
-                  <div className="mt-1 text-xs text-gray-600">
-                    Approved: embeddings still need to run before status becomes{" "}
-                    <strong>enrolled</strong>.
-                  </div>
-                )}
               </div>
 
               <div className="ml-auto flex items-center gap-2">
                 <button
                   type="button"
                   className="btn btn-sm"
-                  onClick={() => loadBiometricRequests()}
+                  onClick={loadBiometricRequests}
                 >
                   Refresh Requests
                 </button>
               </div>
             </div>
 
-            {/* ✅ Pending biometric requests panel */}
             {!editUser.isDeleted && (
               <div className="border rounded-xl p-3 bg-white">
                 <div className="flex items-center justify-between gap-2">
@@ -1191,7 +1217,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               </div>
             )}
 
-            {/* Action strip (✅ removed Set Photo entirely) */}
             <div className="flex flex-wrap items-center gap-2 border rounded-xl p-3 bg-gray-50">
               <div className="text-sm text-gray-700 mr-2">Actions:</div>
 
@@ -1256,7 +1281,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
               </div>
             )}
 
-            {/* Edit form */}
             <form onSubmit={saveEdit} className="grid gap-3 md:grid-cols-2">
               <label className="text-sm md:col-span-2">
                 Name
@@ -1366,7 +1390,6 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
         )}
       </Modal>
 
-      {/* Enrollment helper modal */}
       <Modal
         open={enrollModal.open}
         onClose={() =>
@@ -1389,12 +1412,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
           </pre>
           <div className="text-gray-600">
             After the mobile submits, approve/reject in the Pending Requests
-            panel inside the Edit modal.
+            panel.
           </div>
         </div>
       </Modal>
 
-      {/* Reset password modal */}
       {target && (
         <ResetPasswordModal
           user={target}
