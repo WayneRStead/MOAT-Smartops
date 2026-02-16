@@ -69,6 +69,11 @@ const touchOrgActivity =
 const enforceTrial =
   safeRequire("./middleware/org-trial") || ((_req, _res, next) => next());
 
+// ✅ Biometric embedding worker (optional)
+const { startBiometricWorker } = safeRequire("./services/biometricWorker") || {
+  startBiometricWorker: null,
+};
+
 // Org model for background trial sweep
 const Org = safeRequire("./models/Org");
 
@@ -1126,6 +1131,7 @@ async function start() {
   console.log(
     `[server] starting in ${process.env.NODE_ENV || "development"} mode`,
   );
+
   await waitForMongo(MONGO_URI);
 
   // Boot tasks (optional)
@@ -1150,6 +1156,21 @@ async function start() {
     const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
     console.log(`[server] listening on ${url}`);
   });
+
+  // ✅ Start biometric embedding worker AFTER Mongo is connected + server is listening
+  try {
+    if (typeof startBiometricWorker === "function") {
+      startBiometricWorker({
+        pollMs: Number(process.env.BIOMETRIC_WORKER_POLL_MS || 8000),
+        maxPerTick: Number(process.env.BIOMETRIC_WORKER_MAX_PER_TICK || 2),
+      });
+      console.log("[boot] biometric worker started");
+    } else {
+      console.log("[boot] biometric worker not available (missing file?)");
+    }
+  } catch (e) {
+    console.error("[boot] biometric worker failed to start:", e);
+  }
 
   // Schedule trial sweeper
   try {

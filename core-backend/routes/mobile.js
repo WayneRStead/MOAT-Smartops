@@ -735,4 +735,35 @@ router.post(
   },
 );
 
+// ✅ Enrollment status helper (admin UI + mobile can poll)
+router.get(
+  "/biometric-enrollment-status/:userId",
+  requireOrg,
+  async (req, res) => {
+    try {
+      const orgId = req.orgObjectId || req.user?.orgId;
+
+      const userIdStr = String(req.params.userId || "").trim();
+      if (!mongoose.isValidObjectId(userIdStr)) {
+        return res.status(400).json({ error: "Invalid userId" });
+      }
+
+      const BiometricEnrollment = require("../models/BiometricEnrollment");
+
+      const enr = await BiometricEnrollment.findOne({
+        orgId,
+        userId: new mongoose.Types.ObjectId(userIdStr),
+      })
+        .sort({ updatedAt: -1, _id: -1 })
+        .select({ status: 1, templateVersion: 1, updatedAt: 1, approvedAt: 1 })
+        .lean();
+
+      return res.json({ ok: true, enrollment: enr || null });
+    } catch (e) {
+      console.error("[biometrics] status error", e);
+      return res.status(500).json({ error: e?.message || "Status failed" });
+    }
+  },
+);
+
 module.exports = router;
