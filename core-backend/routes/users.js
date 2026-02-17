@@ -148,16 +148,6 @@ router.get("/roles", (_req, res) => {
 });
 
 /* ------------------------------- LIST ------------------------------- */
-/**
- * GET /users
- * Supports:
- *  - ?q=...
- *  - ?status=...
- *  - ?missingPhoto=true
- *  - ?includeDeleted=1   (admins/managers/project-managers only)
- *
- * NOTE: Non-admin users can only see themselves and never include deleted.
- */
 router.get("/", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || "200", 10) || 200, 1000);
@@ -174,7 +164,6 @@ router.get("/", async (req, res) => {
       "project-manager",
     ].includes(roleNorm);
 
-    // Only admin-ish may include deleted
     const includeDeleted = isAdminish && boolish(req.query.includeDeleted);
 
     const scope = orgFilterFromReq(User, req);
@@ -183,7 +172,6 @@ router.get("/", async (req, res) => {
       ...(includeDeleted ? {} : { isDeleted: { $ne: true } }),
     };
 
-    // Non-admin users only see themselves (and never deleted)
     if (!isAdminish && req.user?._id) {
       const myId = asOid(req.user._id);
       if (!myId) return res.status(401).json({ error: "Unauthorized" });
@@ -227,11 +215,6 @@ router.get("/", async (req, res) => {
 });
 
 /* -------------------------------- READ ------------------------------- */
-/**
- * GET /users/:id
- * Supports:
- *  - ?includeDeleted=1 (admin-ish only)
- */
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -254,7 +237,6 @@ router.get("/:id", async (req, res) => {
       ...(includeDeleted ? {} : { isDeleted: { $ne: true } }),
     };
 
-    // Non-admin users can only read themselves
     if (!isAdminish) {
       if (!req.user?._id || String(req.user._id) !== String(id)) {
         return res.status(403).json({ error: "Forbidden" });
@@ -290,16 +272,13 @@ router.post(
         active,
       } = req.body || {};
       if (!email && !username && !staffNumber) {
-        return res
-          .status(400)
-          .json({
-            error: "Provide at least one of: email, username, or staffNumber",
-          });
+        return res.status(400).json({
+          error: "Provide at least one of: email, username, or staffNumber",
+        });
       }
 
       forbidSuperadminUnlessGlobal(req, role);
 
-      // normalize identifiers: empty string -> undefined
       const normEmail =
         email != null ? String(email).trim().toLowerCase() : undefined;
       const normUsername =
@@ -319,12 +298,10 @@ router.post(
       });
 
       if (!ensureOrgOnDoc(User, doc, req)) {
-        return res
-          .status(400)
-          .json({
-            error:
-              'orgId is required on User; include header "x-org-id" or ensure token has orgId',
-          });
+        return res.status(400).json({
+          error:
+            'orgId is required on User; include header "x-org-id" or ensure token has orgId',
+        });
       }
 
       if (password) doc.password = password;
@@ -335,11 +312,9 @@ router.post(
       console.error("POST /users error:", e);
       if (e.status) return res.status(e.status).json({ error: e.message });
       if (e.code === 11000)
-        return res
-          .status(400)
-          .json({
-            error: "Email/username/staffNumber already exists in your org",
-          });
+        return res.status(400).json({
+          error: "Email/username/staffNumber already exists in your org",
+        });
       res.status(500).json({ error: "Server error" });
     }
   },
@@ -366,11 +341,9 @@ router.put(
       if (!user) return res.status(404).json({ error: "Not found" });
 
       if (user.isDeleted === true) {
-        return res
-          .status(400)
-          .json({
-            error: "Cannot update a deleted user. Restore the user first.",
-          });
+        return res.status(400).json({
+          error: "Cannot update a deleted user. Restore the user first.",
+        });
       }
 
       const { name, email, username, staffNumber, role, active, password } =
@@ -396,12 +369,10 @@ router.put(
       if (password) user.password = password;
 
       if (!ensureOrgOnDoc(User, user, req)) {
-        return res
-          .status(400)
-          .json({
-            error:
-              'orgId is required on User; include header "x-org-id" or ensure token has orgId',
-          });
+        return res.status(400).json({
+          error:
+            'orgId is required on User; include header "x-org-id" or ensure token has orgId',
+        });
       }
 
       await user.save();
@@ -410,11 +381,9 @@ router.put(
       console.error("PUT /users/:id error:", e);
       if (e.status) return res.status(e.status).json({ error: e.message });
       if (e.code === 11000)
-        return res
-          .status(400)
-          .json({
-            error: "Email/username/staffNumber already exists in your org",
-          });
+        return res.status(400).json({
+          error: "Email/username/staffNumber already exists in your org",
+        });
       res.status(500).json({ error: "Server error" });
     }
   },
@@ -448,12 +417,10 @@ router.post(
       if (!user) return res.status(404).json({ error: "Not found" });
 
       if (!ensureOrgOnDoc(User, user, req)) {
-        return res
-          .status(400)
-          .json({
-            error:
-              'orgId is required on User; include header "x-org-id" or ensure token has orgId',
-          });
+        return res.status(400).json({
+          error:
+            'orgId is required on User; include header "x-org-id" or ensure token has orgId',
+        });
       }
 
       user.password = String(password);
@@ -680,11 +647,9 @@ router.post(
       assertNoGlobalFields(req.body);
 
       const { id } = req.params;
-      const { enrollmentId } = req.body || {};
+      let { enrollmentId } = req.body || {};
       if (!mongoose.Types.ObjectId.isValid(id))
         return res.status(400).json({ error: "invalid user id" });
-      if (!mongoose.Types.ObjectId.isValid(enrollmentId))
-        return res.status(400).json({ error: "invalid enrollment id" });
 
       const user = await User.findOne({
         _id: new mongoose.Types.ObjectId(id),
@@ -693,17 +658,65 @@ router.post(
       });
       if (!user) return res.status(404).json({ error: "Not found" });
 
-      const enr = await BiometricEnrollment.findOne({
-        _id: new mongoose.Types.ObjectId(enrollmentId),
-        orgId: user.orgId,
-        userId: user._id,
-      });
+      // If enrollmentId not provided, try to find most recent pending enrollment for this user
+      let enr = null;
+      if (enrollmentId && mongoose.Types.ObjectId.isValid(enrollmentId)) {
+        enr = await BiometricEnrollment.findOne({
+          _id: new mongoose.Types.ObjectId(enrollmentId),
+          orgId: user.orgId,
+          userId: user._id,
+        });
+      } else {
+        enr = await BiometricEnrollment.findOne({
+          orgId: user.orgId,
+          userId: user._id,
+          status: { $in: ["pending", "enrolled"] },
+        }).sort({ createdAt: -1, _id: -1 });
+      }
+
       if (!enr) return res.status(404).json({ error: "enrollment not found" });
 
+      // Approve enrollment
       enr.status = "enrolled";
       enr.approvedBy = asOid(req.user?._id);
       enr.approvedAt = new Date();
       await enr.save();
+
+      // ✅ NEW: if user has no profile photo, point it at the biometric photo
+      // Priority:
+      // 1) enr.photoObjectId (old flow)
+      // 2) enr.photoFileIds[0] (new mobileOffline GridFS flow)
+      const hasUserPhoto =
+        user.photo &&
+        (user.photo.objectId || user.photo.url || user.photo.fileId);
+
+      if (!hasUserPhoto) {
+        const gridFsFileId =
+          Array.isArray(enr.photoFileIds) && enr.photoFileIds.length
+            ? String(enr.photoFileIds[0])
+            : null;
+
+        const objectId = enr.photoObjectId ? String(enr.photoObjectId) : null;
+
+        if (gridFsFileId && mongoose.Types.ObjectId.isValid(gridFsFileId)) {
+          user.photo = {
+            source: "gridfs",
+            fileId: gridFsFileId,
+            // This is your secure download route in routes/mobile.js
+            url: `/api/mobile/offline-files/${gridFsFileId}`,
+            uploadedBy: asOid(req.user?._id),
+            uploadedAt: new Date(),
+            note: "Set from biometric enrollment photos",
+          };
+        } else if (objectId) {
+          user.photo = {
+            objectId,
+            uploadedBy: asOid(req.user?._id),
+            uploadedAt: new Date(),
+            note: "Set from biometric enrollment photoObjectId",
+          };
+        }
+      }
 
       user.biometric = {
         ...(user.biometric || {}),
@@ -714,7 +727,11 @@ router.post(
       };
       await user.save();
 
-      res.json({ ok: true });
+      res.json({
+        ok: true,
+        enrollmentId: enr._id,
+        user: stripSecrets(user.toObject({ versionKey: false })),
+      });
     } catch (e) {
       console.error("POST /users/:id/biometric/approve error:", e);
       res.status(500).json({ error: "Server error" });
@@ -893,16 +910,6 @@ router.delete("/:id", requireRole("admin", "superadmin"), async (req, res) => {
 });
 
 /* ------------------------------ RESTORE ------------------------------ */
-/**
- * POST /users/:id/restore
- * Restores a soft-deleted user.
- *
- * - Sets isDeleted=false
- * - Sets active=true
- * - Sets biometric.status to 'pending' (or keep templateVersion if you want, but pending is safest)
- *
- * NOTE: Only admin/superadmin (matching delete permission).
- */
 router.post(
   "/:id/restore",
   requireRole("admin", "superadmin"),
@@ -923,7 +930,6 @@ router.post(
       u.isDeleted = false;
       u.active = true;
 
-      // Keep templateVersion if present; set status pending so they can re-enroll if needed.
       u.biometric = {
         ...(u.biometric || {}),
         status: "pending",
@@ -944,15 +950,6 @@ router.post(
 );
 
 /* ---------------------------- BULK UPLOAD ----------------------------- */
-/**
- * Accepts CSV or XLSX with columns:
- *  - name, email, username, staffNumber, role, groupName
- * Behavior:
- *  - Creates or updates users (org-scoped), setting biometric.status='pending' for new users.
- *  - Creates or finds the group by (orgId, groupName).
- *  - If a row role is 'group-leader', that user becomes the group's single leader.
- *  - Adds all users with that groupName to the group's members.
- */
 const multer = require("multer");
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -974,39 +971,31 @@ router.post(
 
       if (!req.file) return res.status(400).json({ error: "file required" });
 
-      // --- Parse incoming file ---
       const mime = req.file.mimetype || "";
       let rows = [];
 
-      // Try XLSX if available and mime suggests spreadsheet
       let xlsxTried = false;
       if (/sheet|excel/i.test(mime)) {
         try {
-          const xlsx = require("xlsx"); // optional dependency
+          const xlsx = require("xlsx");
           const wb = xlsx.read(req.file.buffer, { type: "buffer" });
           const ws = wb.Sheets[wb.SheetNames[0]];
           rows = xlsx.utils.sheet_to_json(ws, { defval: "" });
           xlsxTried = true;
-        } catch {
-          // fall back to CSV
-        }
+        } catch {}
       }
       if (!rows.length) {
-        // Fallback basic CSV parser (RFC-lite)
         const text = req.file.buffer.toString("utf8");
         rows = csvToJson(text);
       }
       if (!rows.length) {
-        return res
-          .status(400)
-          .json({
-            error: xlsxTried
-              ? "Failed to read spreadsheet (and no CSV fallback)"
-              : "Empty or invalid CSV",
-          });
+        return res.status(400).json({
+          error: xlsxTried
+            ? "Failed to read spreadsheet (and no CSV fallback)"
+            : "Empty or invalid CSV",
+        });
       }
 
-      // Normalize headers we care about
       const mapField = (obj, key) => {
         const k = Object.keys(obj).find(
           (h) => String(h).trim().toLowerCase() === key,
@@ -1014,8 +1003,7 @@ router.post(
         return k ? obj[k] : "";
       };
 
-      // We'll accumulate per-group membership/leader decisions
-      const byGroup = new Map(); // groupName -> { leaderUserId?: ObjectId, memberUserIds: Set<ObjectId> }
+      const byGroup = new Map();
 
       let created = 0,
         updated = 0,
@@ -1051,7 +1039,6 @@ router.post(
           continue;
         }
 
-        // Only platform global superadmin may bulk-create superadmin
         if (role === "superadmin" && req.user?.isGlobalSuperadmin !== true) {
           errors.push({
             row: i + 1,
@@ -1060,7 +1047,6 @@ router.post(
           continue;
         }
 
-        // Find existing user by org + one of unique identifiers in priority order
         const uniqueQuery = { ...orgScope, isDeleted: { $ne: true } };
         const or = [];
         if (email) or.push({ email });
@@ -1073,7 +1059,6 @@ router.post(
         const existing = await User.findOne({ ...uniqueQuery, $or: or });
 
         if (!existing) {
-          // Create new user
           const doc = new User({
             ...orgScope,
             name,
@@ -1092,7 +1077,6 @@ router.post(
             upsertGroupAccumulator(byGroup, groupName, doc._id, role);
           }
         } else {
-          // Update certain fields, keep role if provided (same guard)
           if (name) existing.name = name;
           if (email) existing.email = email || undefined;
           if (username) existing.username = username || undefined;
@@ -1107,7 +1091,6 @@ router.post(
         }
       }
 
-      // Apply group assignments
       const orgIdValue = orgScope.orgId;
       for (const [gname, info] of byGroup.entries()) {
         let g = await Group.findOrCreateByName(orgIdValue, gname, {
