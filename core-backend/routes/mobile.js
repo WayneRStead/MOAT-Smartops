@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-09-03";
+const ROUTER_VERSION = "mobile-router-v2026-02-17-01"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -493,20 +493,17 @@ router.all("/offline-files/:fileId", requireOrg, async (req, res) => {
 ------------------------------*/
 
 /**
- * ✅ NEW: LIST biometric requests
- * GET /api/mobile/biometric-requests?status=pending&targetUserId=<id>&limit=200&includeApproved=0
- *
- * Default behaviour:
- * - status defaults to "pending"
- * - returns recent first
- * - limits to 200 (max 1000)
+ * ✅ LIST biometric requests
+ * GET /api/mobile/biometric-requests?status=pending|approved|rejected|all
+ * Optional:
+ *  - targetUserId=<id>
+ *  - limit=...
+ *  - includeApproved=1   (legacy/compat: only used when status is empty)
  */
 router.get("/biometric-requests", requireOrg, async (req, res) => {
   try {
     const orgId = req.orgObjectId || req.user?.orgId;
 
-    // Only admin-ish should list all requests; otherwise allow self-view only.
-    // (If you want it fully open to all authenticated users, remove this block.)
     if (!canApproveBiometrics(req.user)) {
       return res.status(403).json({ error: "Not allowed" });
     }
@@ -522,19 +519,27 @@ router.get("/biometric-requests", requireOrg, async (req, res) => {
 
     const targetUserIdStr = String(req.query.targetUserId || "").trim();
 
+    // Keep includeApproved for backwards compatibility if someone calls without status
     const includeApproved = boolish(req.query.includeApproved);
 
     const find = { orgId };
 
-    // status filter
+    // ✅ OPTION B FIX:
+    // - If status === "all": return everything (do not add find.status)
+    // - If status is a concrete value: filter to that status
+    // - If status missing (defaults to pending): still pending
     if (status && status !== "all") {
+      // if someone passes status=all we skip this
+      // if someone passes status=pending/approved/rejected we filter
+      // For legacy "status=all&includeApproved=0" we still honor status=all => ALL
       find.status = status;
-    } else if (!includeApproved) {
-      // if "all" but includeApproved not set, default to excluding approved/rejected
-      find.status = "pending";
+    } else if (!statusRaw) {
+      // legacy path: no status provided at all
+      // default pending, unless includeApproved=1
+      if (!includeApproved) find.status = "pending";
+      // if includeApproved=1 and no status, do not force pending
     }
 
-    // optional targetUser filter
     if (targetUserIdStr) {
       if (!mongoose.isValidObjectId(targetUserIdStr)) {
         return res.status(400).json({ error: "Invalid targetUserId" });
@@ -641,20 +646,35 @@ router.post(
         { new: true, upsert: true },
       );
 
+      // ✅ ALSO persist the first photo onto the User as a profile reference
       try {
         const User = require("../models/User");
+        const firstPhotoFileIdStr = uploadedFiles?.[0]?.fileId
+          ? String(uploadedFiles[0].fileId).trim()
+          : "";
+        const firstPhotoFileId = mongoose.isValidObjectId(firstPhotoFileIdStr)
+          ? new mongoose.Types.ObjectId(firstPhotoFileIdStr)
+          : null;
+
+        const setPatch = {
+          "biometric.status": "pending",
+          "biometric.lastUpdatedAt": new Date(),
+        };
+
+        if (firstPhotoFileId) {
+          // safe even if your schema doesn't declare it (Mongo will store it)
+          setPatch["photo.fileId"] = firstPhotoFileId;
+          setPatch["photo.source"] = "biometric-request";
+          setPatch["photo.updatedAt"] = new Date();
+        }
+
         await User.updateOne(
           { _id: requestDoc.targetUserId, orgId },
-          {
-            $set: {
-              "biometric.status": "pending",
-              "biometric.lastUpdatedAt": new Date(),
-            },
-          },
+          { $set: setPatch },
         );
       } catch (e3) {
         console.error(
-          "[biometrics] failed to update User.biometric summary",
+          "[biometrics] failed to update User.biometric summary / photo",
           e3,
         );
       }
