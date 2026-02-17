@@ -60,12 +60,18 @@ function syncRoleFields(doc) {
 
 const PhotoSubSchema = new Schema(
   {
+    // existing (legacy / user upload flow)
     objectId: { type: String, trim: true }, // storage key/id (no raw image here)
-    url: { type: String, trim: true }, // optional signed URL placeholder (avoid long-term public URLs)
+    url: { type: String, trim: true }, // optional signed URL placeholder
     uploadedBy: { type: Schema.Types.ObjectId, ref: "User" },
     uploadedAt: { type: Date },
     deviceId: { type: String, trim: true },
-    hash: { type: String, trim: true }, // optional content hash, for dedupe
+    hash: { type: String, trim: true }, // optional content hash
+
+    // ✅ NEW (mobileOffline/GridFS profile pointer)
+    fileId: { type: Schema.Types.ObjectId }, // GridFS file id (mobileOffline.files _id)
+    source: { type: String, trim: true }, // e.g. "biometric-request", "admin-upload", etc.
+    updatedAt: { type: Date },
   },
   { _id: false },
 );

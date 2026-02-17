@@ -335,6 +335,10 @@ export default function AdminUsers() {
   const fileIdsNeeded = useMemo(() => {
     const set = new Set();
 
+    // ✅ Also fetch the user's saved profile photo (GridFS fileId), if present
+    const pfid = String(editUser?.photo?.fileId || "").trim();
+    if (pfid) set.add(pfid);
+
     for (const r of pendingReqsForEditUser || []) {
       const uploaded = Array.isArray(r?.uploadedFiles) ? r.uploadedFiles : [];
       for (const f of uploaded) {
@@ -354,7 +358,7 @@ export default function AdminUsers() {
     }
 
     return Array.from(set);
-  }, [pendingReqsForEditUser, latestNonPendingReq]);
+  }, [pendingReqsForEditUser, latestNonPendingReq, editUser?.photo?.fileId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -696,6 +700,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
 
   // ✅ Profile image in Edit view:
   // Prefer user.photo.url; otherwise use first uploaded image from (pending OR latest approved/rejected)
+
+  const userPhotoFileId = editUser?.photo?.fileId
+    ? String(editUser.photo.fileId).trim()
+    : "";
+
   const profileFallbackFileId = useMemo(() => {
     const chooseReq =
       pendingReqsForEditUser?.[0] || latestNonPendingReq || null;
@@ -708,9 +717,11 @@ John Dlamini,john@example.com,john,STA-1002,group-leader,Group A
 
   const profileSrc = editUser?.photo?.url
     ? editUser.photo.url
-    : profileFallbackFileId
-      ? thumbUrlByFileId[profileFallbackFileId] || ""
-      : "";
+    : userPhotoFileId
+      ? thumbUrlByFileId[userPhotoFileId] || ""
+      : profileFallbackFileId
+        ? thumbUrlByFileId[profileFallbackFileId] || ""
+        : "";
 
   const requestHeaderStatus = useMemo(() => {
     if (pendingReqsForEditUser.length) return "pending";
