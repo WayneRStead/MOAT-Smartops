@@ -8,15 +8,16 @@
 // ✅ Group Leader (any role) can select only groups they lead
 // ✅ People list shows only members in the selected group
 // ✅ If Clock Type = OUT, only shows people currently clocked IN (based on local history)
-// ✅ Start opens a "Select people" screen (NOT biometrics yet)
-// ✅ Scan Face button is there (placeholder for later biometric match)
-// ✅ Manual clocking is ONLY allowed when you press “Manual (biometric failed)”
+// ✅ Start opens a "Select people" screen
+// ✅ Scan Face calls backend identify (ONLINE ONLY)
+// ✅ Manual clocking is ONLY allowed AFTER a confirmed biometric "NO MATCH" (NOT just offline)
 // ✅ Manual requires: NEW NOTE + PHOTO for that person (overrides batch note for that person)
 // ✅ Saves everything offline-first into SQLite offline_events via saveClockBatch(batch, people)
 //
 // IMPORTANT:
 // - This expects your database.js to export saveClockBatch(batch, people).
-// - If you do NOT have saveClockBatch yet, tell me and I’ll give you the exact database.js add-on.
+// - This file assumes you store API base URL at AsyncStorage key "@moat:api".
+//   If that's not true, update getApiBaseUrl() below to match your app.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
@@ -50,6 +51,11 @@ const CACHE_USERS_KEY = "@moat:cache:users";
 const ORG_KEY = "@moat:cache:orgid";
 const TOKEN_KEY = "@moat:cache:token";
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
+
+/* -----------------------------
+   API base URL storage key
+------------------------------*/
+const API_BASE_URL_KEY = "@moat:api";
 
 /* -----------------------------
    Clock Types
@@ -301,7 +307,6 @@ function groupMatchesContext(group, projectId, taskId) {
     !pid ||
     String(groupProject) === pid ||
     projectIdsArr.includes(pid) ||
-    // also accept task-linked group where task belongs to project (handled elsewhere)
     false;
 
   const taskOk = !tid || String(groupTask) === tid || taskIdsArr.includes(tid);
@@ -366,6 +371,20 @@ async function computeCurrentlyInUserIds({ orgId = null } = {}) {
   } catch {
     return [];
   }
+}
+
+/* -----------------------------
+   API helpers
+------------------------------*/
+function joinUrl(base, path) {
+  const b = String(base || "").replace(/\/+$/, "");
+  const p = String(path || "").replace(/^\/+/, "");
+  return `${b}/${p}`;
+}
+
+async function getApiBaseUrl() {
+  const v = await AsyncStorage.getItem(API_BASE_URL_KEY);
+  return String(v || "").trim();
 }
 
 /* -----------------------------
@@ -590,6 +609,10 @@ export default function ClockingScreen() {
   const [personSearch, setPersonSearch] = useState("");
   const [selectedPeople, setSelectedPeople] = useState([]); // [{ userId, name, method, status, note, manualPhotoUri }]
 
+  // ✅ Manual gating (manual only after a REAL biometric "no match", not just offline)
+  const [biometricAttempted, setBiometricAttempted] = useState(false);
+  const [biometricFailedNoMatch, setBiometricFailedNoMatch] = useState(false);
+
   // manual modal state
   const [manualModalVisible, setManualModalVisible] = useState(false);
   const [manualTarget, setManualTarget] = useState(null); // person object (user)
@@ -718,8 +741,7 @@ export default function ClockingScreen() {
       }
 
       // 3) otherwise do not block
-      // (This is the key: your groups currently don’t carry projectIds/taskIds,
-      //  so we must not hide them when project/task is selected.)
+      // (Key: groups currently may not carry projectIds/taskIds)
       return true;
     });
   }, [groups, orgId, projectId, taskId, taskAssignedGroupIds]);
@@ -811,22 +833,171 @@ export default function ClockingScreen() {
       );
       return;
     }
+    // reset biometric gating whenever modal starts
+    setBiometricAttempted(false);
+    setBiometricFailedNoMatch(false);
     setScanModalVisible(true);
   };
 
   const closePeopleModal = () => setScanModalVisible(false);
 
-  // placeholder biometric scan
-  const handleScanFace = () => {
-    Alert.alert(
-      "Biometrics (next step)",
-      "This will scan a face and auto-select the correct worker. For now, use the list below.",
-    );
+  // ✅ Scan Face:
+  // - Tries ONLINE identify
+  // - Manual is unlocked ONLY if server confirms "no match"
+  // - Offline / errors do NOT unlock manual
+  const handleScanFace = async () => {
+    try {
+      setBiometricAttempted(true);
+      setBiometricFailedNoMatch(false);
+
+      if (!groupId) {
+        Alert.alert("Missing group", "Select a group first.");
+        return;
+      }
+
+      // 1) Camera permission
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert("Camera permission", "Camera access is required.");
+        return;
+      }
+
+      // 2) Capture face photo
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.7,
+        allowsEditing: false,
+      });
+      if (result.canceled) return;
+
+      const uri =
+        result.assets && result.assets.length > 0 ? result.assets[0].uri : null;
+      if (!uri) {
+        Alert.alert("Scan failed", "No image captured.");
+        return;
+      }
+
+      // 3) Resolve API base URL
+      const BASE_URL = await getApiBaseUrl();
+      if (!BASE_URL) {
+        Alert.alert(
+          "Cannot scan",
+          "No API base URL configured on this device. Manual is only allowed after a confirmed 'no match'.",
+        );
+        return;
+      }
+
+      // 4) Call backend identify (ONLINE)
+      const token = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
+      const oid = orgId || (await AsyncStorage.getItem(ORG_KEY)) || "";
+
+      const form = new FormData();
+      form.append("groupId", String(groupId));
+      if (projectId) form.append("projectId", String(projectId));
+      if (taskId) form.append("taskId", String(taskId));
+      if (oid) form.append("orgId", String(oid));
+
+      form.append("photo", {
+        uri,
+        name: `clock_face_${Date.now()}.jpg`,
+        type: "image/jpeg",
+      });
+
+      const url = joinUrl(BASE_URL, "/api/mobile/biometric-identify");
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: token ? `Bearer ${token}` : "",
+          // DO NOT set Content-Type manually for FormData in RN fetch
+        },
+        body: form,
+      });
+
+      const data = await res.json().catch(() => null);
+
+      // Non-OK = error/offline/etc => manual stays locked
+      if (!res.ok) {
+        const msg =
+          data?.error || data?.message || `Identify failed (${res.status})`;
+        Alert.alert(
+          "Cannot scan",
+          `${msg}\n\nManual is only allowed after a confirmed 'no match'.`,
+        );
+        return;
+      }
+
+      const matchedUserId = data?.matchedUserId || "";
+      const score = data?.score;
+
+      // Interpret confirmed "no match"
+      const explicitNoMatch =
+        data?.match === false ||
+        data?.matched === false ||
+        data?.reason === "no-match" ||
+        data?.reason === "no_match" ||
+        (!matchedUserId && (data?.ok === true || data?.status === "no-match"));
+
+      if (!matchedUserId) {
+        if (explicitNoMatch) {
+          setBiometricFailedNoMatch(true);
+          Alert.alert(
+            "No match",
+            "Face scan completed but no match was found. Manual is now enabled for this clocking.",
+          );
+        } else {
+          Alert.alert(
+            "No match",
+            "No match returned. Manual stays locked unless server confirms 'no match'.",
+          );
+        }
+        return;
+      }
+
+      // 5) Find user in this group's cached list
+      const matchUser =
+        groupMemberUsers.find(
+          (u) => String(pickId(u)) === String(matchedUserId),
+        ) || null;
+
+      if (!matchUser) {
+        Alert.alert(
+          "Matched outside list",
+          "A match was returned but user is not in this group's cached list. Refresh Offline lists.",
+        );
+        return;
+      }
+
+      // 6) Auto-select them (method: face)
+      if (!isSelected(matchedUserId)) {
+        togglePerson(matchUser, "face");
+      }
+
+      Alert.alert(
+        "Matched",
+        `${matchUser?.name || matchUser?.email || matchedUserId}${
+          score != null ? `\nScore: ${score}` : ""
+        }`,
+      );
+    } catch (e) {
+      console.error("Scan face failed", e);
+      // Errors do NOT unlock manual
+      Alert.alert(
+        "Cannot scan",
+        "Biometric scan could not run (offline/network error). Manual is only allowed after a confirmed 'no match'.",
+      );
+    }
   };
 
-  // manual only after biometric fails
+  // manual only after biometric confirms "no match"
   const startManualForUser = (userObj) => {
-    // open manual modal for this person
+    if (!biometricFailedNoMatch) {
+      Alert.alert(
+        "Manual locked",
+        "Manual is only allowed after a face scan completes and returns a confirmed 'no match'.",
+      );
+      return;
+    }
+
     const uid = String(pickId(userObj));
     if (!uid) return;
 
@@ -846,7 +1017,7 @@ export default function ClockingScreen() {
         return {
           ...p,
           method: "manual",
-          // ✅ override note for this person (replaces batch note for this person)
+          // override note for this person (replaces batch note for this person)
           note,
           manualPhotoUri: photoUri,
         };
@@ -870,7 +1041,7 @@ export default function ClockingScreen() {
       return;
     }
 
-    // ✅ enforce manual rule: anyone marked manual MUST have note + photo
+    // enforce manual rule: anyone marked manual MUST have note + photo
     const missingManual = selectedPeople.find(
       (p) =>
         String(p.method) === "manual" &&
@@ -879,7 +1050,9 @@ export default function ClockingScreen() {
     if (missingManual) {
       Alert.alert(
         "Manual requires note + photo",
-        `Manual clocking is missing a note/photo for: ${missingManual.name || missingManual.userId}`,
+        `Manual clocking is missing a note/photo for: ${
+          missingManual.name || missingManual.userId
+        }`,
       );
       return;
     }
@@ -904,11 +1077,9 @@ export default function ClockingScreen() {
       name: p.name,
       method: p.method || "list",
       status: p.status || "present",
-
-      // ✅ if manual: override note, else batch note is enough
+      // if manual: override note, else batch note is enough
       note: String(p.method) === "manual" ? p.note || "" : batchNote || "",
-
-      // ✅ manual proof photo stored per-person
+      // manual proof photo stored per-person
       manualPhotoUri: p.manualPhotoUri || null,
     }));
 
@@ -918,6 +1089,8 @@ export default function ClockingScreen() {
 
       // reset
       setSelectedPeople([]);
+      setBiometricAttempted(false);
+      setBiometricFailedNoMatch(false);
       setBatchNote("");
       setScanModalVisible(false);
       setPersonSearch("");
@@ -1126,6 +1299,8 @@ export default function ClockingScreen() {
           setGroupId("");
           setSelectedPeople([]);
           setPersonSearch("");
+          setBiometricAttempted(false);
+          setBiometricFailedNoMatch(false);
 
           setProjectPickerOpen(false);
         }}
@@ -1145,6 +1320,8 @@ export default function ClockingScreen() {
           setGroupId("");
           setSelectedPeople([]);
           setPersonSearch("");
+          setBiometricAttempted(false);
+          setBiometricFailedNoMatch(false);
 
           setTaskPickerOpen(false);
         }}
@@ -1161,6 +1338,8 @@ export default function ClockingScreen() {
           setGroupId(pickId(g));
           setSelectedPeople([]);
           setPersonSearch("");
+          setBiometricAttempted(false);
+          setBiometricFailedNoMatch(false);
           setGroupPickerOpen(false);
         }}
         onClose={() => setGroupPickerOpen(false)}
@@ -1189,6 +1368,8 @@ export default function ClockingScreen() {
                   setClockType(t.key);
                   setSelectedPeople([]);
                   setPersonSearch("");
+                  setBiometricAttempted(false);
+                  setBiometricFailedNoMatch(false);
                   setClockTypePickerVisible(false);
                 }}
               >
@@ -1244,7 +1425,11 @@ export default function ClockingScreen() {
             </View>
 
             <Text style={styles.smallInfoText}>
-              Manual is only used when biometric fails (per person).
+              {biometricAttempted
+                ? biometricFailedNoMatch
+                  ? "No match confirmed. Manual is now enabled for this clocking."
+                  : "Scan attempted. Manual stays locked unless server confirms 'no match'."
+                : "Manual is locked until a face scan completes and returns a confirmed 'no match'."}
             </Text>
 
             <TextInput
@@ -1300,12 +1485,14 @@ export default function ClockingScreen() {
                         </Text>
                       </TouchableOpacity>
 
-                      <TouchableOpacity
-                        style={styles.manualMiniBtn}
-                        onPress={() => startManualForUser(item)}
-                      >
-                        <Text style={styles.manualMiniText}>Manual</Text>
-                      </TouchableOpacity>
+                      {biometricFailedNoMatch ? (
+                        <TouchableOpacity
+                          style={styles.manualMiniBtn}
+                          onPress={() => startManualForUser(item)}
+                        >
+                          <Text style={styles.manualMiniText}>Manual</Text>
+                        </TouchableOpacity>
+                      ) : null}
                     </View>
                   );
                 }}
