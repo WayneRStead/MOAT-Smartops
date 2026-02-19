@@ -786,28 +786,22 @@ router.get(
   },
 );
 
-/* -----------------------------
-   BIOMETRIC IDENTIFY (ORG REQUIRED)
-   POST /api/mobile/biometric-identify
-   multipart/form-data:
-     - photo: file (required)
-     - groupId/projectId/taskId (optional, currently not used for filtering)
-   Returns:
-     { ok:true, matchedUserId, score, reason }
-   reason:
-     - "matched"
-     - "no_match"      (THIS is the only case where mobile should allow Manual)
-------------------------------*/
+// -----------------------------
+// BIOMETRIC IDENTIFY (ORG REQUIRED)
+// POST /api/mobile/biometric-identify
+// multipart/form-data:
+//   - photo: file (required)
+//   - groupId (optional) - if supplied, filter to that group's members
+// -----------------------------
 
 const crypto = require("crypto");
 
-// Convert an image buffer -> Float32Array(128) buffer (stub, deterministic)
 function bufferToFloat32BufferStub(buf) {
   const hash = crypto.createHash("sha256").update(buf).digest(); // 32 bytes
   const out = new Float32Array(128);
   for (let i = 0; i < out.length; i++) {
     const b = hash[i % hash.length];
-    out[i] = (b / 255) * 2 - 1; // -1..1
+    out[i] = (b / 255) * 2 - 1;
   }
   return Buffer.from(out.buffer);
 }
@@ -815,9 +809,7 @@ function bufferToFloat32BufferStub(buf) {
 function bufferToFloat32Array(buf) {
   if (!buf) return null;
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
-  // Make sure it's aligned to float32 length
   if (b.length < 4) return null;
-  // Slice to a multiple of 4 just in case
   const usable = b.slice(0, Math.floor(b.length / 4) * 4);
   return new Float32Array(usable.buffer, usable.byteOffset, usable.length / 4);
 }
@@ -848,15 +840,12 @@ router.post(
   "/biometric-identify",
   requireOrg,
   (req, res, next) => {
-    // We rely on multer memory storage already defined above as `upload`
     if (!upload) {
       return res.status(503).json({
         ok: false,
         error: "File upload not available (multer missing)",
       });
     }
-
-    // Expect multipart/form-data with field name "photo"
     const ct = String(req.headers["content-type"] || "").toLowerCase();
     if (!ct.includes("multipart/form-data")) {
       return res.status(400).json({
@@ -864,7 +853,6 @@ router.post(
         error: "Expected multipart/form-data with field 'photo'",
       });
     }
-
     return upload.single("photo")(req, res, next);
   },
   async (req, res) => {
@@ -872,49 +860,69 @@ router.post(
       const orgId = req.orgObjectId || req.user?.orgId;
       if (!orgId) return res.status(400).json({ ok: false, error: "No org" });
 
-      const file = req.file || null;
-      if (!file?.buffer) {
+      if (!req.file?.buffer) {
         return res.status(400).json({
           ok: false,
           error: "Missing photo file (field name must be 'photo')",
         });
       }
 
-      // 1) Create probe embedding from the scan photo (stub)
-      const probeBuf = bufferToFloat32BufferStub(file.buffer);
+      // 1) Probe embedding from uploaded image
+      const probeBuf = bufferToFloat32BufferStub(req.file.buffer);
       const probe = bufferToFloat32Array(probeBuf);
-      if (!probe) {
-        return res
-          .status(500)
-          .json({ ok: false, error: "Failed probe embedding" });
+
+      // 2) Optional filter by group members
+      const groupIdStr = String(req.body?.groupId || "").trim();
+      let memberUserIds = null;
+
+      if (mongoose.isValidObjectId(groupIdStr)) {
+        try {
+          const Group = require("../models/Group");
+          const group = await Group.findOne({
+            _id: new mongoose.Types.ObjectId(groupIdStr),
+            orgId,
+          })
+            .select({ memberUserIds: 1, members: 1, userIds: 1 })
+            .lean();
+
+          const arr =
+            group?.memberUserIds || group?.members || group?.userIds || [];
+          if (Array.isArray(arr) && arr.length) {
+            memberUserIds = arr
+              .map((x) => String(x?._id || x?.id || x || ""))
+              .filter((s) => mongoose.isValidObjectId(s))
+              .map((s) => new mongoose.Types.ObjectId(s));
+          }
+        } catch {}
       }
 
-      // 2) Load enrolled embeddings
+      // 3) Load enrolled embeddings
       const BiometricEnrollment = require("../models/BiometricEnrollment");
 
-      // embedding is commonly select:false -> we force-select it.
-      // We also keep it lean for speed.
-      const enrolled = await BiometricEnrollment.find({
+      const find = {
         orgId,
         status: "enrolled",
         embedding: { $exists: true, $ne: null },
-      })
+      };
+      if (memberUserIds?.length) find.userId = { $in: memberUserIds };
+
+      const enrolled = await BiometricEnrollment.find(find)
         .select({ userId: 1, templateVersion: 1 })
         .select("+embedding")
         .limit(2000)
         .lean();
 
-      if (!enrolled || enrolled.length === 0) {
+      if (!enrolled.length) {
         return res.json({
           ok: true,
           matchedUserId: null,
           score: null,
-          reason: "no_match",
-          message: "No enrolled biometrics found",
+          reason: "no_enrolled_users",
+          templateVersion: null,
         });
       }
 
-      // 3) Compare cosine similarity
+      // 4) Compare cosine similarity
       let best = { userId: null, score: -1, templateVersion: null };
 
       for (const e of enrolled) {
@@ -931,9 +939,7 @@ router.post(
         }
       }
 
-      // 4) Threshold
-      // NOTE: For the current stub embedding, real-world matching won’t be reliable.
-      // This is just to complete the workflow plumbing.
+      // 5) Threshold
       const THRESHOLD = 0.78;
 
       if (!best.userId || best.score < THRESHOLD) {
@@ -955,155 +961,10 @@ router.post(
       });
     } catch (e) {
       console.error("[mobile/biometric-identify] error", e);
-      return res.status(503).json({
+      return res.status(500).json({
         ok: false,
-        error: e?.message || "Identify unavailable",
+        error: e?.message || "Identify failed",
       });
-    }
-  },
-);
-
-// ---------------------------------------------
-// POST /api/mobile/biometric-identify
-// ---------------------------------------------
-router.post(
-  "/biometric-identify",
-  requireOrg,
-  upload.single("photo"),
-  async (req, res) => {
-    try {
-      const orgId = req.orgObjectId || req.user?.orgId;
-      if (!orgId) {
-        return res.status(400).json({ ok: false, error: "Missing org" });
-      }
-
-      if (!req.file?.buffer) {
-        return res.status(400).json({ ok: false, error: "No photo uploaded" });
-      }
-
-      const groupIdStr = String(req.body?.groupId || "").trim();
-
-      const BiometricEnrollment = require("../models/BiometricEnrollment");
-      const User = require("../models/User");
-      const {
-        generateEmbeddingFromImages,
-      } = require("../services/biometricWorker");
-
-      const db = mongoose.connection.db;
-      const { GridFSBucket } = require("mongodb");
-      const bucket = new GridFSBucket(db, { bucketName: "mobileOffline" });
-
-      // ------------------------------------------------
-      // 1️⃣ Generate embedding from uploaded image
-      // ------------------------------------------------
-      const probeEmbedding = await generateEmbeddingFromImages({
-        bucket,
-        photoFileIds: [], // not using GridFS here
-      });
-
-      // Instead use stub directly from buffer:
-      const crypto = require("crypto");
-      module.exports = {
-        startBiometricWorker,
-        bufferToFloat32Buffer,
-      };
-
-      // ------------------------------------------------
-      // 2️⃣ Load enrolled users
-      // ------------------------------------------------
-      let userIdsFilter = null;
-
-      if (mongoose.isValidObjectId(groupIdStr)) {
-        const Group = require("../models/Group");
-        const group = await Group.findOne({
-          _id: new mongoose.Types.ObjectId(groupIdStr),
-          orgId,
-        }).lean();
-
-        if (group?.memberUserIds?.length) {
-          userIdsFilter = group.memberUserIds.map(
-            (id) => new mongoose.Types.ObjectId(id),
-          );
-        }
-      }
-
-      const query = {
-        orgId,
-        status: "enrolled",
-      };
-
-      if (userIdsFilter?.length) {
-        query.userId = { $in: userIdsFilter };
-      }
-
-      const enrollments = await BiometricEnrollment.find(query)
-        .select({ userId: 1, embedding: 1 })
-        .lean();
-
-      if (!enrollments.length) {
-        return res.json({
-          ok: true,
-          matchedUserId: null,
-          score: null,
-          reason: "no_enrolled_users",
-        });
-      }
-
-      // ------------------------------------------------
-      // 3️⃣ Compare embeddings (cosine similarity)
-      // ------------------------------------------------
-      function cosineSim(bufA, bufB) {
-        const a = new Float32Array(bufA.buffer, bufA.byteOffset, 128);
-        const b = new Float32Array(bufB.buffer, bufB.byteOffset, 128);
-
-        let dot = 0;
-        let normA = 0;
-        let normB = 0;
-
-        for (let i = 0; i < 128; i++) {
-          dot += a[i] * b[i];
-          normA += a[i] * a[i];
-          normB += b[i] * b[i];
-        }
-
-        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-      }
-
-      let best = { score: -1, userId: null };
-
-      for (const e of enrollments) {
-        if (!e.embedding) continue;
-
-        const score = cosineSim(probeBuf, e.embedding);
-
-        if (score > best.score) {
-          best = { score, userId: e.userId };
-        }
-      }
-
-      // ------------------------------------------------
-      // 4️⃣ Threshold decision
-      // ------------------------------------------------
-      const MATCH_THRESHOLD = 0.75; // adjust later
-
-      if (best.score >= MATCH_THRESHOLD) {
-        return res.json({
-          ok: true,
-          matchedUserId: String(best.userId),
-          score: best.score,
-          reason: "matched",
-        });
-      }
-
-      return res.json({
-        ok: true,
-        matchedUserId: null,
-        score: best.score,
-        reason: "no_match",
-      });
-    } catch (err) {
-      console.error("[biometric-identify] error", err);
-      return res.status(500).json({ ok: false, error: "Identify failed" });
     }
   },
 );
