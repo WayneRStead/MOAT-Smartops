@@ -1003,17 +1003,10 @@ router.post(
 
       // Instead use stub directly from buffer:
       const crypto = require("crypto");
-      function bufferToFloat32Buffer(buf) {
-        const hash = crypto.createHash("sha256").update(buf).digest();
-        const out = new Float32Array(128);
-        for (let i = 0; i < out.length; i++) {
-          const b = hash[i % hash.length];
-          out[i] = (b / 255) * 2 - 1;
-        }
-        return Buffer.from(out.buffer);
-      }
-
-      const probeBuf = bufferToFloat32Buffer(req.file.buffer);
+      module.exports = {
+        startBiometricWorker,
+        bufferToFloat32Buffer,
+      };
 
       // ------------------------------------------------
       // 2️⃣ Load enrolled users

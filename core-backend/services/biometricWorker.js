@@ -175,4 +175,7 @@ function startBiometricWorker({
   })();
 }
 
-module.exports = { startBiometricWorker };
+module.exports = {
+  startBiometricWorker,
+  bufferToFloat32Buffer,
+};
