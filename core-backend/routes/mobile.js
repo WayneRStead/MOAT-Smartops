@@ -346,6 +346,61 @@ router.post(
         createdAtClient,
       });
 
+      // ✅ APPLY PROJECT UPDATES (manager note + status) right after saving OfflineEvent
+      if (eventType === "project-update") {
+        try {
+          const Project = require("../models/Project");
+
+          const projectIdStr = String(
+            payload?.projectId || entityRef || "",
+          ).trim();
+
+          if (mongoose.isValidObjectId(projectIdStr) && Project?.updateOne) {
+            const projectObjectId = new mongoose.Types.ObjectId(projectIdStr);
+
+            const status = payload?.status
+              ? String(payload.status).trim()
+              : null;
+            const managerNote = payload?.managerNote
+              ? String(payload.managerNote).trim()
+              : "";
+
+            const noteEntry = {
+              at: new Date(),
+              byUserId: req.user?._id || null, // Mongo user id (good)
+              byEmail: req.user?.email || null,
+              status: status || null,
+              note: managerNote || null,
+              sourceOfflineEventId: doc._id,
+              createdAtClient: createdAtClient || null,
+            };
+
+            const update = { $set: { updatedAt: new Date() } };
+
+            if (status) {
+              // Store status on the project (even if schema doesn't have it yet, Mongo will store it)
+              update.$set.status = status;
+            }
+
+            if (managerNote) {
+              // Keep a simple history array
+              update.$push = { managerNotes: noteEntry };
+            }
+
+            await Project.updateOne({ _id: projectObjectId, orgId }, update);
+          } else {
+            console.warn(
+              "[project-update] invalid projectId or Project model missing",
+              {
+                projectIdStr,
+              },
+            );
+          }
+        } catch (e3) {
+          console.error("[project-update] failed to apply project update", e3);
+        }
+      }
+
       // ------------------------------------------------------------
       // BIOMETRICS: create/upsert ONE BiometricEnrollmentRequest
       // keyed by sourceOfflineEventId so resync won't create duplicates
