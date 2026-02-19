@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-17-01"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-18-01"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -782,6 +782,185 @@ router.get(
     } catch (e) {
       console.error("[biometrics] status error", e);
       return res.status(500).json({ error: e?.message || "Status failed" });
+    }
+  },
+);
+
+/* -----------------------------
+   BIOMETRIC IDENTIFY (ORG REQUIRED)
+   POST /api/mobile/biometric-identify
+   multipart/form-data:
+     - photo: file (required)
+     - groupId/projectId/taskId (optional, currently not used for filtering)
+   Returns:
+     { ok:true, matchedUserId, score, reason }
+   reason:
+     - "matched"
+     - "no_match"      (THIS is the only case where mobile should allow Manual)
+------------------------------*/
+
+const crypto = require("crypto");
+
+// Convert an image buffer -> Float32Array(128) buffer (stub, deterministic)
+function bufferToFloat32BufferStub(buf) {
+  const hash = crypto.createHash("sha256").update(buf).digest(); // 32 bytes
+  const out = new Float32Array(128);
+  for (let i = 0; i < out.length; i++) {
+    const b = hash[i % hash.length];
+    out[i] = (b / 255) * 2 - 1; // -1..1
+  }
+  return Buffer.from(out.buffer);
+}
+
+function bufferToFloat32Array(buf) {
+  if (!buf) return null;
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  // Make sure it's aligned to float32 length
+  if (b.length < 4) return null;
+  // Slice to a multiple of 4 just in case
+  const usable = b.slice(0, Math.floor(b.length / 4) * 4);
+  return new Float32Array(usable.buffer, usable.byteOffset, usable.length / 4);
+}
+
+function cosineSimilarity(a, b) {
+  if (!a || !b) return -1;
+  const n = Math.min(a.length, b.length);
+  if (n <= 0) return -1;
+
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+
+  for (let i = 0; i < n; i++) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  if (!denom) return -1;
+  return dot / denom;
+}
+
+router.post(
+  "/biometric-identify",
+  requireOrg,
+  (req, res, next) => {
+    // We rely on multer memory storage already defined above as `upload`
+    if (!upload) {
+      return res
+        .status(503)
+        .json({
+          ok: false,
+          error: "File upload not available (multer missing)",
+        });
+    }
+
+    // Expect multipart/form-data with field name "photo"
+    const ct = String(req.headers["content-type"] || "").toLowerCase();
+    if (!ct.includes("multipart/form-data")) {
+      return res.status(400).json({
+        ok: false,
+        error: "Expected multipart/form-data with field 'photo'",
+      });
+    }
+
+    return upload.single("photo")(req, res, next);
+  },
+  async (req, res) => {
+    try {
+      const orgId = req.orgObjectId || req.user?.orgId;
+      if (!orgId) return res.status(400).json({ ok: false, error: "No org" });
+
+      const file = req.file || null;
+      if (!file?.buffer) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing photo file (field name must be 'photo')",
+        });
+      }
+
+      // 1) Create probe embedding from the scan photo (stub)
+      const probeBuf = bufferToFloat32BufferStub(file.buffer);
+      const probe = bufferToFloat32Array(probeBuf);
+      if (!probe) {
+        return res
+          .status(500)
+          .json({ ok: false, error: "Failed probe embedding" });
+      }
+
+      // 2) Load enrolled embeddings
+      const BiometricEnrollment = require("../models/BiometricEnrollment");
+
+      // embedding is commonly select:false -> we force-select it.
+      // We also keep it lean for speed.
+      const enrolled = await BiometricEnrollment.find({
+        orgId,
+        status: "enrolled",
+        embedding: { $exists: true, $ne: null },
+      })
+        .select({ userId: 1, templateVersion: 1 })
+        .select("+embedding")
+        .limit(2000)
+        .lean();
+
+      if (!enrolled || enrolled.length === 0) {
+        return res.json({
+          ok: true,
+          matchedUserId: null,
+          score: null,
+          reason: "no_match",
+          message: "No enrolled biometrics found",
+        });
+      }
+
+      // 3) Compare cosine similarity
+      let best = { userId: null, score: -1, templateVersion: null };
+
+      for (const e of enrolled) {
+        const embArr = bufferToFloat32Array(e.embedding);
+        if (!embArr) continue;
+
+        const score = cosineSimilarity(probe, embArr);
+        if (score > best.score) {
+          best = {
+            userId: e.userId ? String(e.userId) : null,
+            score,
+            templateVersion: e.templateVersion || null,
+          };
+        }
+      }
+
+      // 4) Threshold
+      // NOTE: For the current stub embedding, real-world matching won’t be reliable.
+      // This is just to complete the workflow plumbing.
+      const THRESHOLD = 0.78;
+
+      if (!best.userId || best.score < THRESHOLD) {
+        return res.json({
+          ok: true,
+          matchedUserId: null,
+          score: best.score >= 0 ? Number(best.score.toFixed(4)) : null,
+          reason: "no_match",
+          templateVersion: best.templateVersion,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        matchedUserId: best.userId,
+        score: Number(best.score.toFixed(4)),
+        reason: "matched",
+        templateVersion: best.templateVersion,
+      });
+    } catch (e) {
+      console.error("[mobile/biometric-identify] error", e);
+      return res.status(503).json({
+        ok: false,
+        error: e?.message || "Identify unavailable",
+      });
     }
   },
 );
