@@ -46,7 +46,7 @@ async function downloadGridFsFileBytes({ bucket, fileId }) {
  * Replace this with real embedding model output later.
  */
 async function generateEmbeddingFromImages({ bucket, photoFileIds }) {
-  const take = (photoFileIds || []).slice(0, 4); // you capture ~3-4
+  const take = (photoFileIds || []).slice(0, 1); // you capture ~3-4
   const bytes = [];
   for (const fid of take) {
     try {
