@@ -213,10 +213,10 @@ function getTaskModelFromTask(task) {
 }
 
 function fallbackProjectStatuses() {
-  return ["Planned", "In Progress", "On Hold", "Completed", "Cancelled"];
+  return ["Active", "Paused", "closed"];
 }
 function fallbackTaskStatuses() {
-  return ["pending", "in-progress", "paused", "paused-problem", "completed"];
+  return ["pending", "started", "paused", "paused-problem", "finished"];
 }
 function fallbackMilestoneStatuses() {
   // matches your TaskMilestone.js STATUS
