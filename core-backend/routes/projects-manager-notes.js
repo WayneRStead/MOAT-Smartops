@@ -1,3 +1,4 @@
+//  routes/project-manager-note.js
 const express = require("express");
 const mongoose = require("mongoose");
 const { requireAuth } = require("../middleware/auth");
@@ -99,7 +100,9 @@ router.post(
         note,
         at,
         author: {
-          userId: req.user?._id ? new mongoose.Types.ObjectId(String(req.user._id)) : undefined,
+          userId: req.user?._id
+            ? new mongoose.Types.ObjectId(String(req.user._id))
+            : undefined,
           name: req.user?.name || undefined,
           email: req.user?.email || undefined,
         },
@@ -111,7 +114,7 @@ router.post(
       console.error("POST /projects/:id/manager-notes error:", e);
       res.status(500).json({ error: "Server error" });
     }
-  }
+  },
 );
 
 /* ----------------- PATCH /api/projects/:id/manager-notes/:noteId ----------------- */
@@ -138,7 +141,7 @@ router.patch(
           ...orgScope(req.user?.orgId),
         },
         { $set: update },
-        { new: true }
+        { new: true },
       ).lean();
 
       if (!doc) return res.status(404).json({ error: "Note not found" });
@@ -147,7 +150,7 @@ router.patch(
       console.error("PATCH /projects/:id/manager-notes/:noteId error:", e);
       res.status(500).json({ error: "Server error" });
     }
-  }
+  },
 );
 
 /* ----------------- DELETE /api/projects/:id/manager-notes/:noteId ----------------- */
@@ -174,7 +177,7 @@ router.delete(
       console.error("DELETE /projects/:id/manager-notes/:noteId error:", e);
       res.status(500).json({ error: "Server error" });
     }
-  }
+  },
 );
 
 module.exports = router;

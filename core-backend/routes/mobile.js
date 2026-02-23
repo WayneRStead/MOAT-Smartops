@@ -346,55 +346,85 @@ router.post(
         createdAtClient,
       });
 
-      // ✅ APPLY PROJECT UPDATES (manager note + status) right after saving OfflineEvent
+      // ✅ APPLY PROJECT UPDATES (manager note + status + optional attachments)
+      // IMPORTANT: Manager notes are stored in ProjectManagerNote collection,
+      // not on Project (Project schema does not include managerNotes).
       if (eventType === "project-update") {
         try {
           const Project = require("../models/Project");
+          const ProjectManagerNote = require("../models/ProjectManagerNote");
+
+          const orgId = req.orgObjectId || req.user?.orgId;
 
           const projectIdStr = String(
             payload?.projectId || entityRef || "",
           ).trim();
-
-          if (mongoose.isValidObjectId(projectIdStr) && Project?.updateOne) {
+          if (!mongoose.isValidObjectId(projectIdStr)) {
+            console.warn("[project-update] invalid projectId", {
+              projectIdStr,
+            });
+          } else if (!Project?.updateOne) {
+            console.warn("[project-update] Project model missing updateOne");
+          } else {
             const projectObjectId = new mongoose.Types.ObjectId(projectIdStr);
 
-            const status = payload?.status
-              ? String(payload.status).trim()
-              : null;
-            const managerNote = payload?.managerNote
-              ? String(payload.managerNote).trim()
-              : "";
+            // --- Extract fields from payload ---
+            const statusRaw =
+              payload?.status != null
+                ? String(payload.status).trim().toLowerCase()
+                : "";
+            const managerNote =
+              payload?.managerNote != null
+                ? String(payload.managerNote).trim()
+                : "";
 
-            const noteEntry = {
-              at: new Date(),
-              byUserId: req.user?._id || null, // Mongo user id (good)
-              byEmail: req.user?.email || null,
-              status: status || null,
-              note: managerNote || null,
-              sourceOfflineEventId: doc._id,
-              createdAtClient: createdAtClient || null,
-            };
-
-            const update = { $set: { updatedAt: new Date() } };
+            // --- 1) Update Project.status (only allow schema enum values) ---
+            const allowedStatus = new Set(["active", "paused", "closed"]);
+            const status = allowedStatus.has(statusRaw) ? statusRaw : null;
 
             if (status) {
-              // Store status on the project (even if schema doesn't have it yet, Mongo will store it)
-              update.$set.status = status;
+              await Project.updateOne(
+                { _id: projectObjectId, orgId },
+                {
+                  $set: {
+                    status,
+                    updatedAt: new Date(),
+                    updatedBy: req.user?._id || null,
+                  },
+                },
+              );
             }
 
+            // --- 2) Create a ProjectManagerNote doc (source of truth) ---
             if (managerNote) {
-              // Keep a simple history array
-              update.$push = { managerNotes: noteEntry };
-            }
+              const at = payload?.at ? new Date(payload.at) : new Date();
 
-            await Project.updateOne({ _id: projectObjectId, orgId }, update);
-          } else {
-            console.warn(
-              "[project-update] invalid projectId or Project model missing",
-              {
-                projectIdStr,
-              },
-            );
+              // Attach any uploaded files from this OfflineEvent to the note.
+              // This makes "sick notes" visible via manager notes history.
+              const uploadedFiles = Array.isArray(doc?.uploadedFiles)
+                ? doc.uploadedFiles
+                : [];
+
+              await ProjectManagerNote.create({
+                orgId,
+                projectId: projectObjectId,
+                status: status || statusRaw || "active",
+                note: managerNote,
+                at,
+                author: {
+                  userId: req.user?._id
+                    ? new mongoose.Types.ObjectId(String(req.user._id))
+                    : undefined,
+                  name: req.user?.name || undefined,
+                  email: req.user?.email || undefined,
+                },
+
+                // Optional fields (safe if schema supports them; if not, we can add them)
+                uploadedFiles,
+                sourceOfflineEventId: doc._id,
+                createdAtClient: createdAtClient || null,
+              });
+            }
           }
         } catch (e3) {
           console.error("[project-update] failed to apply project update", e3);
