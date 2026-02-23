@@ -58,6 +58,54 @@ function getMobileOfflineBucket() {
   return new GridFSBucket(db, { bucketName: "mobileOffline" });
 }
 
+function getDocumentsBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "documents" });
+}
+
+// Copies a GridFS file from bucket A -> bucket B and returns the NEW fileId (ObjectId)
+async function copyGridFSFile({
+  fromBucket,
+  toBucket,
+  fromFileId,
+  metadata = {},
+  filename = null,
+  contentType = null,
+}) {
+  if (!fromBucket) throw new Error("fromBucket missing");
+  if (!toBucket) throw new Error("toBucket missing");
+
+  const srcId = mongoose.isValidObjectId(String(fromFileId))
+    ? new mongoose.Types.ObjectId(String(fromFileId))
+    : null;
+
+  if (!srcId) throw new Error("Invalid source fileId");
+
+  // Find source file to inherit details when possible
+  const srcFiles = await fromBucket.find({ _id: srcId }).limit(1).toArray();
+  if (!srcFiles?.length) throw new Error("Source file not found in GridFS");
+
+  const src = srcFiles[0];
+  const outName = filename || src.filename || `copied_${Date.now()}`;
+  const outType = contentType || src.contentType || "application/octet-stream";
+
+  const uploadStream = toBucket.openUploadStream(outName, {
+    contentType: outType,
+    metadata,
+  });
+
+  await new Promise((resolve, reject) => {
+    const dl = fromBucket.openDownloadStream(srcId);
+    dl.on("error", reject);
+    uploadStream.on("error", reject);
+    uploadStream.on("finish", resolve);
+    dl.pipe(uploadStream);
+  });
+
+  return uploadStream.id; // ObjectId
+}
+
 async function saveBuffersToGridFS({ orgId, userId, files }) {
   const bucket = getMobileOfflineBucket();
   if (!bucket) throw new Error("MongoDB not ready for file uploads");
@@ -428,6 +476,129 @@ router.post(
           }
         } catch (e3) {
           console.error("[project-update] failed to apply project update", e3);
+        }
+      }
+
+      // ✅ APPLY USER DOCUMENT UPLOADS INTO VAULT (Document model + documents GridFS bucket)
+      if (eventType === "user-document") {
+        try {
+          const Document = require("../models/Document");
+
+          const orgId = req.orgObjectId || req.user?.orgId;
+          const actor = req.user?.sub || req.user?._id || null;
+
+          const projectIdStr = String(
+            payload?.projectId || entityRef || "",
+          ).trim();
+          const targetUserIdStr = String(payload?.targetUserId || "").trim();
+
+          const projectRefId = mongoose.isValidObjectId(projectIdStr)
+            ? new mongoose.Types.ObjectId(projectIdStr)
+            : null;
+
+          const targetUserRefId = mongoose.isValidObjectId(targetUserIdStr)
+            ? new mongoose.Types.ObjectId(targetUserIdStr)
+            : null;
+
+          // Need at least a project link to show under Project detail
+          if (!projectRefId) {
+            console.warn("[user-document] missing/invalid projectId", {
+              projectIdStr,
+            });
+          } else {
+            const fromBucket = getMobileOfflineBucket();
+            const toBucket = getDocumentsBucket();
+            if (!fromBucket || !toBucket)
+              throw new Error("Mongo GridFS buckets not ready");
+
+            const uploaded = Array.isArray(doc?.uploadedFiles)
+              ? doc.uploadedFiles
+              : [];
+            if (!uploaded.length) {
+              console.warn("[user-document] no uploadedFiles on OfflineEvent", {
+                offlineEventId: String(doc?._id),
+              });
+            } else {
+              // 1) Copy first uploaded file into the Vault bucket ("documents")
+              const first = uploaded[0];
+              const newFileId = await copyGridFSFile({
+                fromBucket,
+                toBucket,
+                fromFileId: first.fileId,
+                filename: first.filename || null,
+                contentType: first.contentType || null,
+                metadata: {
+                  // keep consistent with documents.js GridFS metadata patterns
+                  orgId: String(orgId || ""),
+                  uploadedBy: actor ? String(actor) : "",
+                  source: "mobile-offline-event",
+                  offlineEventId: String(doc._id),
+                  projectId: String(projectRefId),
+                  targetUserId: targetUserRefId
+                    ? String(targetUserRefId)
+                    : undefined,
+                },
+              });
+
+              const fileIdStr = String(newFileId);
+              const url = `/documents/files/${fileIdStr}`;
+
+              // 2) Create a Document record so the Vault + Project can list it
+              const title = String(payload?.title || "User document").trim();
+              const tag = String(payload?.tag || "").trim();
+
+              const links = [
+                { type: "project", module: "project", refId: projectRefId },
+              ];
+              if (targetUserRefId) {
+                links.push({
+                  type: "user",
+                  module: "user",
+                  refId: targetUserRefId,
+                });
+              }
+
+              const version = {
+                filename: first.filename || "file",
+                url,
+                fileId: fileIdStr,
+                mime: first.contentType || "application/octet-stream",
+                size: typeof first.size === "number" ? first.size : undefined,
+                uploadedBy: actor,
+                uploadedAt: new Date(),
+              };
+
+              const now = new Date();
+
+              const body = {
+                orgId: mongoose.Types.ObjectId.isValid(String(orgId))
+                  ? new mongoose.Types.ObjectId(String(orgId))
+                  : undefined,
+
+                title,
+                folder: "",
+
+                // tags are normalized to lowercase in the Document model
+                tags: tag ? [tag] : [],
+
+                links,
+
+                access: { visibility: "org", owners: actor ? [actor] : [] },
+
+                versions: [version],
+                latest: version,
+
+                createdAt: now,
+                updatedAt: now,
+                createdBy: actor,
+                updatedBy: actor,
+              };
+
+              await Document.create(body);
+            }
+          }
+        } catch (e4) {
+          console.error("[user-document] failed to apply vault document", e4);
         }
       }
 

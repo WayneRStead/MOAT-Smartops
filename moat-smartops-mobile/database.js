@@ -14,6 +14,8 @@ async function getDb() {
       const db = await SQLite.openDatabaseAsync("moatSmartOps.db");
       // WAL is good for concurrent reads/writes
       await db.execAsync(`PRAGMA journal_mode = WAL;`);
+      // ✅ Ensure schema exists before anyone tries to insert
+      await ensureOfflineEventsSchema(db);
       return db;
     })();
   }
@@ -102,9 +104,7 @@ async function ensureOfflineEventsSchema(db) {
  * Initialize SQLite + offline_events outbox table.
  */
 export async function initDatabase() {
-  const db = await getDb();
-  await ensureOfflineEventsSchema(db);
-
+  await getDb(); // getDb now guarantees schema exists
   console.log("[DB] initDatabase complete (offline_events ready)");
   return true;
 }
