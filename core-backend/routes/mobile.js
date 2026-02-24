@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-03"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-04"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -611,7 +611,12 @@ router.post(
           const TaskMilestone = require("../models/TaskMilestone");
           const ManagerNote = require("../models/ManagerNote");
 
-          const orgId2 = req.orgObjectId || req.user?.orgId; // prefer ObjectId from middleware
+          const orgIdRaw = req.orgObjectId || req.user?.orgId || null;
+          const orgIdStr = orgIdRaw != null ? String(orgIdRaw) : null;
+          const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+            ? new mongoose.Types.ObjectId(orgIdStr)
+            : null;
+
           const actorUserId = req.user?._id
             ? new mongoose.Types.ObjectId(String(req.user._id))
             : null;
@@ -622,85 +627,108 @@ router.post(
             payload?.milestone || payload?.milestoneId || "",
           ).trim();
 
-          // ---- Normalize to match Task.js enum ----
-          function normalizeTaskStatus(v) {
-            if (v == null) return null;
-            const s = String(v).trim().toLowerCase();
+          // --- Match orgId whether stored as ObjectId, string, or missing (legacy) ---
+          const orgOr = [];
+          if (orgIdObj) orgOr.push({ orgId: orgIdObj });
+          if (orgIdStr) orgOr.push({ orgId: orgIdStr });
+          orgOr.push({ orgId: { $exists: false } });
+
+          // ✅ Use SAME status normalization as routes/tasks.js
+          function normalizeTaskStatus(s) {
+            if (s == null) return null;
+
+            const raw = String(s).trim();
+            const v = raw.toLowerCase().replace(/\s+/g, "");
 
             if (
-              ["done", "finish", "finished", "complete", "completed"].includes(
-                s,
-              )
+              ["pending", "todo", "tbd", "planned", "plan", "open"].includes(v)
             )
-              return "completed";
-
+              return "Pending";
             if (
               [
-                "in progress",
-                "in-progress",
-                "inprogress",
                 "started",
-                "start",
-                "resume",
-                "resumed",
-              ].includes(s)
+                "inprogress",
+                "in-progress",
+                "active",
+                "running",
+              ].includes(v)
             )
-              return "in-progress";
-
-            if (["pause", "paused"].includes(s)) return "paused";
-
+              return "Started";
+            if (["paused", "pause", "onhold", "hold"].includes(v))
+              return "Paused";
             if (
               [
-                "paused - problem",
                 "paused-problem",
+                "pausedproblem",
                 "problem",
                 "blocked",
-                "block",
+                "blocker",
                 "issue",
-              ].includes(s)
+              ].includes(v)
             )
-              return "paused-problem";
+              return "Paused-Problem";
+            if (
+              [
+                "finished",
+                "finish",
+                "done",
+                "complete",
+                "completed",
+                "closed",
+              ].includes(v)
+            )
+              return "Finished";
 
             if (
-              ["open", "pending", "todo", "to-do", "planned", "plan"].includes(
-                s,
-              )
+              [
+                "Pending",
+                "Started",
+                "Paused",
+                "Paused-Problem",
+                "Finished",
+              ].includes(raw)
             )
-              return "pending";
-
-            // if unknown, safest is: do nothing
+              return raw;
             return null;
           }
 
-          function normalizeMilestoneStatus(v) {
-            if (v == null) return null;
-            const s = String(v).trim().toLowerCase();
+          // Deliverable status: be permissive (we’ll set what you send, but normalize common inputs)
+          function normalizeMilestoneStatus(s) {
+            if (s == null) return null;
+            const raw = String(s).trim();
+            const v = raw.toLowerCase().replace(/\s+/g, "");
 
-            // Common normalizations for deliverables
+            if (["open", "pending", "todo", "tbd"].includes(v)) return "Open";
+            if (["started", "inprogress", "in-progress", "active"].includes(v))
+              return "Started";
             if (
-              ["done", "finish", "finished", "complete", "completed"].includes(
-                s,
-              )
+              [
+                "finished",
+                "finish",
+                "done",
+                "complete",
+                "completed",
+                "closed",
+              ].includes(v)
             )
-              return "done";
-            if (["open", "pending", "todo", "to-do"].includes(s))
-              return "pending";
-            if (["active", "started", "in-progress", "in progress"].includes(s))
-              return "pending"; // if your TaskMilestone supports "active", change to "active"
+              return "Finished";
 
-            return s || null;
+            // if caller already sent TitleCase, keep it
+            if (["Open", "Started", "Finished"].includes(raw)) return raw;
+
+            // fallback: store raw if you already use something else
+            return raw || null;
           }
 
-          function pickWhen() {
-            // your payload includes createdAt + createdAtClient
+          const at = (() => {
             const raw =
-              payload?.createdAt ||
               payload?.updatedAt ||
+              payload?.createdAt ||
               createdAtClient ||
               new Date().toISOString();
             const d = new Date(raw);
             return isNaN(+d) ? new Date() : d;
-          }
+          })();
 
           if (!mongoose.isValidObjectId(taskIdStr)) {
             console.warn("[task-update] invalid taskId", {
@@ -710,138 +738,121 @@ router.post(
           } else {
             const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
 
-            const newTaskStatus = normalizeTaskStatus(payload?.status);
+            const newStatus = normalizeTaskStatus(payload?.status);
             const noteText =
               payload?.note != null ? String(payload.note).trim() : "";
 
-            // 1) Update Task.status (and stamp audit)
-            if (newTaskStatus) {
-              await Task.updateOne(
-                { _id: taskObjectId, orgId: orgId2 },
+            // 1) Update Task.status
+            if (newStatus) {
+              const r = await Task.updateOne(
+                { _id: taskObjectId, $or: orgOr },
                 {
                   $set: {
-                    status: newTaskStatus,
+                    status: newStatus,
                     updatedAt: new Date(),
                     updatedBy: actorUserId || undefined,
                   },
                 },
               );
-              console.log(
-                "[task-update] Task.status updated",
-                taskIdStr,
-                "=>",
-                newTaskStatus,
-              );
+
+              console.log("[task-update] Task.updateOne", {
+                taskId: taskIdStr,
+                status: newStatus,
+                matched: r?.matchedCount,
+                modified: r?.modifiedCount,
+              });
+
+              // fallback by _id only if org filter prevented matching
+              if (r?.matchedCount === 0) {
+                const r2 = await Task.updateOne(
+                  { _id: taskObjectId },
+                  { $set: { status: newStatus, updatedAt: new Date() } },
+                );
+                console.log("[task-update] Task.updateOne fallback(_id only)", {
+                  matched: r2?.matchedCount,
+                  modified: r2?.modifiedCount,
+                });
+              }
             } else {
-              console.warn("[task-update] status not recognized/normalized", {
+              console.warn("[task-update] unrecognized status", {
                 raw: payload?.status,
               });
             }
 
             // 2) Update TaskMilestone.status (deliverable)
-            const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
-              ? new mongoose.Types.ObjectId(milestoneIdStr)
-              : null;
-
-            const newMilestoneStatus = normalizeMilestoneStatus(
-              payload?.milestoneStatus,
-            );
-
-            if (milestoneObjectId && newMilestoneStatus) {
-              await TaskMilestone.updateOne(
-                { _id: milestoneObjectId, orgId: orgId2 },
-                { $set: { status: newMilestoneStatus } },
-              );
-              console.log(
-                "[task-update] TaskMilestone.status updated",
+            if (mongoose.isValidObjectId(milestoneIdStr)) {
+              const milestoneObjectId = new mongoose.Types.ObjectId(
                 milestoneIdStr,
-                "=>",
-                newMilestoneStatus,
               );
-            } else if (milestoneIdStr && !milestoneObjectId) {
-              console.warn("[task-update] milestone id not a valid ObjectId", {
-                milestoneIdStr,
-              });
-            }
+              const msStatus = normalizeMilestoneStatus(
+                payload?.milestoneStatus,
+              );
 
-            // 2b) Fallback: update LEGACY embedded milestone status on Task.milestones[] (if used)
-            // (This won’t hurt even if you don’t use embedded milestones.)
-            if (milestoneObjectId && newMilestoneStatus) {
-              const legacyStatus =
-                newMilestoneStatus === "done" ? "done" : "open";
-
-              await Task.updateOne(
-                { _id: taskObjectId, orgId: orgId2 },
-                {
-                  $set: {
-                    "milestones.$[m].status": legacyStatus,
-                    ...(legacyStatus === "done"
-                      ? { "milestones.$[m].completedAt": new Date() }
-                      : {}),
+              if (msStatus) {
+                const r = await TaskMilestone.updateOne(
+                  { _id: milestoneObjectId, $or: orgOr },
+                  {
+                    $set: {
+                      status: msStatus,
+                      updatedAt: new Date(),
+                      ...(msStatus.toLowerCase() === "finished"
+                        ? { completedAt: new Date() }
+                        : {}),
+                    },
                   },
-                },
-                {
-                  arrayFilters: [{ "m._id": milestoneObjectId }],
-                },
-              ).catch(() => {
-                // ignore if arrayFilters not supported in your mongo version,
-                // or if milestones array doesn't contain that id
-              });
+                );
+
+                console.log("[task-update] TaskMilestone.updateOne", {
+                  milestoneId: milestoneIdStr,
+                  status: msStatus,
+                  matched: r?.matchedCount,
+                  modified: r?.modifiedCount,
+                });
+
+                if (r?.matchedCount === 0) {
+                  const r2 = await TaskMilestone.updateOne(
+                    { _id: milestoneObjectId },
+                    { $set: { status: msStatus, updatedAt: new Date() } },
+                  );
+                  console.log(
+                    "[task-update] TaskMilestone fallback(_id only)",
+                    {
+                      matched: r2?.matchedCount,
+                      modified: r2?.modifiedCount,
+                    },
+                  );
+                }
+              } else {
+                console.warn("[task-update] unrecognized milestoneStatus", {
+                  raw: payload?.milestoneStatus,
+                });
+              }
             }
 
-            // 3) Create ONE ManagerNote entry (best-effort dedupe so re-sync doesn't spam)
-            const at = pickWhen();
+            // 3) ManagerNote (keep working behavior)
             const projectObjectId = mongoose.isValidObjectId(projectIdStr)
               ? new mongoose.Types.ObjectId(projectIdStr)
               : undefined;
 
-            const noteDoc = {
+            await ManagerNote.create({
               taskId: taskObjectId,
               projectId: projectObjectId,
-              orgId: mongoose.isValidObjectId(String(orgId2))
-                ? new mongoose.Types.ObjectId(String(orgId2))
-                : orgId2,
-
+              orgId: orgIdObj || undefined,
               at,
-              status: newTaskStatus || "pending",
+              status: normalizeTaskStatus(payload?.status) || "Pending",
               note: noteText || "",
-
               author: {
                 id: actorUserId || undefined,
                 name: req.user?.name || undefined,
                 email: req.user?.email || undefined,
               },
-            };
-
-            // Dedup rule: same task + same status + same note + same author + near-same timestamp
-            const dedupeFrom = new Date(at.getTime() - 5000);
-            const dedupeTo = new Date(at.getTime() + 5000);
-
-            const existing = await ManagerNote.findOne({
-              taskId: taskObjectId,
-              orgId: noteDoc.orgId,
-              status: noteDoc.status,
-              note: noteDoc.note,
-              "author.id": noteDoc.author.id || undefined,
-              at: { $gte: dedupeFrom, $lte: dedupeTo },
               deletedAt: null,
-            }).lean();
-
-            if (!existing) {
-              await ManagerNote.create(noteDoc);
-              console.log(
-                "[task-update] ManagerNote created for task",
-                taskIdStr,
-              );
-            } else {
-              console.log("[task-update] ManagerNote deduped (already exists)");
-            }
+            });
           }
         } catch (e) {
           console.error("[task-update] failed to apply task update", e);
         }
       }
-
       // ------------------------------------------------------------
       // BIOMETRICS: create/upsert ONE BiometricEnrollmentRequest
       // keyed by sourceOfflineEventId so resync won't create duplicates
