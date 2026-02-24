@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-07"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-09"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -209,6 +209,11 @@ function boolish(v) {
    Rules:
    - If correct ?k= is provided (matches metadata.downloadKey) -> allow (no login required)
    - Otherwise -> require login + org context
+
+   ✅ IMPORTANT FIX:
+   This handler now works BOTH ways:
+   - If this router is mounted publicly (no requireAuth), it will still enforce auth when needed
+   - If it is mounted behind requireAuth, it still works (signed key path simply becomes redundant)
 ----------------------------------------------------------------------------------- */
 router.all("/offline-files/:fileId", async (req, res) => {
   try {
@@ -241,6 +246,7 @@ router.all("/offline-files/:fileId", async (req, res) => {
         "Content-Disposition",
         `inline; filename="${fileDoc.filename || "file"}"`,
       );
+      // cache OK: key is unguessable; can still keep it private
       res.setHeader("Cache-Control", "private, max-age=31536000");
 
       if (req.method === "HEAD") return res.status(200).end();
@@ -255,10 +261,29 @@ router.all("/offline-files/:fileId", async (req, res) => {
       return stream.pipe(res);
     }
 
-    // ✅ PATH B: normal secured access (token required)
-    // If no key, require the normal auth+org context
+    // ✅ PATH B: secured access (token required)
+    // If caller doesn't have req.user attached, run auth middleware manually.
     if (!req.user || !req.user._id) {
-      return res.status(401).json({ error: "Missing token" });
+      try {
+        await runMiddleware(req, res, requireAuth);
+        await runMiddleware(req, res, resolveOrgContext);
+      } catch (eAuth) {
+        return res.status(401).json({ error: "Missing token" });
+      }
+    } else {
+      // ensure org context is attached if already authed but org not resolved
+      if (!req.orgObjectId && !req.orgId) {
+        try {
+          await runMiddleware(req, res, resolveOrgContext);
+        } catch {}
+      }
+    }
+
+    // require org context
+    try {
+      await runMiddleware(req, res, requireOrg);
+    } catch {
+      return res.status(400).json({ error: "Missing org context" });
     }
 
     const orgId = req.orgObjectId || req.user?.orgId;

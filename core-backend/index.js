@@ -25,15 +25,11 @@ try {
 } catch {} // ensure User is compiled for boot
 
 // ✅ IMPORTANT: Inspections compatibility boot
-// Your real model file is models/InspectionForm.js, but some routers may expect "Inspection".
-// This creates an alias so require("./models/Inspection") or mongoose.model("Inspection") works.
 try {
   const InspectionForm = require("./models/InspectionForm");
 
-  // If router expects mongoose.model("Inspection"), ensure it exists.
   if (!mongoose.models.Inspection) {
     try {
-      // Best: compile alias using same schema + same collection
       const collectionName =
         InspectionForm?.collection?.name ||
         InspectionForm?.collection?.collectionName ||
@@ -42,13 +38,11 @@ try {
       mongoose.model("Inspection", InspectionForm.schema, collectionName);
       console.log("[boot] aliased InspectionForm -> Inspection");
     } catch (e) {
-      // Fallback: direct alias reference
       mongoose.models.Inspection = InspectionForm;
       console.log("[boot] aliased mongoose.models.Inspection = InspectionForm");
     }
   }
 } catch (e) {
-  // Don't crash if inspections are not ready yet
   console.warn("[boot] InspectionForm model not available:", e?.message || e);
 }
 
@@ -92,9 +86,9 @@ const taskFencesRouter = require("./routes/task-fences");
 const projectsRouter = safeRequire("./routes/projects");
 const documentsRouter = safeRequire("./routes/documents");
 
-// ✅ Inspections routers (guarded) — define BOTH variants safely
-const inspectionModuleRouter = safeRequire("./routes/inspectionModule"); // module variant
-const inspectionsRouter = safeRequire("./routes/inspections"); // legacy/simple variant if it exists
+// ✅ Inspections routers (guarded)
+const inspectionModuleRouter = safeRequire("./routes/inspectionModule");
+const inspectionsRouter = safeRequire("./routes/inspections");
 
 const assetsRouter = safeRequire("./routes/assets");
 const vehiclesRouter = safeRequire("./routes/vehicles");
@@ -104,7 +98,6 @@ const groupsRouter = safeRequire("./routes/groups");
 
 /**
  * ✅ CRITICAL: tasks router MUST NOT be optional.
- * If it fails to load, we WANT the server to crash so we can see the real error.
  */
 const tasksRouter = require("./routes/tasks");
 
@@ -510,17 +503,78 @@ app.use("/api/files", express.static(uploadsRoot, staticOpts));
 app.use("/uploads", express.static(uploadsRoot, staticOpts));
 app.use("/api/uploads", express.static(uploadsRoot, staticOpts));
 
+/* -----------------------------------------------------------------------
+   ✅ PUBLIC SIGNED OFFLINE FILE DOWNLOAD (NO TOKEN, KEY REQUIRED)
+   URL: /api/mobile/offline-files/:fileId?k=<downloadKey>
+   This is what allows <img src="..."> to render.
+------------------------------------------------------------------------ */
+function getMobileOfflineBucket() {
+  const db = mongoose.connection?.db;
+  if (!db) return null;
+  return new GridFSBucket(db, { bucketName: "mobileOffline" });
+}
+
+app.all(
+  ["/mobile/offline-files/:fileId", "/api/mobile/offline-files/:fileId"],
+  async (req, res) => {
+    try {
+      const bucket = getMobileOfflineBucket();
+      if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+      const fileIdStr = String(req.params.fileId || "").trim();
+      if (!mongoose.isValidObjectId(fileIdStr)) {
+        return res.status(400).json({ error: "Invalid fileId" });
+      }
+
+      const key = String(req.query.k || "").trim();
+      if (!key) return res.status(401).json({ error: "Missing key" });
+
+      const fileId = new mongoose.Types.ObjectId(fileIdStr);
+
+      const filesColl = mongoose.connection.db.collection(
+        "mobileOffline.files",
+      );
+      const fileDoc = await filesColl.findOne({ _id: fileId });
+      if (!fileDoc) return res.status(404).json({ error: "File not found" });
+
+      const storedKey = String(fileDoc?.metadata?.downloadKey || "").trim();
+      if (!storedKey || storedKey !== key) {
+        return res.status(403).json({ error: "Invalid key" });
+      }
+
+      res.setHeader(
+        "Content-Type",
+        fileDoc.contentType || "application/octet-stream",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${fileDoc.filename || "file"}"`,
+      );
+      res.setHeader("Cache-Control", "private, max-age=0, no-store");
+
+      if (req.method === "HEAD") return res.status(200).end();
+      if (req.method !== "GET")
+        return res.status(405).json({ error: "Method not allowed" });
+
+      const stream = bucket.openDownloadStream(fileId);
+      stream.on("error", (err) => {
+        console.error("[public mobile offline-files] stream error", err);
+        if (!res.headersSent) res.status(500).end("Stream error");
+      });
+
+      stream.pipe(res);
+    } catch (e) {
+      console.error("[public mobile offline-files] error", e);
+      return res.status(500).json({ error: e?.message || "Download failed" });
+    }
+  },
+);
+
 /* --------------------------- Protected Routers -------------------------- */
 
-// ✅ MOBILE ROUTER
+// ✅ MOBILE ROUTER (protected)
 const mobileRouter = require("./routes/mobile");
 
-// ✅ PUBLIC signed download endpoint (NO TOKEN) so <img src="..."> works.
-// This must be mounted BEFORE the protected /api/mobile mount.
-app.use("/mobile/offline-files", mobileRouter);
-app.use("/api/mobile/offline-files", mobileRouter);
-
-// ✅ Everything else remains protected (requires token)
 app.use(
   "/mobile",
   requireAuth,
@@ -785,8 +839,6 @@ if (taskMilestonesRouter) {
 
 /* ------------------------ Inspections ----------------------- */
 if (inspectionModuleRouter) {
-  // Keep BOTH spellings so your mobile app can call either:
-  // /api/inspection or /api/inspections
   app.use(
     "/inspections",
     requireAuth,
