@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-02"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-03"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -604,29 +604,17 @@ router.post(
         }
       }
 
-      // ✅ APPLY TASK UPDATES (task status + manager note + milestone/deliverable status)
+      // ✅ APPLY TASK UPDATES (Task.status + ManagerNote + TaskMilestone.status)
       if (eventType === "task-update") {
         try {
           const Task = require("../models/Task");
-
-          // Deliverable model (you called it "milestone")
-          let Milestone = null;
-          try {
-            Milestone = require("../models/Milestone");
-          } catch {
-            Milestone = null;
-          }
-
-          // Notes model (like ProjectManagerNote)
-          let TaskManagerNote = null;
-          try {
-            TaskManagerNote = require("../models/TaskManagerNote");
-          } catch {
-            TaskManagerNote = null;
-          }
+          const TaskMilestone = require("../models/TaskMilestone"); // <-- your deliverables
+          const ManagerNote = require("../models/ManagerNote"); // <-- this is your task note model
 
           const orgId2 = req.orgObjectId || req.user?.orgId;
-          const actorId = req.user?._id || null;
+          const actorUserId = req.user?._id
+            ? new mongoose.Types.ObjectId(String(req.user._id))
+            : null;
 
           const taskIdStr = String(payload?.taskId || entityRef || "").trim();
           const projectIdStr = String(payload?.projectId || "").trim();
@@ -642,46 +630,67 @@ router.post(
           } else {
             const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
 
-            // --- 1) Update Task.status ---
-            // Try to be compatible with different status enums; only set if provided.
-            const statusRaw =
-              payload?.status != null
-                ? String(payload.status).trim().toLowerCase()
-                : "";
+            // ---- helpers to keep statuses consistent with your backend enums ----
+            function normalizeTaskStatus(s) {
+              const v = String(s || "")
+                .trim()
+                .toLowerCase();
+              if (!v) return null;
+              // keep as-is for now; you can tighten this list if your Task schema is strict
+              const allowed = new Set([
+                "pending",
+                "started",
+                "paused",
+                "blocked",
+                "finished",
+                "done",
+                "completed",
+                "closed",
+                "cancelled",
+                "canceled",
+                "active",
+                "in_progress",
+                "in-progress",
+              ]);
+              return allowed.has(v) ? v : v; // allow unknowns if your schema is not strict
+            }
 
-            // Common statuses across systems — expand as needed
-            const allowedTaskStatus = new Set([
-              "pending",
-              "not_started",
-              "not-started",
-              "todo",
-              "to-do",
-              "started",
-              "in_progress",
-              "in-progress",
-              "progress",
-              "blocked",
-              "paused",
-              "done",
-              "finished",
-              "complete",
-              "completed",
-              "closed",
-              "cancelled",
-              "canceled",
-            ]);
+            function normalizeMilestoneStatus(s) {
+              const v = String(s || "")
+                .trim()
+                .toLowerCase();
+              if (!v) return null;
 
-            const shouldSetTaskStatus =
-              statusRaw && allowedTaskStatus.has(statusRaw);
+              // Your TaskMilestone creation uses "pending" in projects.js.
+              // Common mapping so "finished" becomes "done" (often what milestone schemas expect).
+              const map = {
+                finished: "done",
+                completed: "done",
+                complete: "done",
+                done: "done",
+                started: "pending", // if you prefer "active", change this mapping
+                active: "pending", // change to "active" if your schema supports it
+                pending: "pending",
+                open: "pending",
+              };
 
-            if (Task?.updateOne && shouldSetTaskStatus) {
+              return map[v] || v;
+            }
+
+            const statusRaw = normalizeTaskStatus(payload?.status);
+            const noteText =
+              payload?.note != null ? String(payload.note).trim() : "";
+
+            // --- 1) Update Task.status (and optionally keep last manager note on Task if your UI reads it there) ---
+            // NOTE: I’m NOT adding new fields onto Task here unless you confirm Task schema supports it.
+            if (statusRaw) {
               await Task.updateOne(
                 { _id: taskObjectId, orgId: orgId2 },
                 {
                   $set: {
                     status: statusRaw,
                     updatedAt: new Date(),
-                    updatedBy: actorId,
+                    updatedBy: actorUserId || undefined,
                   },
                 },
               );
@@ -691,136 +700,107 @@ router.post(
                 "=>",
                 statusRaw,
               );
-            } else if (statusRaw && !allowedTaskStatus.has(statusRaw)) {
-              console.warn(
-                "[task-update] status not in allowed set (skipped)",
-                { statusRaw, taskIdStr },
-              );
             }
 
-            // --- 2) Update Milestone status (deliverable) ---
-            const milestoneStatusRaw =
-              payload?.milestoneStatus != null
-                ? String(payload.milestoneStatus).trim().toLowerCase()
-                : "";
-
-            const allowedMilestoneStatus = new Set([
-              "pending",
-              "open",
-              "started",
-              "in_progress",
-              "in-progress",
-              "active",
-              "done",
-              "finished",
-              "complete",
-              "completed",
-              "closed",
-            ]);
-
+            // --- 2) Update TaskMilestone.status (deliverable) ---
             const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
               ? new mongoose.Types.ObjectId(milestoneIdStr)
               : null;
 
-            const shouldSetMilestoneStatus =
-              milestoneObjectId &&
-              milestoneStatusRaw &&
-              allowedMilestoneStatus.has(milestoneStatusRaw);
+            const milestoneStatusRaw = normalizeMilestoneStatus(
+              payload?.milestoneStatus,
+            );
 
-            if (Milestone?.updateOne && shouldSetMilestoneStatus) {
-              await Milestone.updateOne(
+            if (milestoneObjectId && milestoneStatusRaw) {
+              await TaskMilestone.updateOne(
                 { _id: milestoneObjectId, orgId: orgId2 },
                 {
                   $set: {
                     status: milestoneStatusRaw,
-                    updatedAt: new Date(),
-                    updatedBy: actorId,
                   },
                 },
               );
               console.log(
-                "[task-update] Milestone.status updated",
+                "[task-update] TaskMilestone.status updated",
                 milestoneIdStr,
                 "=>",
                 milestoneStatusRaw,
               );
-            } else if (
-              milestoneStatusRaw &&
-              milestoneObjectId &&
-              !allowedMilestoneStatus.has(milestoneStatusRaw)
-            ) {
-              console.warn(
-                "[task-update] milestoneStatus not in allowed set (skipped)",
-                {
-                  milestoneStatusRaw,
-                  milestoneIdStr,
-                },
-              );
             }
 
-            // --- 3) Create/Upsert a TaskManagerNote (history) ---
-            const noteText =
-              payload?.note != null ? String(payload.note).trim() : "";
-            if (TaskManagerNote?.findOneAndUpdate && noteText) {
-              const projectObjectId = mongoose.isValidObjectId(projectIdStr)
+            // --- 3) Create ONE ManagerNote per offline-event (idempotent) ---
+            // Your ManagerNote schema:
+            // author: { id, name, email }
+            // + taskId, projectId, orgId, status, note, at
+            //
+            // For idempotency (avoid duplicates on re-sync), we store a soft “fingerprint”
+            // using sourceOfflineEventId IF your schema supports it.
+            //
+            // If your schema does NOT include sourceOfflineEventId, we fall back to creating a note anyway.
+            const at = payload?.at ? new Date(payload.at) : new Date();
+
+            const managerNoteDoc = {
+              taskId: taskObjectId,
+              orgId: mongoose.isValidObjectId(String(orgId2))
+                ? new mongoose.Types.ObjectId(String(orgId2))
+                : orgId2,
+              projectId: mongoose.isValidObjectId(projectIdStr)
                 ? new mongoose.Types.ObjectId(projectIdStr)
-                : undefined;
+                : undefined,
 
-              const at = payload?.at ? new Date(payload.at) : new Date();
+              at,
+              status: statusRaw || "pending",
+              note: noteText || "",
 
-              await TaskManagerNote.findOneAndUpdate(
-                // idempotent: one note per OfflineEvent
-                { orgId: orgId2, sourceOfflineEventId: doc._id },
-                {
-                  $setOnInsert: {
-                    orgId: orgId2,
-                    sourceOfflineEventId: doc._id,
-                    createdAt: new Date(),
-                  },
-                  $set: {
-                    projectId: projectObjectId,
+              author: {
+                id: actorUserId || undefined,
+                name: req.user?.name || undefined,
+                email: req.user?.email || undefined,
+              },
+
+              // If your schema doesn't declare this, Mongo will still store it unless strict mode blocks it.
+              // If strict=true on ManagerNote schema, then this field will be dropped (harmless).
+              sourceOfflineEventId: doc?._id
+                ? new mongoose.Types.ObjectId(String(doc._id))
+                : undefined,
+            };
+
+            // Best-effort idempotency: only if the field sticks (or if your schema allows it).
+            // If strict blocks it, it will still create a new note each sync (still functional).
+            if (ManagerNote?.findOne) {
+              let existing = null;
+              try {
+                if (doc?._id) {
+                  existing = await ManagerNote.findOne({
                     taskId: taskObjectId,
+                    orgId: managerNoteDoc.orgId,
+                    sourceOfflineEventId: managerNoteDoc.sourceOfflineEventId,
+                  }).lean();
+                }
+              } catch {
+                existing = null;
+              }
 
-                    // store what was sent so the UI can show “status at time of note”
-                    status: statusRaw || undefined,
-                    milestoneId: milestoneObjectId || undefined,
-                    milestoneStatus: milestoneStatusRaw || undefined,
-
-                    note: noteText,
-                    at,
-
-                    author: {
-                      userId: actorId
-                        ? new mongoose.Types.ObjectId(String(actorId))
-                        : undefined,
-                      name: req.user?.name || undefined,
-                      email: req.user?.email || undefined,
-                    },
-
-                    // keep parity with project notes
-                    uploadedFiles: Array.isArray(doc?.uploadedFiles)
-                      ? doc.uploadedFiles
-                      : [],
-                    createdAtClient: createdAtClient || null,
-
-                    updatedAt: new Date(),
-                  },
-                },
-                { upsert: true, new: true },
-              );
-
-              console.log(
-                "[task-update] TaskManagerNote upserted for task",
-                taskIdStr,
-              );
-            } else if (noteText && !TaskManagerNote) {
+              if (!existing) {
+                await ManagerNote.create(managerNoteDoc);
+                console.log(
+                  "[task-update] ManagerNote created for task",
+                  taskIdStr,
+                );
+              } else {
+                console.log(
+                  "[task-update] ManagerNote already exists for offlineEvent",
+                  String(doc._id),
+                );
+              }
+            } else {
               console.warn(
-                "[task-update] TaskManagerNote model not found; note not persisted",
+                "[task-update] ManagerNote model missing create/findOne",
               );
             }
           }
-        } catch (e5) {
-          console.error("[task-update] failed to apply task update", e5);
+        } catch (e) {
+          console.error("[task-update] failed to apply task update", e);
         }
       }
 
