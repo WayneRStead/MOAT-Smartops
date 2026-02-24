@@ -612,14 +612,16 @@ router.post(
           const ManagerNote = require("../models/ManagerNote");
 
           const orgIdRaw = req.orgObjectId || req.user?.orgId || null;
-          const orgIdStr = orgIdRaw != null ? String(orgIdRaw) : null;
+          const orgIdStr = orgIdRaw != null ? String(orgIdRaw).trim() : "";
           const orgIdObj = mongoose.isValidObjectId(orgIdStr)
             ? new mongoose.Types.ObjectId(orgIdStr)
             : null;
 
-          const actorUserId = req.user?._id
-            ? new mongoose.Types.ObjectId(String(req.user._id))
-            : null;
+          // match orgId whether stored as ObjectId, string, or missing
+          const orgOr = [];
+          if (orgIdObj) orgOr.push({ orgId: orgIdObj });
+          if (orgIdStr) orgOr.push({ orgId: orgIdStr });
+          orgOr.push({ orgId: { $exists: false } });
 
           const taskIdStr = String(payload?.taskId || entityRef || "").trim();
           const projectIdStr = String(payload?.projectId || "").trim();
@@ -627,98 +629,8 @@ router.post(
             payload?.milestone || payload?.milestoneId || "",
           ).trim();
 
-          // --- Match orgId whether stored as ObjectId, string, or missing (legacy) ---
-          const orgOr = [];
-          if (orgIdObj) orgOr.push({ orgId: orgIdObj });
-          if (orgIdStr) orgOr.push({ orgId: orgIdStr });
-          orgOr.push({ orgId: { $exists: false } });
-
-          // ✅ Use SAME status normalization as routes/tasks.js
-          function normalizeTaskStatus(s) {
-            if (s == null) return null;
-
-            const raw = String(s).trim();
-            const v = raw.toLowerCase().replace(/\s+/g, "");
-
-            if (
-              ["pending", "todo", "tbd", "planned", "plan", "open"].includes(v)
-            )
-              return "Pending";
-            if (
-              [
-                "started",
-                "inprogress",
-                "in-progress",
-                "active",
-                "running",
-              ].includes(v)
-            )
-              return "Started";
-            if (["paused", "pause", "onhold", "hold"].includes(v))
-              return "Paused";
-            if (
-              [
-                "paused-problem",
-                "pausedproblem",
-                "problem",
-                "blocked",
-                "blocker",
-                "issue",
-              ].includes(v)
-            )
-              return "Paused-Problem";
-            if (
-              [
-                "finished",
-                "finish",
-                "done",
-                "complete",
-                "completed",
-                "closed",
-              ].includes(v)
-            )
-              return "Finished";
-
-            if (
-              [
-                "Pending",
-                "Started",
-                "Paused",
-                "Paused-Problem",
-                "Finished",
-              ].includes(raw)
-            )
-              return raw;
-            return null;
-          }
-
-          // Deliverable status: be permissive (we’ll set what you send, but normalize common inputs)
-          function normalizeMilestoneStatus(s) {
-            if (s == null) return null;
-            const raw = String(s).trim();
-            const v = raw.toLowerCase().replace(/\s+/g, "");
-
-            if (["open", "pending", "todo", "tbd"].includes(v)) return "Open";
-            if (["started", "inprogress", "in-progress", "active"].includes(v))
-              return "Started";
-            if (
-              [
-                "finished",
-                "finish",
-                "done",
-                "complete",
-                "completed",
-                "closed",
-              ].includes(v)
-            )
-              return "Finished";
-
-            // if caller already sent TitleCase, keep it
-            if (["Open", "Started", "Finished"].includes(raw)) return raw;
-
-            // fallback: store raw if you already use something else
-            return raw || null;
-          }
+          const noteText =
+            payload?.note != null ? String(payload.note).trim() : "";
 
           const at = (() => {
             const raw =
@@ -730,129 +642,239 @@ router.post(
             return isNaN(+d) ? new Date() : d;
           })();
 
+          // -----------------------------
+          // Normalize TASK status to Task.js enum world
+          // Task.js expects: pending | in-progress | paused | paused-problem | completed
+          // and its own setter normalizes some synonyms on save()
+          // -----------------------------
+          function normalizeTaskStatusForTaskModel(s) {
+            if (s == null) return null;
+            const v = String(s).trim().toLowerCase();
+
+            if (
+              ["pending", "todo", "to-do", "planned", "plan", "open"].includes(
+                v,
+              )
+            )
+              return "pending";
+
+            if (
+              [
+                "started",
+                "start",
+                "in progress",
+                "in-progress",
+                "inprogress",
+                "resume",
+                "resumed",
+              ].includes(v)
+            )
+              return "in-progress";
+
+            if (["pause", "paused"].includes(v)) return "paused";
+
+            if (
+              [
+                "paused - problem",
+                "paused-problem",
+                "problem",
+                "blocked",
+                "block",
+                "issue",
+              ].includes(v)
+            )
+              return "paused-problem";
+
+            if (
+              [
+                "finished",
+                "finish",
+                "done",
+                "complete",
+                "completed",
+                "closed",
+              ].includes(v)
+            )
+              return "completed";
+
+            return null;
+          }
+
+          // -----------------------------
+          // Normalize MILESTONE status to task-milestones.js world (lowercase)
+          // STATUS: pending | started | paused | paused - problem | finished
+          // -----------------------------
+          function normalizeMilestoneStatus(s) {
+            if (s == null) return null;
+            const v = String(s).trim().toLowerCase();
+
+            if (v === "planned" || v === "plan") return "pending";
+            if (["complete", "completed", "done"].includes(v))
+              return "finished";
+
+            const allowed = new Set([
+              "pending",
+              "started",
+              "paused",
+              "paused - problem",
+              "finished",
+            ]);
+
+            // also accept "paused-problem" from mobile and map it
+            if (v === "paused-problem") return "paused - problem";
+
+            return allowed.has(v) ? v : null;
+          }
+
+          // -----------------------------
+          // Validate IDs
+          // -----------------------------
           if (!mongoose.isValidObjectId(taskIdStr)) {
             console.warn("[task-update] invalid taskId", {
               taskIdStr,
               entityRef,
             });
+            // still allow ManagerNote creation? no, without taskId it's meaningless
+            return;
+          }
+
+          const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
+
+          // -----------------------------
+          // 1) Update TASK status (load + save => schema setters run)
+          // -----------------------------
+          const newTaskStatus = normalizeTaskStatusForTaskModel(
+            payload?.status,
+          );
+
+          if (!newTaskStatus) {
+            console.warn("[task-update] unrecognized task status", {
+              raw: payload?.status,
+            });
           } else {
-            const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
+            let taskDoc = await Task.findOne({ _id: taskObjectId, $or: orgOr });
 
-            const newStatus = normalizeTaskStatus(payload?.status);
-            const noteText =
-              payload?.note != null ? String(payload.note).trim() : "";
+            // fallback if org scoping doesn't match stored form
+            if (!taskDoc) {
+              taskDoc = await Task.findById(taskObjectId);
+            }
 
-            // 1) Update Task.status
-            if (newStatus) {
-              const r = await Task.updateOne(
-                { _id: taskObjectId, $or: orgOr },
-                {
-                  $set: {
-                    status: newStatus,
-                    updatedAt: new Date(),
-                    updatedBy: actorUserId || undefined,
-                  },
-                },
-              );
-
-              console.log("[task-update] Task.updateOne", {
-                taskId: taskIdStr,
-                status: newStatus,
-                matched: r?.matchedCount,
-                modified: r?.modifiedCount,
-              });
-
-              // fallback by _id only if org filter prevented matching
-              if (r?.matchedCount === 0) {
-                const r2 = await Task.updateOne(
-                  { _id: taskObjectId },
-                  { $set: { status: newStatus, updatedAt: new Date() } },
-                );
-                console.log("[task-update] Task.updateOne fallback(_id only)", {
-                  matched: r2?.matchedCount,
-                  modified: r2?.modifiedCount,
-                });
-              }
+            if (!taskDoc) {
+              console.warn("[task-update] task not found", { taskIdStr });
             } else {
-              console.warn("[task-update] unrecognized status", {
-                raw: payload?.status,
+              taskDoc.status = newTaskStatus; // Task schema setter will normalize if needed
+              taskDoc.updatedAt = new Date();
+
+              // optional audit fields if your schema tolerates them (Mongo will store anyway)
+              taskDoc.updatedBy = req.user?._id || undefined;
+
+              await taskDoc.save();
+
+              console.log("[task-update] Task saved", {
+                taskId: String(taskDoc._id),
+                status: taskDoc.status,
+              });
+            }
+          }
+
+          // -----------------------------
+          // 2) Update TASK MILESTONE status (lowercase)
+          // -----------------------------
+          const newMilestoneStatus = normalizeMilestoneStatus(
+            payload?.milestoneStatus,
+          );
+
+          if (milestoneIdStr && !mongoose.isValidObjectId(milestoneIdStr)) {
+            console.warn("[task-update] invalid milestone id", {
+              milestoneIdStr,
+            });
+          } else if (
+            mongoose.isValidObjectId(milestoneIdStr) &&
+            newMilestoneStatus
+          ) {
+            const msObjectId = new mongoose.Types.ObjectId(milestoneIdStr);
+
+            let msDoc = await TaskMilestone.findOne({
+              _id: msObjectId,
+              taskId: taskObjectId,
+              ...(orgIdStr ? { orgId: orgIdStr } : {}),
+              isDeleted: { $ne: true },
+            });
+
+            // fallback (some milestone docs may store orgId differently or not at all)
+            if (!msDoc) {
+              msDoc = await TaskMilestone.findOne({
+                _id: msObjectId,
+                taskId: taskObjectId,
+                isDeleted: { $ne: true },
               });
             }
 
-            // 2) Update TaskMilestone.status (deliverable)
-            if (mongoose.isValidObjectId(milestoneIdStr)) {
-              const milestoneObjectId = new mongoose.Types.ObjectId(
+            if (!msDoc) {
+              console.warn("[task-update] milestone not found for task", {
                 milestoneIdStr,
-              );
-              const msStatus = normalizeMilestoneStatus(
-                payload?.milestoneStatus,
-              );
+                taskIdStr,
+              });
+            } else {
+              msDoc.status = newMilestoneStatus;
 
-              if (msStatus) {
-                const r = await TaskMilestone.updateOne(
-                  { _id: milestoneObjectId, $or: orgOr },
-                  {
-                    $set: {
-                      status: msStatus,
-                      updatedAt: new Date(),
-                      ...(msStatus.toLowerCase() === "finished"
-                        ? { completedAt: new Date() }
-                        : {}),
-                    },
-                  },
-                );
-
-                console.log("[task-update] TaskMilestone.updateOne", {
-                  milestoneId: milestoneIdStr,
-                  status: msStatus,
-                  matched: r?.matchedCount,
-                  modified: r?.modifiedCount,
-                });
-
-                if (r?.matchedCount === 0) {
-                  const r2 = await TaskMilestone.updateOne(
-                    { _id: milestoneObjectId },
-                    { $set: { status: msStatus, updatedAt: new Date() } },
-                  );
-                  console.log(
-                    "[task-update] TaskMilestone fallback(_id only)",
-                    {
-                      matched: r2?.matchedCount,
-                      modified: r2?.modifiedCount,
-                    },
-                  );
-                }
-              } else {
-                console.warn("[task-update] unrecognized milestoneStatus", {
-                  raw: payload?.milestoneStatus,
-                });
+              // match route behavior: finishing stamps actualEndAt if absent
+              if (newMilestoneStatus === "finished" && !msDoc.actualEndAt) {
+                msDoc.actualEndAt = new Date();
               }
+              if (newMilestoneStatus !== "finished") {
+                // if you want non-finished to clear actual end (route does this on PATCH)
+                msDoc.actualEndAt = null;
+              }
+
+              msDoc.updatedAt = new Date();
+              await msDoc.save();
+
+              console.log("[task-update] TaskMilestone saved", {
+                milestoneId: String(msDoc._id),
+                status: msDoc.status,
+              });
             }
-
-            // 3) ManagerNote (keep working behavior)
-            const projectObjectId = mongoose.isValidObjectId(projectIdStr)
-              ? new mongoose.Types.ObjectId(projectIdStr)
-              : undefined;
-
-            await ManagerNote.create({
-              taskId: taskObjectId,
-              projectId: projectObjectId,
-              orgId: orgIdObj || undefined,
-              at,
-              status: normalizeTaskStatus(payload?.status) || "Pending",
-              note: noteText || "",
-              author: {
-                id: actorUserId || undefined,
-                name: req.user?.name || undefined,
-                email: req.user?.email || undefined,
-              },
-              deletedAt: null,
+          } else if (payload?.milestoneStatus != null && !newMilestoneStatus) {
+            console.warn("[task-update] unrecognized milestoneStatus", {
+              raw: payload?.milestoneStatus,
             });
           }
+
+          // -----------------------------
+          // 3) ManagerNote (already working)
+          // -----------------------------
+          const actorUserId = req.user?._id
+            ? new mongoose.Types.ObjectId(String(req.user._id))
+            : undefined;
+
+          const projectObjectId = mongoose.isValidObjectId(projectIdStr)
+            ? new mongoose.Types.ObjectId(projectIdStr)
+            : undefined;
+
+          await ManagerNote.create({
+            taskId: taskObjectId,
+            projectId: projectObjectId,
+            orgId: orgIdObj || undefined,
+
+            at,
+            status:
+              newTaskStatus || String(payload?.status || "pending").trim(),
+            note: noteText || "",
+
+            author: {
+              id: actorUserId,
+              name: req.user?.name || undefined,
+              email: req.user?.email || undefined,
+            },
+
+            deletedAt: null,
+          });
         } catch (e) {
           console.error("[task-update] failed to apply task update", e);
         }
       }
+
       // ------------------------------------------------------------
       // BIOMETRICS: create/upsert ONE BiometricEnrollmentRequest
       // keyed by sourceOfflineEventId so resync won't create duplicates
