@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-01"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-02"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -601,6 +601,226 @@ router.post(
           }
         } catch (e4) {
           console.error("[user-document] failed to apply vault document", e4);
+        }
+      }
+
+      // ✅ APPLY TASK UPDATES (task status + manager note + milestone/deliverable status)
+      if (eventType === "task-update") {
+        try {
+          const Task = require("../models/Task");
+
+          // Deliverable model (you called it "milestone")
+          let Milestone = null;
+          try {
+            Milestone = require("../models/Milestone");
+          } catch {
+            Milestone = null;
+          }
+
+          // Notes model (like ProjectManagerNote)
+          let TaskManagerNote = null;
+          try {
+            TaskManagerNote = require("../models/TaskManagerNote");
+          } catch {
+            TaskManagerNote = null;
+          }
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const actorId = req.user?._id || null;
+
+          const taskIdStr = String(payload?.taskId || entityRef || "").trim();
+          const projectIdStr = String(payload?.projectId || "").trim();
+          const milestoneIdStr = String(
+            payload?.milestone || payload?.milestoneId || "",
+          ).trim();
+
+          if (!mongoose.isValidObjectId(taskIdStr)) {
+            console.warn("[task-update] invalid taskId", {
+              taskIdStr,
+              entityRef,
+            });
+          } else {
+            const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
+
+            // --- 1) Update Task.status ---
+            // Try to be compatible with different status enums; only set if provided.
+            const statusRaw =
+              payload?.status != null
+                ? String(payload.status).trim().toLowerCase()
+                : "";
+
+            // Common statuses across systems — expand as needed
+            const allowedTaskStatus = new Set([
+              "pending",
+              "not_started",
+              "not-started",
+              "todo",
+              "to-do",
+              "started",
+              "in_progress",
+              "in-progress",
+              "progress",
+              "blocked",
+              "paused",
+              "done",
+              "finished",
+              "complete",
+              "completed",
+              "closed",
+              "cancelled",
+              "canceled",
+            ]);
+
+            const shouldSetTaskStatus =
+              statusRaw && allowedTaskStatus.has(statusRaw);
+
+            if (Task?.updateOne && shouldSetTaskStatus) {
+              await Task.updateOne(
+                { _id: taskObjectId, orgId: orgId2 },
+                {
+                  $set: {
+                    status: statusRaw,
+                    updatedAt: new Date(),
+                    updatedBy: actorId,
+                  },
+                },
+              );
+              console.log(
+                "[task-update] Task.status updated",
+                taskIdStr,
+                "=>",
+                statusRaw,
+              );
+            } else if (statusRaw && !allowedTaskStatus.has(statusRaw)) {
+              console.warn(
+                "[task-update] status not in allowed set (skipped)",
+                { statusRaw, taskIdStr },
+              );
+            }
+
+            // --- 2) Update Milestone status (deliverable) ---
+            const milestoneStatusRaw =
+              payload?.milestoneStatus != null
+                ? String(payload.milestoneStatus).trim().toLowerCase()
+                : "";
+
+            const allowedMilestoneStatus = new Set([
+              "pending",
+              "open",
+              "started",
+              "in_progress",
+              "in-progress",
+              "active",
+              "done",
+              "finished",
+              "complete",
+              "completed",
+              "closed",
+            ]);
+
+            const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
+              ? new mongoose.Types.ObjectId(milestoneIdStr)
+              : null;
+
+            const shouldSetMilestoneStatus =
+              milestoneObjectId &&
+              milestoneStatusRaw &&
+              allowedMilestoneStatus.has(milestoneStatusRaw);
+
+            if (Milestone?.updateOne && shouldSetMilestoneStatus) {
+              await Milestone.updateOne(
+                { _id: milestoneObjectId, orgId: orgId2 },
+                {
+                  $set: {
+                    status: milestoneStatusRaw,
+                    updatedAt: new Date(),
+                    updatedBy: actorId,
+                  },
+                },
+              );
+              console.log(
+                "[task-update] Milestone.status updated",
+                milestoneIdStr,
+                "=>",
+                milestoneStatusRaw,
+              );
+            } else if (
+              milestoneStatusRaw &&
+              milestoneObjectId &&
+              !allowedMilestoneStatus.has(milestoneStatusRaw)
+            ) {
+              console.warn(
+                "[task-update] milestoneStatus not in allowed set (skipped)",
+                {
+                  milestoneStatusRaw,
+                  milestoneIdStr,
+                },
+              );
+            }
+
+            // --- 3) Create/Upsert a TaskManagerNote (history) ---
+            const noteText =
+              payload?.note != null ? String(payload.note).trim() : "";
+            if (TaskManagerNote?.findOneAndUpdate && noteText) {
+              const projectObjectId = mongoose.isValidObjectId(projectIdStr)
+                ? new mongoose.Types.ObjectId(projectIdStr)
+                : undefined;
+
+              const at = payload?.at ? new Date(payload.at) : new Date();
+
+              await TaskManagerNote.findOneAndUpdate(
+                // idempotent: one note per OfflineEvent
+                { orgId: orgId2, sourceOfflineEventId: doc._id },
+                {
+                  $setOnInsert: {
+                    orgId: orgId2,
+                    sourceOfflineEventId: doc._id,
+                    createdAt: new Date(),
+                  },
+                  $set: {
+                    projectId: projectObjectId,
+                    taskId: taskObjectId,
+
+                    // store what was sent so the UI can show “status at time of note”
+                    status: statusRaw || undefined,
+                    milestoneId: milestoneObjectId || undefined,
+                    milestoneStatus: milestoneStatusRaw || undefined,
+
+                    note: noteText,
+                    at,
+
+                    author: {
+                      userId: actorId
+                        ? new mongoose.Types.ObjectId(String(actorId))
+                        : undefined,
+                      name: req.user?.name || undefined,
+                      email: req.user?.email || undefined,
+                    },
+
+                    // keep parity with project notes
+                    uploadedFiles: Array.isArray(doc?.uploadedFiles)
+                      ? doc.uploadedFiles
+                      : [],
+                    createdAtClient: createdAtClient || null,
+
+                    updatedAt: new Date(),
+                  },
+                },
+                { upsert: true, new: true },
+              );
+
+              console.log(
+                "[task-update] TaskManagerNote upserted for task",
+                taskIdStr,
+              );
+            } else if (noteText && !TaskManagerNote) {
+              console.warn(
+                "[task-update] TaskManagerNote model not found; note not persisted",
+              );
+            }
+          }
+        } catch (e5) {
+          console.error("[task-update] failed to apply task update", e5);
         }
       }
 
