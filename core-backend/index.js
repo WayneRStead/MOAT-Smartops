@@ -512,9 +512,15 @@ app.use("/api/uploads", express.static(uploadsRoot, staticOpts));
 
 /* --------------------------- Protected Routers -------------------------- */
 
-// ✅ MOBILE ROUTER: allow bootstrap BEFORE org selection.
-// The router itself handles which endpoints need org (your routes/mobile.js already does that).
+// ✅ MOBILE ROUTER
 const mobileRouter = require("./routes/mobile");
+
+// ✅ PUBLIC signed download endpoint (NO TOKEN) so <img src="..."> works.
+// This must be mounted BEFORE the protected /api/mobile mount.
+app.use("/mobile/offline-files", mobileRouter);
+app.use("/api/mobile/offline-files", mobileRouter);
+
+// ✅ Everything else remains protected (requires token)
 app.use(
   "/mobile",
   requireAuth,
