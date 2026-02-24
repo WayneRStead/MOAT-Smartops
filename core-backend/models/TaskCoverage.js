@@ -4,7 +4,12 @@ const mongoose = require("mongoose");
 const TaskCoverageSchema = new mongoose.Schema(
   {
     // orgId can be either string or ObjectId depending on how the org model evolved
-    orgId: { type: mongoose.Schema.Types.Mixed, index: true },
+    orgId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Org",
+      required: true,
+      index: true,
+    },
 
     taskId: {
       type: mongoose.Schema.Types.ObjectId,
