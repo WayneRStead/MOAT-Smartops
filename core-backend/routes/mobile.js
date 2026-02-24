@@ -17,7 +17,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-19-01"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-01"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -571,9 +571,11 @@ router.post(
               const now = new Date();
 
               const body = {
-                orgId: mongoose.Types.ObjectId.isValid(String(orgId))
-                  ? new mongoose.Types.ObjectId(String(orgId))
-                  : undefined,
+                orgId:
+                  req.orgObjectId ||
+                  (mongoose.Types.ObjectId.isValid(String(orgId))
+                    ? new mongoose.Types.ObjectId(String(orgId))
+                    : undefined),
 
                 title,
                 folder: "",
