@@ -879,13 +879,13 @@ router.post(
       if (eventType === "activity-log") {
         try {
           const Task = require("../models/Task");
+
           const orgIdRaw = req.orgObjectId || req.user?.orgId || null;
           const orgIdStr = orgIdRaw != null ? String(orgIdRaw).trim() : "";
           const orgIdObj = mongoose.isValidObjectId(orgIdStr)
             ? new mongoose.Types.ObjectId(orgIdStr)
             : null;
 
-          // Match orgId stored as ObjectId OR string OR missing
           const orgOr = [];
           if (orgIdObj) orgOr.push({ orgId: orgIdObj });
           if (orgIdStr) orgOr.push({ orgId: orgIdStr });
@@ -900,17 +900,16 @@ router.post(
           } else {
             const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
 
-            // Try org-scoped first, fallback to byId
             let taskDoc = await Task.findOne({ _id: taskObjectId, $or: orgOr });
             if (!taskDoc) taskDoc = await Task.findById(taskObjectId);
 
             if (!taskDoc) {
               console.warn("[activity-log] task not found", { taskIdStr });
             } else {
-              // milestone/deliverable id (optional)
               const milestoneIdStr = String(
                 payload?.milestone || payload?.milestoneId || "",
               ).trim();
+
               const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
                 ? new mongoose.Types.ObjectId(milestoneIdStr)
                 : undefined;
@@ -928,25 +927,38 @@ router.post(
                 return Number.isNaN(d.getTime()) ? new Date() : d;
               })();
 
-              // ✅ Attach uploadedFiles to Task.attachments using the offline-files URL
               const uploaded = Array.isArray(doc?.uploadedFiles)
                 ? doc.uploadedFiles
                 : [];
+
+              if (!uploaded.length) {
+                console.warn(
+                  "[activity-log] no uploadedFiles on OfflineEvent",
+                  {
+                    offlineEventId: String(doc?._id),
+                    taskId: taskIdStr,
+                  },
+                );
+              }
+
               taskDoc.attachments = Array.isArray(taskDoc.attachments)
                 ? taskDoc.attachments
                 : [];
 
+              // IMPORTANT: many frontends expect /api prefix
+              // and expect mime fields named mime or contentType.
               for (const f of uploaded) {
                 const fid = String(f?.fileId || "").trim();
                 if (!mongoose.isValidObjectId(fid)) continue;
 
-                // This is served by: GET /api/mobile/offline-files/:fileId
-                const url = `/mobile/offline-files/${fid}`;
+                const apiUrl = `/api/mobile/offline-files/${fid}`;
 
                 taskDoc.attachments.push({
                   filename: f.filename || "offline_upload",
-                  url,
+                  url: apiUrl,
+                  mobileUrl: apiUrl, // extra compat
                   mime: f.contentType || "",
+                  contentType: f.contentType || "",
                   size: typeof f.size === "number" ? f.size : undefined,
                   uploadedBy:
                     req.user?.name ||
@@ -960,7 +972,6 @@ router.post(
                 });
               }
 
-              // ✅ Add log row (what your task screen history uses)
               taskDoc.actualDurationLog = Array.isArray(
                 taskDoc.actualDurationLog,
               )
@@ -972,8 +983,11 @@ router.post(
                   ? new mongoose.Types.ObjectId(String(req.user._id))
                   : undefined;
 
+              // Use action values the rest of the system already understands
+              const action = uploaded.length ? "photo" : "photo";
+
               taskDoc.actualDurationLog.push({
-                action: uploaded.length ? "photo" : "note",
+                action,
                 at,
                 userId: actorId,
                 actorName: req.user?.name,
@@ -991,9 +1005,12 @@ router.post(
 
               console.log("[activity-log] applied to task", {
                 taskId: String(taskDoc._id),
-                uploads: uploaded.length,
+                uploadedCount: uploaded.length,
                 noteLen: noteText.length,
                 milestoneId: milestoneIdStr || null,
+                firstUrl: uploaded?.[0]?.fileId
+                  ? `/api/mobile/offline-files/${uploaded[0].fileId}`
+                  : null,
               });
             }
           }
