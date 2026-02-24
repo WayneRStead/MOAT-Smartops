@@ -1,50 +1,81 @@
 // core-backend/models/TaskCoverage.js
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const TaskCoverageSchema = new mongoose.Schema(
   {
-    orgId: { type: mongoose.Schema.Types.Mixed, index: true }, // string or ObjectId (to match your org model flexibility)
-    taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task', required: true, index: true },
-    projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', index: true },
+    // orgId can be either string or ObjectId depending on how the org model evolved
+    orgId: { type: mongoose.Schema.Types.Mixed, index: true },
 
-    // When this coverage applies (day bucket). If not provided, server can derive from createdAt.
+    taskId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Task",
+      required: true,
+      index: true,
+    },
+
+    projectId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Project",
+      index: true,
+    },
+
+    // ✅ Link back to the offline event so re-sync doesn't duplicate coverage docs
+    sourceOfflineEventId: {
+      type: mongoose.Schema.Types.ObjectId,
+      index: true,
+    },
+
+    // When this coverage applies (day bucket). If not provided, UI can fall back to createdAt.
     date: { type: Date, index: true },
 
-    // A normalized GeoJSON payload representing the “productivity” area/track for that day.
-    // We’ll usually store MultiPolygon for areas; may also accept LineString (tracks) and compute area server-side.
+    // Normalized GeoJSON-like geometry
     geometry: {
-      type: { type: String, enum: ['Polygon', 'MultiPolygon', 'LineString', 'MultiLineString'], required: true },
+      type: {
+        type: String,
+        enum: ["Polygon", "MultiPolygon", "LineString", "MultiLineString"],
+        required: true,
+      },
       coordinates: { type: Array, required: true },
     },
 
-    // Optional stats the uploader/parser computed (helps quick listing)
+    // Optional stats for quick UI listing
     stats: {
-      areaSqM: { type: Number },     // computed area in square meters (if polygon)
-      lengthM: { type: Number },     // computed length in meters (if line)
-      points:  { type: Number },     // raw vertex count
-      fences:  { type: Number },     // number of rings/tracks parsed
+      areaSqM: { type: Number },
+      lengthM: { type: Number },
+      points: { type: Number },
+      fences: { type: Number },
     },
 
-    // Where it came from and who did it
-    source: { type: String, enum: ['mobile-track', 'file-upload', 'inspection', 'manual', 'api'], default: 'file-upload', index: true },
+    // Where it came from
+    source: {
+      type: String,
+      enum: ["mobile-track", "file-upload", "inspection", "manual", "api"],
+      default: "file-upload",
+      index: true,
+    },
+
     uploadedBy: {
-      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        index: true,
+      },
       name: String,
       email: String,
     },
 
-    // Keep a reference to original file if any (for audit/download)
+    // Original file reference (for audit / download)
     fileRef: {
-      url: String,     // e.g. /files/coverage/tasks/<...>.kml|kmz|geojson
-      name: String,    // original filename
+      url: String,
+      name: String,
       mime: String,
       size: Number,
     },
 
     // Small free-form note
-    note: { type: String, default: '' },
+    note: { type: String, default: "" },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Helpful compound indexes for fast lookups in UI
@@ -52,4 +83,12 @@ TaskCoverageSchema.index({ orgId: 1, taskId: 1, date: -1, createdAt: -1 });
 TaskCoverageSchema.index({ orgId: 1, projectId: 1, date: -1 });
 TaskCoverageSchema.index({ createdAt: -1 });
 
-module.exports = mongoose.models.TaskCoverage || mongoose.model('TaskCoverage', TaskCoverageSchema);
+// ✅ Prevent duplicates on re-sync of the same offline event
+TaskCoverageSchema.index(
+  { orgId: 1, taskId: 1, sourceOfflineEventId: 1 },
+  { unique: true, sparse: true },
+);
+
+module.exports =
+  mongoose.models.TaskCoverage ||
+  mongoose.model("TaskCoverage", TaskCoverageSchema);

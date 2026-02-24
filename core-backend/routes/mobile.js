@@ -1072,6 +1072,120 @@ router.post(
                 sourceOfflineEventId: doc._id,
               });
 
+              // ✅ APPLY ACTIVITY FENCE -> TaskCoverage (from payload.fenceJson)
+              try {
+                const fenceRaw = payload?.fenceJson;
+
+                if (fenceRaw) {
+                  const TaskCoverage = require("../models/TaskCoverage");
+
+                  let fenceObj = null;
+                  try {
+                    fenceObj =
+                      typeof fenceRaw === "string"
+                        ? JSON.parse(fenceRaw)
+                        : fenceRaw;
+                  } catch {
+                    fenceObj = null;
+                  }
+
+                  const pts = Array.isArray(fenceObj?.points)
+                    ? fenceObj.points
+                    : [];
+                  if (pts.length >= 2) {
+                    const coords = pts
+                      .map((p) => [Number(p.longitude), Number(p.latitude)])
+                      .filter(
+                        ([lng, lat]) =>
+                          Number.isFinite(lng) && Number.isFinite(lat),
+                      );
+
+                    if (coords.length >= 2) {
+                      const t = String(fenceObj?.type || "polyline")
+                        .toLowerCase()
+                        .trim();
+
+                      let geometry = null;
+
+                      if (t === "polygon") {
+                        const ring = coords.slice();
+                        const first = ring[0];
+                        const last = ring[ring.length - 1];
+                        if (
+                          first &&
+                          last &&
+                          (first[0] !== last[0] || first[1] !== last[1])
+                        ) {
+                          ring.push(first);
+                        }
+
+                        if (ring.length >= 4) {
+                          geometry = {
+                            type: "MultiPolygon",
+                            coordinates: [[[ring]]],
+                          };
+                        }
+                      } else {
+                        geometry = {
+                          type: "MultiLineString",
+                          coordinates: [coords],
+                        };
+                      }
+
+                      if (geometry) {
+                        const orgId = req.orgObjectId || req.user?.orgId;
+
+                        // ✅ use offline event id for dedupe if you add it to the model
+                        const sourceOfflineEventId = doc?._id;
+
+                        await TaskCoverage.findOneAndUpdate(
+                          { orgId, taskId: taskObjectId, sourceOfflineEventId },
+                          {
+                            $setOnInsert: {
+                              orgId,
+                              taskId: taskObjectId,
+                              projectId: taskDoc?.projectId || undefined,
+                              date: at,
+                              geometry,
+                              stats: { points: coords.length, fences: 1 },
+                              source: "mobile-track",
+                              uploadedBy: {
+                                userId:
+                                  req.user?._id &&
+                                  mongoose.isValidObjectId(String(req.user._id))
+                                    ? new mongoose.Types.ObjectId(
+                                        String(req.user._id),
+                                      )
+                                    : undefined,
+                                name: req.user?.name || undefined,
+                                email: req.user?.email || undefined,
+                              },
+                              note: String(payload?.note || "").trim(),
+                            },
+                          },
+                          { upsert: true, new: true },
+                        );
+
+                        console.log(
+                          "[activity-log] TaskCoverage saved from fenceJson",
+                          {
+                            taskId: String(taskObjectId),
+                            type: geometry.type,
+                            points: coords.length,
+                            sourceOfflineEventId: String(sourceOfflineEventId),
+                          },
+                        );
+                      }
+                    }
+                  }
+                }
+              } catch (eFence) {
+                console.error(
+                  "[activity-log] failed to save TaskCoverage from fenceJson",
+                  eFence,
+                );
+              }
+
               taskDoc.updatedAt = new Date();
               await taskDoc.save();
 
