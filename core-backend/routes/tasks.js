@@ -1,6 +1,8 @@
 // core-backend/routes/tasks.js
 // ✅ DROP-IN replacement: adds planning/gantt fields + project planning bulk endpoints
 // Keeps all existing behavior (visibility, logs, attachments to GridFS, geofences, etc.)
+// ✅ IMPORTANT: task.status is now consistently LOWERCASE to match Task model enum:
+//    pending | in-progress | paused | paused-problem | completed
 
 const express = require("express");
 const mongoose = require("mongoose");
@@ -24,7 +26,8 @@ router.post("/_ping", (_req, res) => res.json({ ok: true }));
 /* ------------------------- Helpers ------------------------- */
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
-const OID = (v) => (isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
+const OID = (v) =>
+  isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined;
 
 function parseDate(v) {
   if (!v) return undefined;
@@ -41,11 +44,13 @@ function numOrUndef(v) {
 // Accepts: id string, object with {_id|id|value|userId}, array (first item)
 function extractId(maybe) {
   if (!maybe) return undefined;
-  if (typeof maybe === "string" && isId(maybe)) return new mongoose.Types.ObjectId(maybe);
+  if (typeof maybe === "string" && isId(maybe))
+    return new mongoose.Types.ObjectId(maybe);
   if (Array.isArray(maybe) && maybe.length) return extractId(maybe[0]);
   if (typeof maybe === "object") {
     const cand = maybe._id || maybe.id || maybe.value || maybe.userId;
-    if (typeof cand === "string" && isId(cand)) return new mongoose.Types.ObjectId(cand);
+    if (typeof cand === "string" && isId(cand))
+      return new mongoose.Types.ObjectId(cand);
   }
   return undefined;
 }
@@ -62,32 +67,74 @@ function allowRoles(...roles) {
   };
 }
 
-const getRole = (req) => (req.user?.role || req.user?.claims?.role || "user");
-const isAdminRole = (role) => ["admin", "superadmin"].includes(String(role).toLowerCase());
+const getRole = (req) => req.user?.role || req.user?.claims?.role || "user";
+const isAdminRole = (role) =>
+  ["admin", "superadmin"].includes(String(role).toLowerCase());
 const isAdmin = (req) => isAdminRole(getRole(req));
 
+/**
+ * ✅ Canonical status outputs MUST match Task model enum:
+ *   pending | in-progress | paused | paused-problem | completed
+ */
 function normalizeStatus(s) {
   if (s == null) return undefined;
 
   const raw = String(s).trim();
   const v = raw.toLowerCase().replace(/\s+/g, "");
 
-  if (["pending", "todo", "tbd", "planned", "plan", "open"].includes(v)) return "Pending";
-  if (["started", "inprogress", "in-progress", "active", "running"].includes(v)) return "Started";
-  if (["paused", "pause", "onhold", "hold"].includes(v)) return "Paused";
-  if (["paused-problem", "pausedproblem", "problem", "blocked", "blocker", "issue"].includes(v)) return "Paused-Problem";
-  if (["finished", "finish", "done", "complete", "completed", "closed"].includes(v)) return "Finished";
+  if (["pending", "todo", "tbd", "planned", "plan", "open"].includes(v))
+    return "pending";
+  if (
+    [
+      "started",
+      "inprogress",
+      "in-progress",
+      "active",
+      "running",
+      "resume",
+      "resumed",
+    ].includes(v)
+  )
+    return "in-progress";
+  if (["paused", "pause", "onhold", "hold"].includes(v)) return "paused";
+  if (
+    [
+      "paused-problem",
+      "pausedproblem",
+      "problem",
+      "blocked",
+      "blocker",
+      "issue",
+    ].includes(v)
+  )
+    return "paused-problem";
+  if (
+    ["finished", "finish", "done", "complete", "completed", "closed"].includes(
+      v,
+    )
+  )
+    return "completed";
 
-  // If user passes one of the exact values already, keep it
-  if (["Pending", "Started", "Paused", "Paused-Problem", "Finished"].includes(raw)) return raw;
+  // If client already sends canonical, accept it
+  if (
+    [
+      "pending",
+      "in-progress",
+      "paused",
+      "paused-problem",
+      "completed",
+    ].includes(v)
+  )
+    return v;
 
-  // Fallback: leave original
-  return raw;
+  // Don’t store arbitrary garbage
+  return undefined;
 }
 
 /* ----------------------- Org helpers ----------------------- */
 
-const wantsObjectId = (model, p) => model?.schema?.path(p)?.instance === "ObjectId";
+const wantsObjectId = (model, p) =>
+  model?.schema?.path(p)?.instance === "ObjectId";
 function hasPath(model, p) {
   return !!(model && model.schema && model.schema.path && model.schema.path(p));
 }
@@ -102,7 +149,8 @@ function orgScope(model, req) {
   if (!raw) return {};
   const s = String(raw);
   if (!mongoose.Types.ObjectId.isValid(s)) return {};
-  if (wantsObjectId(model, "orgId")) return { orgId: new mongoose.Types.ObjectId(s) };
+  if (wantsObjectId(model, "orgId"))
+    return { orgId: new mongoose.Types.ObjectId(s) };
   return { orgId: s };
 }
 
@@ -130,14 +178,19 @@ function ensureOrgOnDoc(model, doc, req) {
 /* ----------------------- Time helpers ---------------------- */
 
 function computeActualMinutes(log = []) {
-  const entries = [...(log || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
+  const entries = [...(log || [])].sort(
+    (a, b) => new Date(a.at) - new Date(b.at),
+  );
   let totalMs = 0;
   let startedAt = null;
   for (const e of entries) {
     const t = new Date(e.at).getTime();
     if ((e.action === "start" || e.action === "resume") && startedAt == null) {
       startedAt = t;
-    } else if ((e.action === "pause" || e.action === "complete") && startedAt != null) {
+    } else if (
+      (e.action === "pause" || e.action === "complete") &&
+      startedAt != null
+    ) {
       totalMs += Math.max(0, t - startedAt);
       startedAt = null;
     }
@@ -156,6 +209,9 @@ function ensureLogIds(taskDoc) {
   return patched;
 }
 
+/**
+ * ✅ Derived status from latest log entry (except photo/fence)
+ */
 function setStatusFromLog(taskDoc) {
   const log = [...(taskDoc.actualDurationLog || [])]
     .sort((a, b) => new Date(a.at) - new Date(b.at))
@@ -164,9 +220,10 @@ function setStatusFromLog(taskDoc) {
   if (!log.length) return;
 
   const last = log[log.length - 1];
-  if (last.action === "start" || last.action === "resume") taskDoc.status = "Started";
-  if (last.action === "pause") taskDoc.status = "Paused";
-  if (last.action === "complete") taskDoc.status = "Finished";
+  if (last.action === "start" || last.action === "resume")
+    taskDoc.status = "in-progress";
+  if (last.action === "pause") taskDoc.status = "paused";
+  if (last.action === "complete") taskDoc.status = "completed";
 }
 
 /* ---------------- normalize output ---------------- */
@@ -196,8 +253,12 @@ function normalizeOut(t) {
     actualDurationMinutes: computeActualMinutes(obj.actualDurationLog || []),
     isBlocked: (obj.dependentTaskIds?.length || 0) > 0,
     visibilityMode: obj.visibilityMode || "org",
-    assignedUserIds: Array.isArray(obj.assignedUserIds) ? obj.assignedUserIds : [],
-    assignedGroupIds: Array.isArray(obj.assignedGroupIds) ? obj.assignedGroupIds : [],
+    assignedUserIds: Array.isArray(obj.assignedUserIds)
+      ? obj.assignedUserIds
+      : [],
+    assignedGroupIds: Array.isArray(obj.assignedGroupIds)
+      ? obj.assignedGroupIds
+      : [],
   };
 }
 
@@ -212,7 +273,11 @@ function normalizeMode(mode) {
 function buildVisibilityFilter(req) {
   if (isAdmin(req)) return {};
 
-  const me = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+  const me =
+    OID(req.user?._id) ||
+    OID(req.user?.id) ||
+    OID(req.user?.sub) ||
+    OID(req.user?.userId);
   const myGroups = (req.myGroupIds || []).map((g) => OID(g)).filter(Boolean);
 
   return {
@@ -229,7 +294,10 @@ function buildVisibilityFilter(req) {
       ...(myGroups.length
         ? [
             { visibilityMode: "groups", assignedGroupIds: { $in: myGroups } },
-            { visibilityMode: "assignees+groups", assignedGroupIds: { $in: myGroups } },
+            {
+              visibilityMode: "assignees+groups",
+              assignedGroupIds: { $in: myGroups },
+            },
             { visibilityMode: "groups", groupId: { $in: myGroups } }, // legacy single group
             { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
           ]
@@ -240,7 +308,11 @@ function buildVisibilityFilter(req) {
 
 async function assertCanSeeTaskOrAdmin(req, taskId) {
   if (isAdmin(req)) return true;
-  const filter = { _id: OID(taskId), ...orgScope(Task, req), ...buildVisibilityFilter(req) };
+  const filter = {
+    _id: OID(taskId),
+    ...orgScope(Task, req),
+    ...buildVisibilityFilter(req),
+  };
   const exists = await Task.exists(filter);
   return !!exists;
 }
@@ -261,9 +333,14 @@ function sanitizeVisibilityInput(reqBody, roleIsAdmin) {
   const out = {};
   if (reqBody.visibilityMode != null) {
     let v = normalizeMode(reqBody.visibilityMode);
-    if (["org", "assignees", "groups", "assignees+groups", "admins"].includes(v)) {
+    if (
+      ["org", "assignees", "groups", "assignees+groups", "admins"].includes(v)
+    ) {
       if (v === "admins" && !roleIsAdmin) {
-        throw Object.assign(new Error("Only admins can set admins visibility"), { status: 403 });
+        throw Object.assign(
+          new Error("Only admins can set admins visibility"),
+          { status: 403 },
+        );
       }
       out.visibilityMode = v;
     }
@@ -298,25 +375,32 @@ function applyAssignees(taskDoc, objIdArray) {
 function applyPlanningFields(taskDoc, body = {}) {
   // plannedStartAt / plannedEndAt
   if ("plannedStartAt" in body || "planStartAt" in body) {
-    taskDoc.plannedStartAt = parseDate(body.plannedStartAt ?? body.planStartAt) || undefined;
+    taskDoc.plannedStartAt =
+      parseDate(body.plannedStartAt ?? body.planStartAt) || undefined;
   }
   if ("plannedEndAt" in body || "planEndAt" in body) {
-    taskDoc.plannedEndAt = parseDate(body.plannedEndAt ?? body.planEndAt) || undefined;
+    taskDoc.plannedEndAt =
+      parseDate(body.plannedEndAt ?? body.planEndAt) || undefined;
   }
 
   // Workstream/lane
-  if ("workstreamId" in body) taskDoc.workstreamId = OID(body.workstreamId) || null;
-  if ("workstreamName" in body) taskDoc.workstreamName = String(body.workstreamName || "");
+  if ("workstreamId" in body)
+    taskDoc.workstreamId = OID(body.workstreamId) || null;
+  if ("workstreamName" in body)
+    taskDoc.workstreamName = String(body.workstreamName || "");
 
   // Ordering / WBS / phase / discipline
-  if ("rowOrder" in body) taskDoc.rowOrder = numOrUndef(body.rowOrder) ?? taskDoc.rowOrder;
-  if ("laneOrder" in body) taskDoc.laneOrder = numOrUndef(body.laneOrder) ?? taskDoc.laneOrder;
+  if ("rowOrder" in body)
+    taskDoc.rowOrder = numOrUndef(body.rowOrder) ?? taskDoc.rowOrder;
+  if ("laneOrder" in body)
+    taskDoc.laneOrder = numOrUndef(body.laneOrder) ?? taskDoc.laneOrder;
   if ("wbs" in body) taskDoc.wbs = String(body.wbs || "");
   if ("phase" in body) taskDoc.phase = String(body.phase || "");
   if ("discipline" in body) taskDoc.discipline = String(body.discipline || "");
 
   // createdFromPlan flag
-  if ("createdFromPlan" in body) taskDoc.createdFromPlan = !!body.createdFromPlan;
+  if ("createdFromPlan" in body)
+    taskDoc.createdFromPlan = !!body.createdFromPlan;
 }
 
 /* ---------------- Geofence helpers (unchanged) ---------------- */
@@ -354,7 +438,10 @@ function collectTaskFences(taskOrProject) {
   if (src.locationGeoFence?.lat != null && src.locationGeoFence?.lng != null) {
     fences.push({
       type: "circle",
-      center: { lat: Number(src.locationGeoFence.lat), lng: Number(src.locationGeoFence.lng) },
+      center: {
+        lat: Number(src.locationGeoFence.lat),
+        lng: Number(src.locationGeoFence.lng),
+      },
       radius: Number(src.locationGeoFence.radius || 50),
     });
   }
@@ -366,7 +453,11 @@ function collectTaskFences(taskOrProject) {
           center: { lat: Number(f.center.lat), lng: Number(f.center.lng) },
           radius: Number(f.radius),
         });
-      } else if (f?.type === "polygon" && Array.isArray(f.polygon) && f.polygon.length >= 3) {
+      } else if (
+        f?.type === "polygon" &&
+        Array.isArray(f.polygon) &&
+        f.polygon.length >= 3
+      ) {
         fences.push({ type: "polygon", ring: f.polygon });
       }
     }
@@ -388,8 +479,11 @@ function extractKMLFromKMZ(buffer) {
   try {
     const zip = new AdmZip(buffer);
     const entries = zip.getEntries();
-    const thePreferred = entries.find((e) => /(^|\/)doc\.kml$/i.test(e.entryName));
-    const kmlEntry = thePreferred || entries.find((e) => /\.kml$/i.test(e.entryName));
+    const thePreferred = entries.find((e) =>
+      /(^|\/)doc\.kml$/i.test(e.entryName),
+    );
+    const kmlEntry =
+      thePreferred || entries.find((e) => /\.kml$/i.test(e.entryName));
     if (!kmlEntry) return null;
     return kmlEntry.getData().toString("utf8");
   } catch {
@@ -414,7 +508,11 @@ function parseGeoJSONToFences(buf, defaultRadius = 50) {
   function addGeom(geom) {
     if (!geom || !geom.type) return;
     const t = geom.type;
-    if (t === "Polygon" && Array.isArray(geom.coordinates) && geom.coordinates.length) {
+    if (
+      t === "Polygon" &&
+      Array.isArray(geom.coordinates) &&
+      geom.coordinates.length
+    ) {
       const outer = geom.coordinates[0];
       if (Array.isArray(outer) && outer.length >= 3) {
         fences.push({
@@ -432,7 +530,11 @@ function parseGeoJSONToFences(buf, defaultRadius = 50) {
           });
         }
       }
-    } else if (t === "Point" && Array.isArray(geom.coordinates) && geom.coordinates.length >= 2) {
+    } else if (
+      t === "Point" &&
+      Array.isArray(geom.coordinates) &&
+      geom.coordinates.length >= 2
+    ) {
       const [lng, lat] = geom.coordinates;
       fences.push({
         type: "circle",
@@ -454,22 +556,38 @@ function parseGeoJSONToFences(buf, defaultRadius = 50) {
 function parseKMLToFences(text, defaultRadius = 50) {
   const fences = [];
   const lower = text.toLowerCase();
-  const polyRegex = /<polygon[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/polygon>/gi;
+  const polyRegex =
+    /<polygon[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/polygon>/gi;
   let m;
   while ((m = polyRegex.exec(lower)) !== null) {
     const pairs = m[1]
       .trim()
       .split(/\s+/)
       .map((p) => p.split(",").slice(0, 2).map(Number))
-      .filter((a) => a.length === 2 && Number.isFinite(a[0]) && Number.isFinite(a[1]));
-    if (pairs.length >= 3) fences.push({ type: "polygon", polygon: pairs.map(([lng, lat]) => [lng, lat]) });
+      .filter(
+        (a) => a.length === 2 && Number.isFinite(a[0]) && Number.isFinite(a[1]),
+      );
+    if (pairs.length >= 3)
+      fences.push({
+        type: "polygon",
+        polygon: pairs.map(([lng, lat]) => [lng, lat]),
+      });
   }
-  const ptRegex = /<point[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/point>/gi;
+  const ptRegex =
+    /<point[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>[\s\S]*?<\/point>/gi;
   while ((m = ptRegex.exec(lower)) !== null) {
     const nums = m[1].trim().split(/,\s*/).slice(0, 2).map(Number);
-    if (nums.length === 2 && Number.isFinite(nums[0]) && Number.isFinite(nums[1])) {
+    if (
+      nums.length === 2 &&
+      Number.isFinite(nums[0]) &&
+      Number.isFinite(nums[1])
+    ) {
       const [lng, lat] = nums;
-      fences.push({ type: "circle", center: { lat, lng }, radius: Number(defaultRadius) });
+      fences.push({
+        type: "circle",
+        center: { lat, lng },
+        radius: Number(defaultRadius),
+      });
     }
   }
   return fences;
@@ -491,7 +609,14 @@ router.get("/planning", requireAuth, async (req, res) => {
     const filter = andFilters(base, buildVisibilityFilter(req));
 
     const rows = await Task.find(filter)
-      .sort({ rowOrder: 1, laneOrder: 1, plannedStartAt: 1, startDate: 1, plannedEndAt: 1, dueAt: 1 })
+      .sort({
+        rowOrder: 1,
+        laneOrder: 1,
+        plannedStartAt: 1,
+        startDate: 1,
+        plannedEndAt: 1,
+        dueAt: 1,
+      })
       .lean();
 
     res.json(rows.map(normalizeOut));
@@ -505,72 +630,94 @@ router.get("/planning", requireAuth, async (req, res) => {
  * PUT /tasks/planning?projectId=...
  * Bulk-save planning edits coming from Gantt.
  */
-router.put("/planning", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-  try {
-    const pid = OID(req.query.projectId);
-    if (!pid) return res.status(400).json({ error: "projectId required" });
+router.put(
+  "/planning",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const pid = OID(req.query.projectId);
+      if (!pid) return res.status(400).json({ error: "projectId required" });
 
-    const items = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
-    if (!items.length) return res.status(400).json({ error: "tasks[] required" });
+      const items = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+      if (!items.length)
+        return res.status(400).json({ error: "tasks[] required" });
 
-    const proj = await Project.findOne({ _id: pid, ...orgScope(Project, req) }).session(session);
-    if (!proj) return res.status(404).json({ error: "Project not found" });
+      const proj = await Project.findOne({
+        _id: pid,
+        ...orgScope(Project, req),
+      }).session(session);
+      if (!proj) return res.status(404).json({ error: "Project not found" });
 
-    const updatedIds = [];
+      const updatedIds = [];
 
-    for (const it of items) {
-      const tid = OID(it._id || it.id);
-      if (!tid) continue;
+      for (const it of items) {
+        const tid = OID(it._id || it.id);
+        if (!tid) continue;
 
-      const canSee = await assertCanSeeTaskOrAdmin(req, tid);
-      if (!canSee) continue;
+        const canSee = await assertCanSeeTaskOrAdmin(req, tid);
+        if (!canSee) continue;
 
-      const t = await Task.findOne({ _id: tid, projectId: pid, ...orgScope(Task, req) }).session(session);
-      if (!t) continue;
+        const t = await Task.findOne({
+          _id: tid,
+          projectId: pid,
+          ...orgScope(Task, req),
+        }).session(session);
+        if (!t) continue;
 
-      if ("title" in it && it.title != null) t.title = String(it.title).trim();
-      if ("description" in it && it.description != null) t.description = String(it.description);
+        if ("title" in it && it.title != null)
+          t.title = String(it.title).trim();
+        if ("description" in it && it.description != null)
+          t.description = String(it.description);
 
-      applyPlanningFields(t, it);
+        applyPlanningFields(t, it);
 
-      if ("startDate" in it || "startAt" in it) {
-        t.startDate = parseDate(it.startDate ?? it.startAt) || t.startDate;
-      }
-      if ("dueAt" in it || "dueDate" in it || "endDate" in it) {
-        const d = parseDate(it.dueAt ?? it.dueDate ?? it.endDate);
-        if (d) {
-          t.dueAt = d;
-          t.dueDate = d;
+        if ("startDate" in it || "startAt" in it) {
+          t.startDate = parseDate(it.startDate ?? it.startAt) || t.startDate;
         }
+        if ("dueAt" in it || "dueDate" in it || "endDate" in it) {
+          const d = parseDate(it.dueAt ?? it.dueDate ?? it.endDate);
+          if (d) {
+            t.dueAt = d;
+            t.dueDate = d;
+          }
+        }
+
+        if (
+          (t.plannedStartAt || t.plannedEndAt) &&
+          t.createdFromPlan !== true
+        ) {
+          if ("createdFromPlan" in it) t.createdFromPlan = !!it.createdFromPlan;
+        }
+
+        if (!ensureOrgOnDoc(Task, t, req)) continue;
+
+        await t.save({ session });
+        updatedIds.push(t._id);
       }
 
-      if ((t.plannedStartAt || t.plannedEndAt) && t.createdFromPlan !== true) {
-        if ("createdFromPlan" in it) t.createdFromPlan = !!it.createdFromPlan;
-      }
+      await session.commitTransaction();
+      session.endSession();
 
-      if (!ensureOrgOnDoc(Task, t, req)) continue;
+      const fresh = await Task.find({ _id: { $in: updatedIds } })
+        .sort({ rowOrder: 1, laneOrder: 1, plannedStartAt: 1, startDate: 1 })
+        .lean();
 
-      await t.save({ session });
-      updatedIds.push(t._id);
+      res.json({
+        ok: true,
+        updated: updatedIds.length,
+        tasks: fresh.map(normalizeOut),
+      });
+    } catch (e) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error("PUT /tasks/planning error:", e);
+      res.status(500).json({ error: "Server error" });
     }
-
-    await session.commitTransaction();
-    session.endSession();
-
-    const fresh = await Task.find({ _id: { $in: updatedIds } })
-      .sort({ rowOrder: 1, laneOrder: 1, plannedStartAt: 1, startDate: 1 })
-      .lean();
-
-    res.json({ ok: true, updated: updatedIds.length, tasks: fresh.map(normalizeOut) });
-  } catch (e) {
-    await session.abortTransaction();
-    session.endSession();
-    console.error("PUT /tasks/planning error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+  },
+);
 
 /* ---------------------------- LIST ---------------------------- */
 /**
@@ -602,43 +749,49 @@ router.get("/", requireAuth, async (req, res) => {
       includeDeleted,
     } = req.query;
 
-    // ✅ FIXED: orgScope signature must be orgScope(Task, req)
     const base = { ...orgScope(Task, req) };
 
     // Validate projectId/groupId if provided (no longer required)
-    if (projectId && !isId(projectId)) {
+    if (projectId && !isId(projectId))
       return res.status(400).json({ error: "bad projectId" });
-    }
-    if (groupId && !isId(groupId)) {
+    if (groupId && !isId(groupId))
       return res.status(400).json({ error: "bad groupId" });
-    }
-    if (userId && !isId(userId)) {
+    if (userId && !isId(userId))
       return res.status(400).json({ error: "bad userId" });
-    }
 
     // Soft delete filter (default: hide)
     if (!isAdmin(req)) {
       base.isDeleted = { $ne: true };
     } else {
-      if (String(includeDeleted || "").toLowerCase() !== "true") {
+      if (String(includeDeleted || "").toLowerCase() !== "true")
         base.isDeleted = { $ne: true };
-      }
     }
 
     if (q) {
-      base.$or = [{ title: new RegExp(q, "i") }, { description: new RegExp(q, "i") }, { tags: String(q) }];
+      base.$or = [
+        { title: new RegExp(q, "i") },
+        { description: new RegExp(q, "i") },
+        { tags: String(q) },
+      ];
     }
-    if (status) base.status = normalizeStatus(status);
+    if (status) {
+      const ns = normalizeStatus(status);
+      if (ns) base.status = ns;
+    }
     if (priority) base.priority = String(priority).toLowerCase();
 
     if (userId) {
       const uid = new mongoose.Types.ObjectId(userId);
-      base.$and = (base.$and || []).concat([{ $or: [{ assignedUserIds: uid }, { assignedTo: uid }] }]);
+      base.$and = (base.$and || []).concat([
+        { $or: [{ assignedUserIds: uid }, { assignedTo: uid }] },
+      ]);
     }
 
     if (groupId) {
       const gid = new mongoose.Types.ObjectId(groupId);
-      base.$and = (base.$and || []).concat([{ $or: [{ assignedGroupIds: gid }, { groupId: gid }] }]);
+      base.$and = (base.$and || []).concat([
+        { $or: [{ assignedGroupIds: gid }, { groupId: gid }] },
+      ]);
     }
 
     if (projectId) base.projectId = new mongoose.Types.ObjectId(projectId);
@@ -671,9 +824,18 @@ router.get("/", requireAuth, async (req, res) => {
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 500);
     const filter = andFilters(base, buildVisibilityFilter(req));
 
-    const useTimelineSort = sort === "timeline" || !!startFrom || !!startTo || !!planFrom || !!planTo;
+    const useTimelineSort =
+      sort === "timeline" || !!startFrom || !!startTo || !!planFrom || !!planTo;
     const sortSpec = useTimelineSort
-      ? { rowOrder: 1, laneOrder: 1, plannedStartAt: 1, startDate: 1, plannedEndAt: 1, dueAt: 1, updatedAt: -1 }
+      ? {
+          rowOrder: 1,
+          laneOrder: 1,
+          plannedStartAt: 1,
+          startDate: 1,
+          plannedEndAt: 1,
+          dueAt: 1,
+          updatedAt: -1,
+        }
       : { dueDate: 1, updatedAt: -1 };
 
     const rows = await Task.find(filter).sort(sortSpec).limit(lim).lean();
@@ -690,7 +852,9 @@ router.get("/:id", requireAuth, async (req, res) => {
     const _id = OID(req.params.id);
     if (!_id) return res.status(400).json({ error: "bad id" });
 
-    const t = await Task.findOne(andFilters({ _id, ...orgScope(Task, req) }, buildVisibilityFilter(req)))
+    const t = await Task.findOne(
+      andFilters({ _id, ...orgScope(Task, req) }, buildVisibilityFilter(req)),
+    )
       .populate("assignedTo", "name email")
       .populate("actualDurationLog.userId", "name email");
 
@@ -709,110 +873,140 @@ router.get("/:id", requireAuth, async (req, res) => {
 });
 
 /* --------------------------- CREATE --------------------------- */
-router.post("/", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const body = req.body || {};
-    if (!body.title) return res.status(400).json({ error: "title required" });
-
-    let assignedTo = [];
-    if (Array.isArray(body.assignedTo)) {
-      assignedTo = body.assignedTo.filter(isId).map((id) => new mongoose.Types.ObjectId(id));
-    } else {
-      const one = extractId(
-        body.assignee ||
-          body.assigneeId ||
-          (Array.isArray(body.assignedTo) ? body.assignedTo[0] : undefined)
-      );
-      if (one) assignedTo = [one];
-    }
-
-    const startDate = body.startDate ? new Date(body.startDate) : body.startAt ? new Date(body.startAt) : undefined;
-
-    const rawDue = body.dueAt ?? body.dueDate ?? body.deadline ?? body.deadlineAt ?? undefined;
-    const dueDate = rawDue ? new Date(rawDue) : undefined;
-
-    let visibility = {};
+router.post(
+  "/",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
     try {
-      visibility = sanitizeVisibilityInput(body, isAdmin(req));
-    } catch (err) {
-      return res.status(err.status || 400).json({ error: err.message || "visibility error" });
-    }
+      const body = req.body || {};
+      if (!body.title) return res.status(400).json({ error: "title required" });
 
-    const doc = new Task({
-      title: String(body.title).trim(),
-      description: body.description || "",
-      priority: String(body.priority || "medium").toLowerCase(),
-      status: normalizeStatus(body.status) || "pending",
-      tags: Array.isArray(body.tags) ? body.tags : [],
+      let assignedTo = [];
+      if (Array.isArray(body.assignedTo)) {
+        assignedTo = body.assignedTo
+          .filter(isId)
+          .map((id) => new mongoose.Types.ObjectId(id));
+      } else {
+        const one = extractId(
+          body.assignee ||
+            body.assigneeId ||
+            (Array.isArray(body.assignedTo) ? body.assignedTo[0] : undefined),
+        );
+        if (one) assignedTo = [one];
+      }
 
-      assignedTo,
-      assignee: assignedTo[0] || null,
-      assignedUserIds: [...assignedTo],
+      const startDate = body.startDate
+        ? new Date(body.startDate)
+        : body.startAt
+          ? new Date(body.startAt)
+          : undefined;
 
-      projectId: OID(body.projectId),
-      groupId: OID(body.groupId),
+      const rawDue =
+        body.dueAt ??
+        body.dueDate ??
+        body.deadline ??
+        body.deadlineAt ??
+        undefined;
+      const dueDate = rawDue ? new Date(rawDue) : undefined;
 
-      startDate,
-      dueDate,
-      dueAt: dueDate,
+      let visibility = {};
+      try {
+        visibility = sanitizeVisibilityInput(body, isAdmin(req));
+      } catch (err) {
+        return res
+          .status(err.status || 400)
+          .json({ error: err.message || "visibility error" });
+      }
 
-      dependentTaskIds: Array.isArray(body.dependentTaskIds)
-        ? body.dependentTaskIds.filter(isId).map((id) => new mongoose.Types.ObjectId(id))
-        : [],
+      const ns = normalizeStatus(body.status);
 
-      enforceQRScan: !!body.enforceQRScan,
-      enforceLocationCheck: !!body.enforceLocationCheck,
-      locationGeoFence: body.locationGeoFence || undefined,
+      const doc = new Task({
+        title: String(body.title).trim(),
+        description: body.description || "",
+        priority: String(body.priority || "medium").toLowerCase(),
+        status: ns || "pending",
+        tags: Array.isArray(body.tags) ? body.tags : [],
 
-      ...(Array.isArray(body.geoFences) ? { geoFences: body.geoFences } : {}),
+        assignedTo,
+        assignee: assignedTo[0] || null,
+        assignedUserIds: [...assignedTo],
 
-      estimatedDuration: body.estimatedDuration != null ? Number(body.estimatedDuration) : undefined,
+        projectId: OID(body.projectId),
+        groupId: OID(body.groupId),
 
-      ...visibility,
-    });
+        startDate,
+        dueDate,
+        dueAt: dueDate,
 
-    applyPlanningFields(doc, body);
+        dependentTaskIds: Array.isArray(body.dependentTaskIds)
+          ? body.dependentTaskIds
+              .filter(isId)
+              .map((id) => new mongoose.Types.ObjectId(id))
+          : [],
 
-    const createIncoming =
-      Object.prototype.hasOwnProperty.call(body, "assignedUserIds")
+        enforceQRScan: !!body.enforceQRScan,
+        enforceLocationCheck: !!body.enforceLocationCheck,
+        locationGeoFence: body.locationGeoFence || undefined,
+
+        ...(Array.isArray(body.geoFences) ? { geoFences: body.geoFences } : {}),
+
+        estimatedDuration:
+          body.estimatedDuration != null
+            ? Number(body.estimatedDuration)
+            : undefined,
+
+        ...visibility,
+      });
+
+      applyPlanningFields(doc, body);
+
+      const createIncoming = Object.prototype.hasOwnProperty.call(
+        body,
+        "assignedUserIds",
+      )
         ? coerceObjectIdArray(body.assignedUserIds)
         : Object.prototype.hasOwnProperty.call(body, "assignedTo")
-        ? coerceObjectIdArray(body.assignedTo)
-        : Object.prototype.hasOwnProperty.call(body, "assignee") || Object.prototype.hasOwnProperty.call(body, "assigneeId")
-        ? extractId(body.assignee || body.assigneeId)
-          ? [extractId(body.assignee || body.assigneeId)]
-          : []
-        : null;
+          ? coerceObjectIdArray(body.assignedTo)
+          : Object.prototype.hasOwnProperty.call(body, "assignee") ||
+              Object.prototype.hasOwnProperty.call(body, "assigneeId")
+            ? extractId(body.assignee || body.assigneeId)
+              ? [extractId(body.assignee || body.assigneeId)]
+              : []
+            : null;
 
-    if (createIncoming != null) {
-      applyAssignees(doc, createIncoming);
-    } else {
-      if (Array.isArray(doc.assignedUserIds) && doc.assignedUserIds.length) {
-        applyAssignees(doc, doc.assignedUserIds);
+      if (createIncoming != null) {
+        applyAssignees(doc, createIncoming);
+      } else {
+        if (Array.isArray(doc.assignedUserIds) && doc.assignedUserIds.length)
+          applyAssignees(doc, doc.assignedUserIds);
       }
-    }
 
-    if (!ensureOrgOnDoc(Task, doc, req)) {
-      return res.status(400).json({ error: "orgId missing/invalid on token" });
-    }
+      if (!ensureOrgOnDoc(Task, doc, req))
+        return res
+          .status(400)
+          .json({ error: "orgId missing/invalid on token" });
 
-    await doc.save();
-    res.status(201).json(normalizeOut(doc));
-  } catch (e) {
-    console.error("POST /tasks error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+      await doc.save();
+      res.status(201).json(normalizeOut(doc));
+    } catch (e) {
+      console.error("POST /tasks error:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
 
 /* --------------------------- UPDATE (PUT full) --------------------------- */
 /**
  * ✅ FIX: Frontend is calling PUT /tasks/:id
- * Your router only had PATCH /tasks/:id, so PUT was 404.
  * This PUT handler mirrors the PATCH logic.
  */
 router.put("/:id", requireAuth, async (req, res) => {
   try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    const t = await Task.findOne({
+      _id: req.params.id,
+      ...orgScope(Task, req),
+    });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
@@ -825,10 +1019,14 @@ router.put("/:id", requireAuth, async (req, res) => {
 
     // Non-elevated users: allow ONLY status update
     if (!elevated) {
-      if (!("status" in b)) {
-        return res.status(403).json({ error: "Only managers/admins can edit task fields" });
-      }
-      t.status = normalizeStatus(b.status) || t.status;
+      if (!("status" in b))
+        return res
+          .status(403)
+          .json({ error: "Only managers/admins can edit task fields" });
+
+      const ns = normalizeStatus(b.status);
+      if (ns) t.status = ns;
+
       await t.save();
       return res.json(normalizeOut(t));
     }
@@ -838,13 +1036,26 @@ router.put("/:id", requireAuth, async (req, res) => {
     if (b.description != null) t.description = String(b.description);
     if (b.priority != null) t.priority = String(b.priority).toLowerCase();
     if (b.tags != null) t.tags = Array.isArray(b.tags) ? b.tags : [];
-    if (b.status != null) t.status = normalizeStatus(b.status);
 
-    if (b.startDate != null || b.startAt != null) {
-      t.startDate = b.startDate ? new Date(b.startDate) : b.startAt ? new Date(b.startAt) : undefined;
+    if (b.status != null) {
+      const ns = normalizeStatus(b.status);
+      if (ns) t.status = ns;
     }
 
-    if (b.dueAt != null || b.dueDate != null || b.deadline != null || b.deadlineAt != null) {
+    if (b.startDate != null || b.startAt != null) {
+      t.startDate = b.startDate
+        ? new Date(b.startDate)
+        : b.startAt
+          ? new Date(b.startAt)
+          : undefined;
+    }
+
+    if (
+      b.dueAt != null ||
+      b.dueDate != null ||
+      b.deadline != null ||
+      b.deadlineAt != null
+    ) {
       const rawDue = b.dueAt ?? b.dueDate ?? b.deadline ?? b.deadlineAt ?? null;
       const d = rawDue ? new Date(rawDue) : undefined;
       t.dueDate = d;
@@ -861,53 +1072,64 @@ router.put("/:id", requireAuth, async (req, res) => {
     if (Object.prototype.hasOwnProperty.call(b, "assignedUserIds")) {
       incomingAssignees = coerceObjectIdArray(b.assignedUserIds);
     } else if (Object.prototype.hasOwnProperty.call(b, "assignedTo")) {
-      incomingAssignees = Array.isArray(b.assignedTo) ? coerceObjectIdArray(b.assignedTo) : null;
+      incomingAssignees = Array.isArray(b.assignedTo)
+        ? coerceObjectIdArray(b.assignedTo)
+        : null;
     } else if (
       Object.prototype.hasOwnProperty.call(b, "assignee") ||
       Object.prototype.hasOwnProperty.call(b, "assigneeId")
     ) {
       const one = extractId(b.assignee || b.assigneeId);
       if (one) incomingAssignees = [one];
-      else if (b.assignee === null || b.assigneeId === null) incomingAssignees = [];
+      else if (b.assignee === null || b.assigneeId === null)
+        incomingAssignees = [];
     }
 
     if (b.dependentTaskIds !== undefined) {
       t.dependentTaskIds = Array.isArray(b.dependentTaskIds)
-        ? b.dependentTaskIds.filter(isId).map((id) => new mongoose.Types.ObjectId(id))
+        ? b.dependentTaskIds
+            .filter(isId)
+            .map((id) => new mongoose.Types.ObjectId(id))
         : [];
     }
 
     if (b.enforceQRScan !== undefined) t.enforceQRScan = !!b.enforceQRScan;
-    if (b.enforceLocationCheck !== undefined) t.enforceLocationCheck = !!b.enforceLocationCheck;
-    if (b.locationGeoFence !== undefined) t.locationGeoFence = b.locationGeoFence || undefined;
-    if (b.geoFences !== undefined) t.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
+    if (b.enforceLocationCheck !== undefined)
+      t.enforceLocationCheck = !!b.enforceLocationCheck;
+    if (b.locationGeoFence !== undefined)
+      t.locationGeoFence = b.locationGeoFence || undefined;
+    if (b.geoFences !== undefined)
+      t.geoFences = Array.isArray(b.geoFences) ? b.geoFences : [];
 
     if (b.estimatedDuration !== undefined) {
-      t.estimatedDuration = b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
+      t.estimatedDuration =
+        b.estimatedDuration != null ? Number(b.estimatedDuration) : undefined;
     }
 
     try {
       const vis = sanitizeVisibilityInput(b, isAdmin(req));
       if (vis.visibilityMode != null) t.visibilityMode = vis.visibilityMode;
 
-      if (vis.assignedUserIds != null && incomingAssignees == null) {
+      if (vis.assignedUserIds != null && incomingAssignees == null)
         incomingAssignees = vis.assignedUserIds;
-      }
 
       if (vis.assignedGroupIds != null) {
         t.assignedGroupIds = vis.assignedGroupIds;
         t.groupId =
-          Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0] ? vis.assignedGroupIds[0] : undefined;
+          Array.isArray(vis.assignedGroupIds) && vis.assignedGroupIds[0]
+            ? vis.assignedGroupIds[0]
+            : undefined;
       }
     } catch (err) {
-      return res.status(err.status || 400).json({ error: err.message || "visibility error" });
+      return res
+        .status(err.status || 400)
+        .json({ error: err.message || "visibility error" });
     }
 
     if (incomingAssignees != null) applyAssignees(t, incomingAssignees);
 
-    if (!ensureOrgOnDoc(Task, t, req)) {
+    if (!ensureOrgOnDoc(Task, t, req))
       return res.status(400).json({ error: "orgId missing/invalid on token" });
-    }
 
     await t.save();
     res.json(normalizeOut(t));
@@ -925,14 +1147,21 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "bad action" });
     }
 
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
+    const t = await Task.findOne({
+      _id: req.params.id,
+      ...orgScope(Task, req),
+    });
     if (!t) return res.status(404).json({ error: "Not found" });
 
     const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee && !adminOverride) return res.status(403).json({ error: "Forbidden" });
+    if (!canSee && !adminOverride)
+      return res.status(403).json({ error: "Forbidden" });
 
     if (action === "start" || action === "resume") {
-      const done = await Task.countDocuments({ _id: { $in: t.dependentTaskIds }, status: "Finished" });
+      const done = await Task.countDocuments({
+        _id: { $in: t.dependentTaskIds },
+        status: "completed",
+      });
       if (done !== (t.dependentTaskIds?.length || 0) && !adminOverride) {
         return res.status(400).json({ error: "dependencies not completed" });
       }
@@ -953,7 +1182,10 @@ router.post("/:id/action", requireAuth, async (req, res) => {
         let fences = collectTaskFences(t);
         if (!fences.length && t.projectId) {
           const proj = await Project.findById(t.projectId).lean();
-          if (proj?.geoFences?.length || (proj?.locationGeoFence && proj.locationGeoFence.lat != null)) {
+          if (
+            proj?.geoFences?.length ||
+            (proj?.locationGeoFence && proj.locationGeoFence.lat != null)
+          ) {
             fences = collectTaskFences(proj);
           }
         }
@@ -965,7 +1197,11 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       }
     }
 
-    const actorId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+    const actorId =
+      OID(req.user?._id) ||
+      OID(req.user?.id) ||
+      OID(req.user?.sub) ||
+      OID(req.user?.userId);
 
     const nLat = Number(lat),
       nLng = Number(lng);
@@ -976,7 +1212,9 @@ router.post("/:id/action", requireAuth, async (req, res) => {
       actorName: req.user?.name,
       actorEmail: req.user?.email,
       actorSub: req.user?.sub || req.user?.id,
-      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
+      ...(Number.isFinite(nLat) && Number.isFinite(nLng)
+        ? { lat: nLat, lng: nLng }
+        : {}),
     });
 
     ensureLogIds(t);
@@ -995,149 +1233,200 @@ router.post("/:id/action", requireAuth, async (req, res) => {
 });
 
 /* ---------------------- MANUAL LOG CRUD (unchanged) ---------------------- */
-const ALLOWED_LOG_ACTIONS = new Set(["start", "pause", "resume", "complete", "photo", "fence"]);
+const ALLOWED_LOG_ACTIONS = new Set([
+  "start",
+  "pause",
+  "resume",
+  "complete",
+  "photo",
+  "fence",
+]);
 
-router.post("/:id/logs", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.post(
+  "/:id/logs",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    try {
+      const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const { action, at, note, lat, lng, milestoneId } = req.body || {};
-    if (!ALLOWED_LOG_ACTIONS.has(String(action))) {
-      return res.status(400).json({ error: "bad action" });
-    }
-
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    let msId = undefined;
-    if (milestoneId !== undefined && milestoneId !== null) {
-      const oid = OID(milestoneId);
-      if (!oid) return res.status(400).json({ error: "bad milestoneId" });
-      const exists = await TaskMilestone.exists({ _id: oid, taskId: t._id });
-      if (!exists) return res.status(400).json({ error: "milestone not found for this task" });
-      msId = oid;
-    }
-
-    const editorId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
-
-    const nLat = Number(lat),
-      nLng = Number(lng);
-
-    t.actualDurationLog.push({
-      action,
-      at: at ? new Date(at) : new Date(),
-      userId: editorId,
-      actorName: req.user?.name,
-      actorEmail: req.user?.email,
-      actorSub: req.user?.sub || req.user?.id,
-      note: note || "",
-      ...(msId ? { milestoneId: msId } : {}),
-      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
-    });
-
-    ensureLogIds(t);
-    setStatusFromLog(t);
-    await t.save();
-
-    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("POST /tasks/:id/logs error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.patch("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const { id, logId } = req.params;
-
-    const canSee = await assertCanSeeTaskOrAdmin(req, id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const { action, at, note, lat, lng, milestoneId } = req.body || {};
-
-    const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    ensureLogIds(t);
-
-    const row = (t.actualDurationLog || []).find((e) => String(e._id) === String(logId));
-    if (!row) return res.status(404).json({ error: "log row not found" });
-
-    if (action != null) {
-      if (!ALLOWED_LOG_ACTIONS.has(String(action))) {
+      const { action, at, note, lat, lng, milestoneId } = req.body || {};
+      if (!ALLOWED_LOG_ACTIONS.has(String(action)))
         return res.status(400).json({ error: "bad action" });
-      }
-      row.action = String(action);
-    }
-    if (at != null) row.at = at ? new Date(at) : row.at;
-    if (note != null) row.note = String(note);
 
-    if (lat != null && lng != null) {
-      const nLat = Number(lat),
-        nLng = Number(lng);
-      if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
-        row.lat = nLat;
-        row.lng = nLng;
-      }
-    }
+      const t = await Task.findOne({
+        _id: req.params.id,
+        ...orgScope(Task, req),
+      });
+      if (!t) return res.status(404).json({ error: "Not found" });
 
-    if ("milestoneId" in (req.body || {})) {
-      if (milestoneId === null) {
-        row.milestoneId = undefined;
-      } else {
+      let msId = undefined;
+      if (milestoneId !== undefined && milestoneId !== null) {
         const oid = OID(milestoneId);
         if (!oid) return res.status(400).json({ error: "bad milestoneId" });
         const exists = await TaskMilestone.exists({ _id: oid, taskId: t._id });
-        if (!exists) return res.status(400).json({ error: "milestone not found for this task" });
-        row.milestoneId = oid;
+        if (!exists)
+          return res
+            .status(400)
+            .json({ error: "milestone not found for this task" });
+        msId = oid;
       }
+
+      const editorId =
+        OID(req.user?._id) ||
+        OID(req.user?.id) ||
+        OID(req.user?.sub) ||
+        OID(req.user?.userId);
+
+      const nLat = Number(lat),
+        nLng = Number(lng);
+
+      t.actualDurationLog.push({
+        action,
+        at: at ? new Date(at) : new Date(),
+        userId: editorId,
+        actorName: req.user?.name,
+        actorEmail: req.user?.email,
+        actorSub: req.user?.sub || req.user?.id,
+        note: note || "",
+        ...(msId ? { milestoneId: msId } : {}),
+        ...(Number.isFinite(nLat) && Number.isFinite(nLng)
+          ? { lat: nLat, lng: nLng }
+          : {}),
+      });
+
+      ensureLogIds(t);
+      setStatusFromLog(t);
+      await t.save();
+
+      const fresh = await Task.findById(t._id)
+        .populate("actualDurationLog.userId", "name email")
+        .lean();
+      res.json(normalizeOut(fresh));
+    } catch (e) {
+      console.error("POST /tasks/:id/logs error:", e);
+      res.status(500).json({ error: "Server error" });
     }
+  },
+);
 
-    row.editedAt = new Date();
-    row.editedBy = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+router.patch(
+  "/:id/logs/:logId",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    try {
+      const { id, logId } = req.params;
 
-    setStatusFromLog(t);
-    await t.save();
+      const canSee = await assertCanSeeTaskOrAdmin(req, id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("PATCH /tasks/:id/logs/:logId error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+      const { action, at, note, lat, lng, milestoneId } = req.body || {};
 
-router.delete("/:id/logs/:logId", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const { id, logId } = req.params;
+      const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
+      if (!t) return res.status(404).json({ error: "Not found" });
 
-    const canSee = await assertCanSeeTaskOrAdmin(req, id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+      ensureLogIds(t);
 
-    const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
+      const row = (t.actualDurationLog || []).find(
+        (e) => String(e._id) === String(logId),
+      );
+      if (!row) return res.status(404).json({ error: "log row not found" });
 
-    ensureLogIds(t);
+      if (action != null) {
+        if (!ALLOWED_LOG_ACTIONS.has(String(action)))
+          return res.status(400).json({ error: "bad action" });
+        row.action = String(action);
+      }
+      if (at != null) row.at = at ? new Date(at) : row.at;
+      if (note != null) row.note = String(note);
 
-    const before = t.actualDurationLog.length;
-    t.actualDurationLog = (t.actualDurationLog || []).filter((e) => String(e._id) !== String(logId));
+      if (lat != null && lng != null) {
+        const nLat = Number(lat),
+          nLng = Number(lng);
+        if (Number.isFinite(nLat) && Number.isFinite(nLng)) {
+          row.lat = nLat;
+          row.lng = nLng;
+        }
+      }
 
-    if (t.actualDurationLog.length === before) {
-      return res.status(404).json({ error: "log row not found" });
+      if ("milestoneId" in (req.body || {})) {
+        if (milestoneId === null) {
+          row.milestoneId = undefined;
+        } else {
+          const oid = OID(milestoneId);
+          if (!oid) return res.status(400).json({ error: "bad milestoneId" });
+          const exists = await TaskMilestone.exists({
+            _id: oid,
+            taskId: t._id,
+          });
+          if (!exists)
+            return res
+              .status(400)
+              .json({ error: "milestone not found for this task" });
+          row.milestoneId = oid;
+        }
+      }
+
+      row.editedAt = new Date();
+      row.editedBy =
+        OID(req.user?._id) ||
+        OID(req.user?.id) ||
+        OID(req.user?.sub) ||
+        OID(req.user?.userId);
+
+      setStatusFromLog(t);
+      await t.save();
+
+      const fresh = await Task.findById(t._id)
+        .populate("actualDurationLog.userId", "name email")
+        .lean();
+      res.json(normalizeOut(fresh));
+    } catch (e) {
+      console.error("PATCH /tasks/:id/logs/:logId error:", e);
+      res.status(500).json({ error: "Server error" });
     }
+  },
+);
 
-    setStatusFromLog(t);
-    await t.save();
+router.delete(
+  "/:id/logs/:logId",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    try {
+      const { id, logId } = req.params;
 
-    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("DELETE /tasks/:id/logs/:logId error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+      const canSee = await assertCanSeeTaskOrAdmin(req, id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+      const t = await Task.findOne({ _id: id, ...orgScope(Task, req) });
+      if (!t) return res.status(404).json({ error: "Not found" });
+
+      ensureLogIds(t);
+
+      const before = t.actualDurationLog.length;
+      t.actualDurationLog = (t.actualDurationLog || []).filter(
+        (e) => String(e._id) !== String(logId),
+      );
+
+      if (t.actualDurationLog.length === before)
+        return res.status(404).json({ error: "log row not found" });
+
+      setStatusFromLog(t);
+      await t.save();
+
+      const fresh = await Task.findById(t._id)
+        .populate("actualDurationLog.userId", "name email")
+        .lean();
+      res.json(normalizeOut(fresh));
+    } catch (e) {
+      console.error("DELETE /tasks/:id/logs/:logId error:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
 
 /* ---------------------- ATTACHMENTS (unchanged, GridFS) ---------------------- */
 
@@ -1148,7 +1437,9 @@ try {
 } catch {}
 
 function cleanFilename(name) {
-  return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
+  return String(name || "")
+    .replace(/[^\w.\-]+/g, "_")
+    .slice(0, 120);
 }
 
 const uploadMem = multer({
@@ -1161,16 +1452,24 @@ function isSupportedAttachment(file) {
   const ext = ((file?.originalname || "").split(".").pop() || "").toLowerCase();
 
   const isImage = mime.startsWith("image/");
-  const isKMZ = ext === "kmz" || mime.includes("kmz") || mime === "application/zip";
+  const isKMZ =
+    ext === "kmz" || mime.includes("kmz") || mime === "application/zip";
   const isKML =
     ext === "kml" ||
     mime.includes("kml") ||
     mime === "application/xml" ||
     mime === "text/xml" ||
     mime === "application/vnd.google-earth.kml+xml";
-  const isGJ = ext === "geojson" || mime.includes("geo+json") || mime === "application/json";
+  const isGJ =
+    ext === "geojson" ||
+    mime.includes("geo+json") ||
+    mime === "application/json";
 
-  return { ok: !!(isImage || isKMZ || isKML || isGJ), isImage, isFence: !!(isKMZ || isKML || isGJ) };
+  return {
+    ok: !!(isImage || isKMZ || isKML || isGJ),
+    isImage,
+    isFence: !!(isKMZ || isKML || isGJ),
+  };
 }
 
 async function putToGridFS({ buffer, filename, mimetype, metadata }) {
@@ -1192,126 +1491,167 @@ async function putToGridFS({ buffer, filename, mimetype, metadata }) {
   return fileId;
 }
 
-router.post("/:id/attachments", requireAuth, uploadMem.single("file"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: "file required" });
-
-    const { ok, isImage } = isSupportedAttachment(file);
-    if (!ok) {
-      return res.status(400).json({ error: "unsupported file type (images, .kmz, .kml, .geojson)" });
-    }
-
-    const note = String(req.body?.note || "");
-    const lat = req.body?.lat,
-      lng = req.body?.lng;
-    const nLat = Number(lat),
-      nLng = Number(lng);
-
-    const userId = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
-
-    const fileId = await putToGridFS({
-      buffer: file.buffer,
-      filename: file.originalname,
-      mimetype: file.mimetype,
-      metadata: {
-        kind: "task-attachment",
-        taskId: String(t._id),
-        orgId: req.user?.orgId ? String(req.user.orgId) : "",
-        uploadedBy: req.user?.name || req.user?.email || "",
-        note,
-      },
-    });
-
-    const relUrl = `/files/tasks/${fileId}`;
-
-    t.attachments = t.attachments || [];
-    t.attachments.push({
-      filename: file.originalname,
-      url: relUrl,
-      mime: file.mimetype || "",
-      size: file.size,
-      uploadedBy: req.user?.name || req.user?.email || String(req.user?._id || ""),
-      uploadedAt: new Date(),
-      note,
-      storage: "gridfs",
-      fileId,
-    });
-
-    t.actualDurationLog.push({
-      action: isImage ? "photo" : "fence",
-      at: new Date(),
-      userId,
-      note,
-      actorName: req.user?.name,
-      actorEmail: req.user?.email,
-      actorSub: req.user?.sub || req.user?.id,
-      ...(Number.isFinite(nLat) && Number.isFinite(nLng) ? { lat: nLat, lng: nLng } : {}),
-    });
-
-    ensureLogIds(t);
-    await t.save();
-
-    const fresh = await Task.findById(t._id).populate("actualDurationLog.userId", "name email").lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("POST /tasks/:id/attachments error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-router.delete("/:id/attachments/:attId", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const t = await Task.findOne({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!t) return res.status(404).json({ error: "Not found" });
-
-    const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
-
-    const removed = (t.attachments || []).find((a) => String(a._id) === String(req.params.attId));
-
-    const before = (t.attachments || []).length;
-    t.attachments = (t.attachments || []).filter((a) => String(a._id) !== String(req.params.attId));
-    if (t.attachments.length === before) {
-      return res.status(404).json({ error: "attachment not found" });
-    }
-
-    await t.save();
-
+router.post(
+  "/:id/attachments",
+  requireAuth,
+  uploadMem.single("file"),
+  async (req, res) => {
     try {
-      const fid = removed?.fileId;
-      if (fid && mongoose.Types.ObjectId.isValid(String(fid))) {
-        getBucket().delete(new mongoose.Types.ObjectId(String(fid)), () => {});
-      }
-    } catch {}
+      const t = await Task.findOne({
+        _id: req.params.id,
+        ...orgScope(Task, req),
+      });
+      if (!t) return res.status(404).json({ error: "Not found" });
 
-    const fresh = await Task.findById(t._id).lean();
-    res.json(normalizeOut(fresh));
-  } catch (e) {
-    console.error("DELETE /tasks/:id/attachments/:attId error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+      const file = req.file;
+      if (!file) return res.status(400).json({ error: "file required" });
+
+      const { ok, isImage } = isSupportedAttachment(file);
+      if (!ok)
+        return res.status(400).json({
+          error: "unsupported file type (images, .kmz, .kml, .geojson)",
+        });
+
+      const note = String(req.body?.note || "");
+      const lat = req.body?.lat,
+        lng = req.body?.lng;
+      const nLat = Number(lat),
+        nLng = Number(lng);
+
+      const userId =
+        OID(req.user?._id) ||
+        OID(req.user?.id) ||
+        OID(req.user?.sub) ||
+        OID(req.user?.userId);
+
+      const fileId = await putToGridFS({
+        buffer: file.buffer,
+        filename: file.originalname,
+        mimetype: file.mimetype,
+        metadata: {
+          kind: "task-attachment",
+          taskId: String(t._id),
+          orgId: req.user?.orgId ? String(req.user.orgId) : "",
+          uploadedBy: req.user?.name || req.user?.email || "",
+          note,
+        },
+      });
+
+      const relUrl = `/files/tasks/${fileId}`;
+
+      t.attachments = t.attachments || [];
+      t.attachments.push({
+        filename: file.originalname,
+        url: relUrl,
+        mime: file.mimetype || "",
+        size: file.size,
+        uploadedBy:
+          req.user?.name || req.user?.email || String(req.user?._id || ""),
+        uploadedAt: new Date(),
+        note,
+        storage: "gridfs",
+        fileId,
+      });
+
+      t.actualDurationLog.push({
+        action: isImage ? "photo" : "fence",
+        at: new Date(),
+        userId,
+        note,
+        actorName: req.user?.name,
+        actorEmail: req.user?.email,
+        actorSub: req.user?.sub || req.user?.id,
+        ...(Number.isFinite(nLat) && Number.isFinite(nLng)
+          ? { lat: nLat, lng: nLng }
+          : {}),
+      });
+
+      ensureLogIds(t);
+      await t.save();
+
+      const fresh = await Task.findById(t._id)
+        .populate("actualDurationLog.userId", "name email")
+        .lean();
+      res.json(normalizeOut(fresh));
+    } catch (e) {
+      console.error("POST /tasks/:id/attachments error:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
+
+router.delete(
+  "/:id/attachments/:attId",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    try {
+      const t = await Task.findOne({
+        _id: req.params.id,
+        ...orgScope(Task, req),
+      });
+      if (!t) return res.status(404).json({ error: "Not found" });
+
+      const canSee = await assertCanSeeTaskOrAdmin(req, t._id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
+
+      const removed = (t.attachments || []).find(
+        (a) => String(a._id) === String(req.params.attId),
+      );
+
+      const before = (t.attachments || []).length;
+      t.attachments = (t.attachments || []).filter(
+        (a) => String(a._id) !== String(req.params.attId),
+      );
+      if (t.attachments.length === before)
+        return res.status(404).json({ error: "attachment not found" });
+
+      await t.save();
+
+      try {
+        const fid = removed?.fileId;
+        if (fid && mongoose.Types.ObjectId.isValid(String(fid))) {
+          getBucket().delete(
+            new mongoose.Types.ObjectId(String(fid)),
+            () => {},
+          );
+        }
+      } catch {}
+
+      const fresh = await Task.findById(t._id).lean();
+      res.json(normalizeOut(fresh));
+    } catch (e) {
+      console.error("DELETE /tasks/:id/attachments/:attId error:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
 
 /* --------------------------- DELETE --------------------------- */
-router.delete("/:id", requireAuth, allowRoles("manager", "admin", "superadmin"), async (req, res) => {
-  try {
-    const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
-    if (!canSee) return res.status(403).json({ error: "Forbidden" });
+router.delete(
+  "/:id",
+  requireAuth,
+  allowRoles("manager", "admin", "superadmin"),
+  async (req, res) => {
+    try {
+      const canSee = await assertCanSeeTaskOrAdmin(req, req.params.id);
+      if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const del = await Task.findOneAndDelete({ _id: req.params.id, ...orgScope(Task, req) });
-    if (!del) return res.status(404).json({ error: "Not found" });
-    res.sendStatus(204);
-  } catch (e) {
-    console.error("DELETE /tasks/:id error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
+      const del = await Task.findOneAndDelete({
+        _id: req.params.id,
+        ...orgScope(Task, req),
+      });
+      if (!del) return res.status(404).json({ error: "Not found" });
+
+      res.sendStatus(204);
+    } catch (e) {
+      console.error("DELETE /tasks/:id error:", e);
+      res.status(500).json({ error: "Server error" });
+    }
+  },
+);
 
 module.exports = router;

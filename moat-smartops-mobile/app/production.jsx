@@ -216,11 +216,11 @@ function fallbackProjectStatuses() {
   return ["Active", "Paused", "closed"];
 }
 function fallbackTaskStatuses() {
-  return ["pending", "started", "paused", "paused-problem", "finished"];
+  return ["pending", "in-progress", "paused", "paused-problem", "finished"];
 }
 function fallbackMilestoneStatuses() {
   // matches your TaskMilestone.js STATUS
-  return ["pending", "started", "paused", "paused - problem", "finished"];
+  return ["pending", "started", "paused", "paused-problem", "finished"];
 }
 
 function pickUserId(u) {
