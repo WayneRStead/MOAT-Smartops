@@ -875,6 +875,133 @@ router.post(
         }
       }
 
+      // ✅ APPLY ACTIVITY LOG (Task.actualDurationLog + Task.attachments)
+      if (eventType === "activity-log") {
+        try {
+          const Task = require("../models/Task");
+          const orgIdRaw = req.orgObjectId || req.user?.orgId || null;
+          const orgIdStr = orgIdRaw != null ? String(orgIdRaw).trim() : "";
+          const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+            ? new mongoose.Types.ObjectId(orgIdStr)
+            : null;
+
+          // Match orgId stored as ObjectId OR string OR missing
+          const orgOr = [];
+          if (orgIdObj) orgOr.push({ orgId: orgIdObj });
+          if (orgIdStr) orgOr.push({ orgId: orgIdStr });
+          orgOr.push({ orgId: { $exists: false } });
+
+          const taskIdStr = String(payload?.taskId || entityRef || "").trim();
+          if (!mongoose.isValidObjectId(taskIdStr)) {
+            console.warn("[activity-log] invalid taskId", {
+              taskIdStr,
+              entityRef,
+            });
+          } else {
+            const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
+
+            // Try org-scoped first, fallback to byId
+            let taskDoc = await Task.findOne({ _id: taskObjectId, $or: orgOr });
+            if (!taskDoc) taskDoc = await Task.findById(taskObjectId);
+
+            if (!taskDoc) {
+              console.warn("[activity-log] task not found", { taskIdStr });
+            } else {
+              // milestone/deliverable id (optional)
+              const milestoneIdStr = String(
+                payload?.milestone || payload?.milestoneId || "",
+              ).trim();
+              const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
+                ? new mongoose.Types.ObjectId(milestoneIdStr)
+                : undefined;
+
+              const noteText =
+                payload?.note != null ? String(payload.note).trim() : "";
+
+              const at = (() => {
+                const raw =
+                  payload?.updatedAt ||
+                  payload?.createdAt ||
+                  createdAtClient ||
+                  new Date().toISOString();
+                const d = new Date(raw);
+                return Number.isNaN(d.getTime()) ? new Date() : d;
+              })();
+
+              // ✅ Attach uploadedFiles to Task.attachments using the offline-files URL
+              const uploaded = Array.isArray(doc?.uploadedFiles)
+                ? doc.uploadedFiles
+                : [];
+              taskDoc.attachments = Array.isArray(taskDoc.attachments)
+                ? taskDoc.attachments
+                : [];
+
+              for (const f of uploaded) {
+                const fid = String(f?.fileId || "").trim();
+                if (!mongoose.isValidObjectId(fid)) continue;
+
+                // This is served by: GET /api/mobile/offline-files/:fileId
+                const url = `/mobile/offline-files/${fid}`;
+
+                taskDoc.attachments.push({
+                  filename: f.filename || "offline_upload",
+                  url,
+                  mime: f.contentType || "",
+                  size: typeof f.size === "number" ? f.size : undefined,
+                  uploadedBy:
+                    req.user?.name ||
+                    req.user?.email ||
+                    String(req.user?._id || ""),
+                  uploadedAt: at,
+                  note: noteText || "",
+                  storage: "mobileOffline",
+                  fileId: new mongoose.Types.ObjectId(fid),
+                  sourceOfflineEventId: doc._id,
+                });
+              }
+
+              // ✅ Add log row (what your task screen history uses)
+              taskDoc.actualDurationLog = Array.isArray(
+                taskDoc.actualDurationLog,
+              )
+                ? taskDoc.actualDurationLog
+                : [];
+
+              const actorId =
+                req.user?._id && mongoose.isValidObjectId(String(req.user._id))
+                  ? new mongoose.Types.ObjectId(String(req.user._id))
+                  : undefined;
+
+              taskDoc.actualDurationLog.push({
+                action: uploaded.length ? "photo" : "note",
+                at,
+                userId: actorId,
+                actorName: req.user?.name,
+                actorEmail: req.user?.email,
+                actorSub: req.user?.sub || req.user?.id,
+                note: noteText || "",
+                ...(milestoneObjectId
+                  ? { milestoneId: milestoneObjectId }
+                  : {}),
+                sourceOfflineEventId: doc._id,
+              });
+
+              taskDoc.updatedAt = new Date();
+              await taskDoc.save();
+
+              console.log("[activity-log] applied to task", {
+                taskId: String(taskDoc._id),
+                uploads: uploaded.length,
+                noteLen: noteText.length,
+                milestoneId: milestoneIdStr || null,
+              });
+            }
+          }
+        } catch (e5) {
+          console.error("[activity-log] failed to apply activity log", e5);
+        }
+      }
+
       // ------------------------------------------------------------
       // BIOMETRICS: create/upsert ONE BiometricEnrollmentRequest
       // keyed by sourceOfflineEventId so resync won't create duplicates
