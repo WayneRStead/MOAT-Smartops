@@ -225,37 +225,49 @@ router.all("/offline-files/:fileId", async (req, res) => {
     const fileDoc = await filesColl.findOne({ _id: fileId });
     if (!fileDoc) return res.status(404).json({ error: "File not found" });
 
-    const storedOrgId = String(fileDoc?.metadata?.orgId || "").trim();
-    const storedKey = String(fileDoc?.metadata?.downloadKey || "").trim();
     const key = String(req.query.k || "").trim();
 
-    // ✅ Key access path (no auth required)
-    const keyOk = !!key && !!storedKey && key === storedKey;
+    // ✅ PATH A: signed key access (no token required)
+    if (
+      key &&
+      fileDoc?.metadata?.downloadKey &&
+      key === fileDoc.metadata.downloadKey
+    ) {
+      res.setHeader(
+        "Content-Type",
+        fileDoc.contentType || "application/octet-stream",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${fileDoc.filename || "file"}"`,
+      );
+      res.setHeader("Cache-Control", "private, max-age=31536000");
 
-    // ✅ If no key, try to authenticate (only if the client actually sent auth)
-    // This keeps normal API calls working without needing ?k=
-    let isLoggedIn = false;
-    if (!keyOk) {
-      const authHeader = String(req.headers.authorization || "").trim();
-      if (authHeader) {
-        try {
-          await runMiddleware(req, res, requireAuth);
-          await runMiddleware(req, res, resolveOrgContext);
-          isLoggedIn = !!req.user?._id;
-        } catch {
-          isLoggedIn = false;
-        }
-      }
-      if (!isLoggedIn) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      if (req.method === "HEAD") return res.status(200).end();
+      if (req.method !== "GET")
+        return res.status(405).json({ error: "Method not allowed" });
 
-      // logged in => enforce org match using attached context
-      const orgId = req.orgObjectId || req.user?.orgId;
-      const orgIdStr = String(orgId || "").trim();
-      if (!orgIdStr || orgIdStr !== storedOrgId) {
-        return res.status(404).json({ error: "File not found" });
-      }
+      const stream = bucket.openDownloadStream(fileId);
+      stream.on("error", (err) => {
+        console.error("[mobile/offline-files] stream error", err);
+        if (!res.headersSent) res.status(500).end("Stream error");
+      });
+      return stream.pipe(res);
+    }
+
+    // ✅ PATH B: normal secured access (token required)
+    // If no key, require the normal auth+org context
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: "Missing token" });
+    }
+
+    const orgId = req.orgObjectId || req.user?.orgId;
+    const orgIdStr = String(orgId || "").trim();
+    if (!orgIdStr)
+      return res.status(400).json({ error: "Missing org context" });
+
+    if (String(fileDoc?.metadata?.orgId || "") !== orgIdStr) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
     res.setHeader(
@@ -266,6 +278,7 @@ router.all("/offline-files/:fileId", async (req, res) => {
       "Content-Disposition",
       `inline; filename="${fileDoc.filename || "file"}"`,
     );
+    res.setHeader("Cache-Control", "private, max-age=86400");
 
     if (req.method === "HEAD") return res.status(200).end();
     if (req.method !== "GET")
@@ -276,8 +289,7 @@ router.all("/offline-files/:fileId", async (req, res) => {
       console.error("[mobile/offline-files] stream error", err);
       if (!res.headersSent) res.status(500).end("Stream error");
     });
-
-    stream.pipe(res);
+    return stream.pipe(res);
   } catch (e) {
     console.error("[mobile/offline-files] error", e);
     return res.status(500).json({ error: e?.message || "Download failed" });
@@ -990,8 +1002,10 @@ router.post(
                 const fid = String(f?.fileId || "").trim();
                 if (!mongoose.isValidObjectId(fid)) continue;
 
-                const k = f.downloadKey ? String(f.downloadKey) : "";
-                const apiUrl = `/api/mobile/offline-files/${fid}${k ? `?k=${encodeURIComponent(k)}` : ""}`;
+                const k = String(f?.downloadKey || "").trim();
+                const apiUrl = k
+                  ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
+                  : `/api/mobile/offline-files/${fid}`;
 
                 taskDoc.attachments.push({
                   filename: f.filename || "offline_upload",
