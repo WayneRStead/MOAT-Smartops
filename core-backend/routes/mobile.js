@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 // ✅ GridFS support (MongoDB file storage)
 const { GridFSBucket } = require("mongodb");
@@ -17,15 +18,12 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-04"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-24-07"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
 });
-
-// ✅ Attach auth + org context for all routes in this router
-router.use(requireAuth, resolveOrgContext);
 
 // ✅ Multer for multipart/form-data (optional)
 let multer = null;
@@ -62,6 +60,20 @@ function getDocumentsBucket() {
   const db = mongoose.connection?.db;
   if (!db) return null;
   return new GridFSBucket(db, { bucketName: "documents" });
+}
+
+// Small helper to run Express middleware manually (for optional auth)
+function runMiddleware(req, res, fn) {
+  return new Promise((resolve, reject) => {
+    try {
+      fn(req, res, (err) => {
+        if (err) return reject(err);
+        return resolve();
+      });
+    } catch (e) {
+      return reject(e);
+    }
+  });
 }
 
 // Copies a GridFS file from bucket A -> bucket B and returns the NEW fileId (ObjectId)
@@ -115,6 +127,9 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
   for (const f of files || []) {
     if (!f?.buffer) continue;
 
+    // ✅ key that allows <img> loading without auth token
+    const downloadKey = crypto.randomBytes(16).toString("hex");
+
     const filename = `${Date.now()}_${Math.random().toString(16).slice(2)}_${String(
       f.originalname || "upload.bin",
     )}`;
@@ -127,6 +142,7 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
       size: f.size || null,
       kind: "offline-event-file",
       createdAt: new Date().toISOString(),
+      downloadKey,
     };
 
     const uploadStream = bucket.openUploadStream(filename, {
@@ -145,6 +161,7 @@ async function saveBuffersToGridFS({ orgId, userId, files }) {
       filename,
       contentType: f.mimetype || null,
       size: f.size || null,
+      downloadKey,
     });
   }
 
@@ -179,6 +196,96 @@ function boolish(v) {
     .toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "y" || s === "on";
 }
+
+/* -----------------------------------------------------------------------------------
+   ✅ PUBLIC DOWNLOAD GRIDFS FILE (mobileOffline bucket)
+   GET/HEAD /api/mobile/offline-files/:fileId?k=<downloadKey>
+
+   Why this exists:
+   - Your web app tries to load images via <img src="...">.
+   - Browsers DO NOT send your auth token with <img> requests.
+   - So without this, you get 401 and the image won’t render.
+
+   Rules:
+   - If correct ?k= is provided (matches metadata.downloadKey) -> allow (no login required)
+   - Otherwise -> require login + org context
+----------------------------------------------------------------------------------- */
+router.all("/offline-files/:fileId", async (req, res) => {
+  try {
+    const bucket = getMobileOfflineBucket();
+    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
+
+    const fileIdStr = String(req.params.fileId || "").trim();
+    if (!mongoose.isValidObjectId(fileIdStr)) {
+      return res.status(400).json({ error: "Invalid fileId" });
+    }
+    const fileId = new mongoose.Types.ObjectId(fileIdStr);
+
+    const filesColl = mongoose.connection.db.collection("mobileOffline.files");
+    const fileDoc = await filesColl.findOne({ _id: fileId });
+    if (!fileDoc) return res.status(404).json({ error: "File not found" });
+
+    const storedOrgId = String(fileDoc?.metadata?.orgId || "").trim();
+    const storedKey = String(fileDoc?.metadata?.downloadKey || "").trim();
+    const key = String(req.query.k || "").trim();
+
+    // ✅ Key access path (no auth required)
+    const keyOk = !!key && !!storedKey && key === storedKey;
+
+    // ✅ If no key, try to authenticate (only if the client actually sent auth)
+    // This keeps normal API calls working without needing ?k=
+    let isLoggedIn = false;
+    if (!keyOk) {
+      const authHeader = String(req.headers.authorization || "").trim();
+      if (authHeader) {
+        try {
+          await runMiddleware(req, res, requireAuth);
+          await runMiddleware(req, res, resolveOrgContext);
+          isLoggedIn = !!req.user?._id;
+        } catch {
+          isLoggedIn = false;
+        }
+      }
+      if (!isLoggedIn) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      // logged in => enforce org match using attached context
+      const orgId = req.orgObjectId || req.user?.orgId;
+      const orgIdStr = String(orgId || "").trim();
+      if (!orgIdStr || orgIdStr !== storedOrgId) {
+        return res.status(404).json({ error: "File not found" });
+      }
+    }
+
+    res.setHeader(
+      "Content-Type",
+      fileDoc.contentType || "application/octet-stream",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${fileDoc.filename || "file"}"`,
+    );
+
+    if (req.method === "HEAD") return res.status(200).end();
+    if (req.method !== "GET")
+      return res.status(405).json({ error: "Method not allowed" });
+
+    const stream = bucket.openDownloadStream(fileId);
+    stream.on("error", (err) => {
+      console.error("[mobile/offline-files] stream error", err);
+      if (!res.headersSent) res.status(500).end("Stream error");
+    });
+
+    stream.pipe(res);
+  } catch (e) {
+    console.error("[mobile/offline-files] error", e);
+    return res.status(500).json({ error: e?.message || "Download failed" });
+  }
+});
+
+// ✅ Attach auth + org context for everything else in this router
+router.use(requireAuth, resolveOrgContext);
 
 /* -----------------------------
    BOOTSTRAP (NO ORG REQUIRED)
@@ -315,7 +422,7 @@ const OfflineEventSchema = new mongoose.Schema(
     entityRef: { type: String },
     payload: { type: Object },
     fileUris: { type: [String], default: [] }, // legacy
-    uploadedFiles: { type: [Object], default: [] }, // {fileId, filename, contentType, size}
+    uploadedFiles: { type: [Object], default: [] }, // {fileId, filename, contentType, size, downloadKey?}
     createdAtClient: { type: String },
     receivedAt: { type: Date, default: Date.now },
   },
@@ -395,14 +502,12 @@ router.post(
       });
 
       // ✅ APPLY PROJECT UPDATES (manager note + status + optional attachments)
-      // IMPORTANT: Manager notes are stored in ProjectManagerNote collection,
-      // not on Project (Project schema does not include managerNotes).
       if (eventType === "project-update") {
         try {
           const Project = require("../models/Project");
           const ProjectManagerNote = require("../models/ProjectManagerNote");
 
-          const orgId = req.orgObjectId || req.user?.orgId;
+          const orgId2 = req.orgObjectId || req.user?.orgId;
 
           const projectIdStr = String(
             payload?.projectId || entityRef || "",
@@ -416,23 +521,22 @@ router.post(
           } else {
             const projectObjectId = new mongoose.Types.ObjectId(projectIdStr);
 
-            // --- Extract fields from payload ---
             const statusRaw =
               payload?.status != null
                 ? String(payload.status).trim().toLowerCase()
                 : "";
+
             const managerNote =
               payload?.managerNote != null
                 ? String(payload.managerNote).trim()
                 : "";
 
-            // --- 1) Update Project.status (only allow schema enum values) ---
             const allowedStatus = new Set(["active", "paused", "closed"]);
             const status = allowedStatus.has(statusRaw) ? statusRaw : null;
 
             if (status) {
               await Project.updateOne(
-                { _id: projectObjectId, orgId },
+                { _id: projectObjectId, orgId: orgId2 },
                 {
                   $set: {
                     status,
@@ -443,18 +547,14 @@ router.post(
               );
             }
 
-            // --- 2) Create a ProjectManagerNote doc (source of truth) ---
             if (managerNote) {
               const at = payload?.at ? new Date(payload.at) : new Date();
-
-              // Attach any uploaded files from this OfflineEvent to the note.
-              // This makes "sick notes" visible via manager notes history.
-              const uploadedFiles = Array.isArray(doc?.uploadedFiles)
+              const uf = Array.isArray(doc?.uploadedFiles)
                 ? doc.uploadedFiles
                 : [];
 
               await ProjectManagerNote.create({
-                orgId,
+                orgId: orgId2,
                 projectId: projectObjectId,
                 status: status || statusRaw || "active",
                 note: managerNote,
@@ -466,9 +566,7 @@ router.post(
                   name: req.user?.name || undefined,
                   email: req.user?.email || undefined,
                 },
-
-                // Optional fields (safe if schema supports them; if not, we can add them)
-                uploadedFiles,
+                uploadedFiles: uf,
                 sourceOfflineEventId: doc._id,
                 createdAtClient: createdAtClient || null,
               });
@@ -484,7 +582,7 @@ router.post(
         try {
           const Document = require("../models/Document");
 
-          const orgId = req.orgObjectId || req.user?.orgId;
+          const orgId2 = req.orgObjectId || req.user?.orgId;
           const actor = req.user?.sub || req.user?._id || null;
 
           const projectIdStr = String(
@@ -500,7 +598,6 @@ router.post(
             ? new mongoose.Types.ObjectId(targetUserIdStr)
             : null;
 
-          // Need at least a project link to show under Project detail
           if (!projectRefId) {
             console.warn("[user-document] missing/invalid projectId", {
               projectIdStr,
@@ -519,7 +616,6 @@ router.post(
                 offlineEventId: String(doc?._id),
               });
             } else {
-              // 1) Copy first uploaded file into the Vault bucket ("documents")
               const first = uploaded[0];
               const newFileId = await copyGridFSFile({
                 fromBucket,
@@ -528,8 +624,7 @@ router.post(
                 filename: first.filename || null,
                 contentType: first.contentType || null,
                 metadata: {
-                  // keep consistent with documents.js GridFS metadata patterns
-                  orgId: String(orgId || ""),
+                  orgId: String(orgId2 || ""),
                   uploadedBy: actor ? String(actor) : "",
                   source: "mobile-offline-event",
                   offlineEventId: String(doc._id),
@@ -543,7 +638,6 @@ router.post(
               const fileIdStr = String(newFileId);
               const url = `/documents/files/${fileIdStr}`;
 
-              // 2) Create a Document record so the Vault + Project can list it
               const title = String(payload?.title || "User document").trim();
               const tag = String(payload?.tag || "").trim();
 
@@ -573,23 +667,16 @@ router.post(
               const body = {
                 orgId:
                   req.orgObjectId ||
-                  (mongoose.Types.ObjectId.isValid(String(orgId))
-                    ? new mongoose.Types.ObjectId(String(orgId))
+                  (mongoose.Types.ObjectId.isValid(String(orgId2))
+                    ? new mongoose.Types.ObjectId(String(orgId2))
                     : undefined),
-
                 title,
                 folder: "",
-
-                // tags are normalized to lowercase in the Document model
                 tags: tag ? [tag] : [],
-
                 links,
-
                 access: { visibility: "org", owners: actor ? [actor] : [] },
-
                 versions: [version],
                 latest: version,
-
                 createdAt: now,
                 updatedAt: now,
                 createdBy: actor,
@@ -617,7 +704,6 @@ router.post(
             ? new mongoose.Types.ObjectId(orgIdStr)
             : null;
 
-          // match orgId whether stored as ObjectId, string, or missing
           const orgOr = [];
           if (orgIdObj) orgOr.push({ orgId: orgIdObj });
           if (orgIdStr) orgOr.push({ orgId: orgIdStr });
@@ -642,11 +728,6 @@ router.post(
             return isNaN(+d) ? new Date() : d;
           })();
 
-          // -----------------------------
-          // Normalize TASK status to Task.js enum world
-          // Task.js expects: pending | in-progress | paused | paused-problem | completed
-          // and its own setter normalizes some synonyms on save()
-          // -----------------------------
           function normalizeTaskStatusForTaskModel(s) {
             if (s == null) return null;
             const v = String(s).trim().toLowerCase();
@@ -700,10 +781,6 @@ router.post(
             return null;
           }
 
-          // -----------------------------
-          // Normalize MILESTONE status to task-milestones.js world (lowercase)
-          // STATUS: pending | started | paused | paused - problem | finished
-          // -----------------------------
           function normalizeMilestoneStatus(s) {
             if (s == null) return null;
             const v = String(s).trim().toLowerCase();
@@ -720,29 +797,20 @@ router.post(
               "finished",
             ]);
 
-            // also accept "paused-problem" from mobile and map it
             if (v === "paused-problem") return "paused - problem";
-
             return allowed.has(v) ? v : null;
           }
 
-          // -----------------------------
-          // Validate IDs
-          // -----------------------------
           if (!mongoose.isValidObjectId(taskIdStr)) {
             console.warn("[task-update] invalid taskId", {
               taskIdStr,
               entityRef,
             });
-            // still allow ManagerNote creation? no, without taskId it's meaningless
             return;
           }
 
           const taskObjectId = new mongoose.Types.ObjectId(taskIdStr);
 
-          // -----------------------------
-          // 1) Update TASK status (load + save => schema setters run)
-          // -----------------------------
           const newTaskStatus = normalizeTaskStatusForTaskModel(
             payload?.status,
           );
@@ -753,23 +821,15 @@ router.post(
             });
           } else {
             let taskDoc = await Task.findOne({ _id: taskObjectId, $or: orgOr });
-
-            // fallback if org scoping doesn't match stored form
-            if (!taskDoc) {
-              taskDoc = await Task.findById(taskObjectId);
-            }
+            if (!taskDoc) taskDoc = await Task.findById(taskObjectId);
 
             if (!taskDoc) {
               console.warn("[task-update] task not found", { taskIdStr });
             } else {
-              taskDoc.status = newTaskStatus; // Task schema setter will normalize if needed
+              taskDoc.status = newTaskStatus;
               taskDoc.updatedAt = new Date();
-
-              // optional audit fields if your schema tolerates them (Mongo will store anyway)
               taskDoc.updatedBy = req.user?._id || undefined;
-
               await taskDoc.save();
-
               console.log("[task-update] Task saved", {
                 taskId: String(taskDoc._id),
                 status: taskDoc.status,
@@ -777,9 +837,6 @@ router.post(
             }
           }
 
-          // -----------------------------
-          // 2) Update TASK MILESTONE status (lowercase)
-          // -----------------------------
           const newMilestoneStatus = normalizeMilestoneStatus(
             payload?.milestoneStatus,
           );
@@ -801,7 +858,6 @@ router.post(
               isDeleted: { $ne: true },
             });
 
-            // fallback (some milestone docs may store orgId differently or not at all)
             if (!msDoc) {
               msDoc = await TaskMilestone.findOne({
                 _id: msObjectId,
@@ -817,19 +873,14 @@ router.post(
               });
             } else {
               msDoc.status = newMilestoneStatus;
-
-              // match route behavior: finishing stamps actualEndAt if absent
               if (newMilestoneStatus === "finished" && !msDoc.actualEndAt) {
                 msDoc.actualEndAt = new Date();
               }
               if (newMilestoneStatus !== "finished") {
-                // if you want non-finished to clear actual end (route does this on PATCH)
                 msDoc.actualEndAt = null;
               }
-
               msDoc.updatedAt = new Date();
               await msDoc.save();
-
               console.log("[task-update] TaskMilestone saved", {
                 milestoneId: String(msDoc._id),
                 status: msDoc.status,
@@ -841,9 +892,6 @@ router.post(
             });
           }
 
-          // -----------------------------
-          // 3) ManagerNote (already working)
-          // -----------------------------
           const actorUserId = req.user?._id
             ? new mongoose.Types.ObjectId(String(req.user._id))
             : undefined;
@@ -856,18 +904,15 @@ router.post(
             taskId: taskObjectId,
             projectId: projectObjectId,
             orgId: orgIdObj || undefined,
-
             at,
             status:
               newTaskStatus || String(payload?.status || "pending").trim(),
             note: noteText || "",
-
             author: {
               id: actorUserId,
               name: req.user?.name || undefined,
               email: req.user?.email || undefined,
             },
-
             deletedAt: null,
           });
         } catch (e) {
@@ -909,7 +954,6 @@ router.post(
               const milestoneIdStr = String(
                 payload?.milestone || payload?.milestoneId || "",
               ).trim();
-
               const milestoneObjectId = mongoose.isValidObjectId(milestoneIdStr)
                 ? new mongoose.Types.ObjectId(milestoneIdStr)
                 : undefined;
@@ -931,32 +975,28 @@ router.post(
                 ? doc.uploadedFiles
                 : [];
 
-              if (!uploaded.length) {
-                console.warn(
-                  "[activity-log] no uploadedFiles on OfflineEvent",
-                  {
-                    offlineEventId: String(doc?._id),
-                    taskId: taskIdStr,
-                  },
-                );
-              }
-
               taskDoc.attachments = Array.isArray(taskDoc.attachments)
                 ? taskDoc.attachments
                 : [];
+              taskDoc.actualDurationLog = Array.isArray(
+                taskDoc.actualDurationLog,
+              )
+                ? taskDoc.actualDurationLog
+                : [];
 
-              // IMPORTANT: many frontends expect /api prefix
-              // and expect mime fields named mime or contentType.
+              // ✅ Store an image URL that a browser can load:
+              // /api/mobile/offline-files/:fileId?k=<downloadKey>
               for (const f of uploaded) {
                 const fid = String(f?.fileId || "").trim();
                 if (!mongoose.isValidObjectId(fid)) continue;
 
-                const apiUrl = `/api/mobile/offline-files/${fid}`;
+                const k = f.downloadKey ? String(f.downloadKey) : "";
+                const apiUrl = `/api/mobile/offline-files/${fid}${k ? `?k=${encodeURIComponent(k)}` : ""}`;
 
                 taskDoc.attachments.push({
                   filename: f.filename || "offline_upload",
                   url: apiUrl,
-                  mobileUrl: apiUrl, // extra compat
+                  mobileUrl: apiUrl,
                   mime: f.contentType || "",
                   contentType: f.contentType || "",
                   size: typeof f.size === "number" ? f.size : undefined,
@@ -972,19 +1012,12 @@ router.post(
                 });
               }
 
-              taskDoc.actualDurationLog = Array.isArray(
-                taskDoc.actualDurationLog,
-              )
-                ? taskDoc.actualDurationLog
-                : [];
-
               const actorId =
                 req.user?._id && mongoose.isValidObjectId(String(req.user._id))
                   ? new mongoose.Types.ObjectId(String(req.user._id))
                   : undefined;
 
-              // Use action values the rest of the system already understands
-              const action = uploaded.length ? "photo" : "photo";
+              const action = uploaded.length ? "photo" : "note";
 
               taskDoc.actualDurationLog.push({
                 action,
@@ -1009,7 +1042,11 @@ router.post(
                 noteLen: noteText.length,
                 milestoneId: milestoneIdStr || null,
                 firstUrl: uploaded?.[0]?.fileId
-                  ? `/api/mobile/offline-files/${uploaded[0].fileId}`
+                  ? `/api/mobile/offline-files/${uploaded[0].fileId}${
+                      uploaded[0].downloadKey
+                        ? `?k=${uploaded[0].downloadKey}`
+                        : ""
+                    }`
                   : null,
               });
             }
@@ -1107,72 +1144,10 @@ router.post(
 );
 
 /* -----------------------------
-   DOWNLOAD GRIDFS FILE (mobileOffline bucket)
-   GET/HEAD /api/mobile/offline-files/:fileId
-   ✅ Enforces org ownership via GridFS metadata.orgId
-------------------------------*/
-router.all("/offline-files/:fileId", requireOrg, async (req, res) => {
-  try {
-    const bucket = getMobileOfflineBucket();
-    if (!bucket) return res.status(503).json({ error: "MongoDB not ready" });
-
-    const orgId = req.orgObjectId || req.user?.orgId;
-    const orgIdStr = String(orgId || "").trim();
-    if (!orgIdStr)
-      return res.status(400).json({ error: "Missing org context" });
-
-    const fileIdStr = String(req.params.fileId || "").trim();
-    if (!mongoose.isValidObjectId(fileIdStr)) {
-      return res.status(400).json({ error: "Invalid fileId" });
-    }
-
-    const fileId = new mongoose.Types.ObjectId(fileIdStr);
-
-    const filesColl = mongoose.connection.db.collection("mobileOffline.files");
-    const fileDoc = await filesColl.findOne({
-      _id: fileId,
-      "metadata.orgId": orgIdStr,
-    });
-    if (!fileDoc) return res.status(404).json({ error: "File not found" });
-
-    res.setHeader(
-      "Content-Type",
-      fileDoc.contentType || "application/octet-stream",
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="${fileDoc.filename || "file"}"`,
-    );
-
-    if (req.method === "HEAD") return res.status(200).end();
-    if (req.method !== "GET")
-      return res.status(405).json({ error: "Method not allowed" });
-
-    const stream = bucket.openDownloadStream(fileId);
-    stream.on("error", (err) => {
-      console.error("[mobile/offline-files] stream error", err);
-      if (!res.headersSent) res.status(500).end("Stream error");
-    });
-
-    stream.pipe(res);
-  } catch (e) {
-    console.error("[mobile/offline-files] error", e);
-    return res.status(500).json({ error: e?.message || "Download failed" });
-  }
-});
-
-/* -----------------------------
    BIOMETRIC REQUEST WORKFLOW
 ------------------------------*/
 
-/**
- * ✅ LIST biometric requests
- * GET /api/mobile/biometric-requests?status=pending|approved|rejected|all
- * Optional:
- *  - targetUserId=<id>
- *  - limit=...
- *  - includeApproved=1   (legacy/compat: only used when status is empty)
- */
+// ✅ LIST biometric requests
 router.get("/biometric-requests", requireOrg, async (req, res) => {
   try {
     const orgId = req.orgObjectId || req.user?.orgId;
@@ -1191,26 +1166,14 @@ router.get("/biometric-requests", requireOrg, async (req, res) => {
     const status = statusRaw || "pending";
 
     const targetUserIdStr = String(req.query.targetUserId || "").trim();
-
-    // Keep includeApproved for backwards compatibility if someone calls without status
     const includeApproved = boolish(req.query.includeApproved);
 
     const find = { orgId };
 
-    // ✅ OPTION B FIX:
-    // - If status === "all": return everything (do not add find.status)
-    // - If status is a concrete value: filter to that status
-    // - If status missing (defaults to pending): still pending
     if (status && status !== "all") {
-      // if someone passes status=all we skip this
-      // if someone passes status=pending/approved/rejected we filter
-      // For legacy "status=all&includeApproved=0" we still honor status=all => ALL
       find.status = status;
     } else if (!statusRaw) {
-      // legacy path: no status provided at all
-      // default pending, unless includeApproved=1
       if (!includeApproved) find.status = "pending";
-      // if includeApproved=1 and no status, do not force pending
     }
 
     if (targetUserIdStr) {
@@ -1304,7 +1267,6 @@ router.post(
         .filter((s) => mongoose.isValidObjectId(s))
         .map((s) => new mongoose.Types.ObjectId(s));
 
-      // Create/Update enrollment (still "pending" until embeddings exist)
       const enrollment = await BiometricEnrollment.findOneAndUpdate(
         { orgId, userId: requestDoc.targetUserId },
         {
@@ -1319,7 +1281,6 @@ router.post(
         { new: true, upsert: true },
       );
 
-      // ✅ ALSO persist the first photo onto the User as a profile reference
       try {
         const User = require("../models/User");
         const firstPhotoFileIdStr = uploadedFiles?.[0]?.fileId
@@ -1335,7 +1296,6 @@ router.post(
         };
 
         if (firstPhotoFileId) {
-          // safe even if your schema doesn't declare it (Mongo will store it)
           setPatch["photo.fileId"] = firstPhotoFileId;
           setPatch["photo.source"] = "biometric-request";
           setPatch["photo.updatedAt"] = new Date();
@@ -1352,7 +1312,6 @@ router.post(
         );
       }
 
-      // Mark request approved
       requestDoc.status = "approved";
       requestDoc.approvedByUserId = approverUserId;
       requestDoc.approvedAt = new Date();
@@ -1428,7 +1387,7 @@ router.post(
   },
 );
 
-// ✅ Enrollment status helper (admin UI + mobile can poll)
+// ✅ Enrollment status helper
 router.get(
   "/biometric-enrollment-status/:userId",
   requireOrg,
@@ -1464,10 +1423,8 @@ router.get(
 // POST /api/mobile/biometric-identify
 // multipart/form-data:
 //   - photo: file (required)
-//   - groupId (optional) - if supplied, filter to that group's members
+//   - groupId (optional)
 // -----------------------------
-
-const crypto = require("crypto");
 
 function bufferToFloat32BufferStub(buf) {
   const hash = crypto.createHash("sha256").update(buf).digest(); // 32 bytes
@@ -1540,11 +1497,9 @@ router.post(
         });
       }
 
-      // 1) Probe embedding from uploaded image
       const probeBuf = bufferToFloat32BufferStub(req.file.buffer);
       const probe = bufferToFloat32Array(probeBuf);
 
-      // 2) Optional filter by group members
       const groupIdStr = String(req.body?.groupId || "").trim();
       let memberUserIds = null;
 
@@ -1569,7 +1524,6 @@ router.post(
         } catch {}
       }
 
-      // 3) Load enrolled embeddings
       const BiometricEnrollment = require("../models/BiometricEnrollment");
 
       const find = {
@@ -1595,7 +1549,6 @@ router.post(
         });
       }
 
-      // 4) Compare cosine similarity
       let best = { userId: null, score: -1, templateVersion: null };
 
       for (const e of enrolled) {
@@ -1612,7 +1565,6 @@ router.post(
         }
       }
 
-      // 5) Threshold
       const THRESHOLD = 0.78;
 
       if (!best.userId || best.score < THRESHOLD) {
