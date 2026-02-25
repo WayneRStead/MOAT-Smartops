@@ -341,7 +341,7 @@ function buildKml(
             <tr><td><b>Inspector</b></td><td>${xmlEscape(inspector)}</td></tr>
             <tr><td><b>Project</b></td><td>${xmlEscape(proj)}</td></tr>
             <tr><td><b>Task</b></td><td>${xmlEscape(task)}</td></tr>
-            <tr><td><b>Deliverable</b></td><td>${xmlEscape(mile)}</td></tr>
+            <tr><td><b>Milestone</b></td><td>${xmlEscape(mile)}</td></tr>
             <tr><td><b>Subject</b></td><td>${xmlEscape(subj.type)} – ${xmlEscape(subj.label)}</td></tr>
             <tr><td><b>Status</b></td><td>${xmlEscape(status.toUpperCase())}</td></tr>
             <tr><td><b>Scope</b></td><td>${xmlEscape(String(scope))}</td></tr>
@@ -364,7 +364,7 @@ function buildKml(
   <Data>
   <Data name="project"><value>${xmlEscape(proj || "")}</value></Data>
   <Data name="task"><value>${xmlEscape(task || "")}</value></Data>
-  <Data name="deliverable"><value>${xmlEscape(mile || "")}</value></Data>
+  <Data name="milestone"><value>${xmlEscape(mile || "")}</value></Data>
   <Data name="subjectType"><value>${xmlEscape(subj.rawType || "")}</value></Data>
   <Data name="subjectLabel"><value>${xmlEscape(subj.label)}</value></Data>
   <Data name="description"><value>${xmlEscape(descriptionText)}</value></Data>
