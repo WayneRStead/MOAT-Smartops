@@ -1,19 +1,26 @@
 // core-frontend/src/pages/Inspections.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  listSubmissions,
-  listForms,
-  softDeleteForm,
-  hardDeleteForm,
-  softDeleteSubmission,
-  restoreSubmission,
-  hardDeleteSubmission,
-} from "../lib/inspectionApi";
 import { api } from "../lib/api";
+import {
+  hardDeleteForm,
+  hardDeleteSubmission,
+  listForms,
+  listSubmissions,
+  restoreSubmission,
+  softDeleteForm,
+  softDeleteSubmission,
+} from "../lib/inspectionApi";
 
 /* ------------ role normalization to match backend ------------- */
-const CANON_ROLES = ["user", "group-leader", "project-manager", "manager", "admin", "superadmin"];
+const CANON_ROLES = [
+  "user",
+  "group-leader",
+  "project-manager",
+  "manager",
+  "admin",
+  "superadmin",
+];
 function normalizeRole(r) {
   if (!r) return "";
   let s = String(r).trim().toLowerCase();
@@ -62,18 +69,27 @@ const me = getCurrentUserSafe();
 
 // Allow PM/Manager/Admin/Superadmin to manage submissions
 const canAdminSubFrom = (user) =>
-  (user?.roles || []).some((r) => ["project-manager", "manager", "admin", "superadmin"].includes(r));
+  (user?.roles || []).some((r) =>
+    ["project-manager", "manager", "admin", "superadmin"].includes(r),
+  );
 
 /* ------------ subject + location helpers (display + search + export) ------------- */
 function subjectDisplay(sub) {
   const s = sub?.subjectAtRun || {};
   const type = String(s?.type || "none").toLowerCase();
   if (type === "none") return { type: "General", label: "—" };
-  const t = type === "vehicle" ? "Vehicle" : type === "asset" ? "Asset" : type === "performance" ? "Performance" : type;
+  const t =
+    type === "vehicle"
+      ? "Vehicle"
+      : type === "asset"
+        ? "Asset"
+        : type === "performance"
+          ? "Performance"
+          : type;
   const label = s?.label || s?.id || "—";
   return { type: t, rawType: type, label: String(label) };
 }
-function pickLocation(sub){
+function pickLocation(sub) {
   const cands = [
     sub?.location,
     sub?.locationAtRun,
@@ -87,7 +103,11 @@ function pickLocation(sub){
     const lng = Number(loc.lng ?? loc.lon ?? loc.longitude);
     const accuracy = Number(loc.accuracy ?? loc.acc);
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      return { lat, lng, accuracy: Number.isFinite(accuracy) ? accuracy : undefined };
+      return {
+        lat,
+        lng,
+        accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
+      };
     }
   }
   return null;
@@ -95,7 +115,9 @@ function pickLocation(sub){
 function locationBadgeText(sub) {
   const loc = pickLocation(sub);
   if (!loc) return "";
-  const accTxt = Number.isFinite(loc.accuracy) ? ` ±${Math.round(loc.accuracy)}m` : "";
+  const accTxt = Number.isFinite(loc.accuracy)
+    ? ` ±${Math.round(loc.accuracy)}m`
+    : "";
   return `${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}${accTxt}`;
 }
 
@@ -104,9 +126,9 @@ function crc32(buf) {
   let c = ~0 >>> 0;
   for (let i = 0; i < buf.length; i++) {
     c ^= buf[i];
-    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
   }
-  return (~c) >>> 0;
+  return ~c >>> 0;
 }
 function strToUint8(str) {
   return new TextEncoder().encode(str);
@@ -129,7 +151,10 @@ function concatU8(arrs) {
   const len = arrs.reduce((n, a) => n + a.length, 0);
   const out = new Uint8Array(len);
   let off = 0;
-  for (const a of arrs) { out.set(a, off); off += a.length; }
+  for (const a of arrs) {
+    out.set(a, off);
+    off += a.length;
+  }
   return out;
 }
 function makeKmz(kmlString, innerName = "doc.kml") {
@@ -141,7 +166,8 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const version = u16(20);
   const flags = u16(0);
   const methodStore = u16(0); // no compression
-  const time = u16(0), date = u16(0);
+  const time = u16(0),
+    date = u16(0);
   const crc = u32(crc32(data));
   const size = u32(data.length);
   const nameLen = u16(fileNameBytes.length);
@@ -154,40 +180,80 @@ function makeKmz(kmlString, innerName = "doc.kml") {
 
   // Local file header
   const localHeader = concatU8([
-    sigLocal, version, flags, methodStore, time, date, crc, size, size, nameLen, extraLen, fileNameBytes
+    sigLocal,
+    version,
+    flags,
+    methodStore,
+    time,
+    date,
+    crc,
+    size,
+    size,
+    nameLen,
+    extraLen,
+    fileNameBytes,
   ]);
   const localOffset = 0;
   const afterLocalLen = localHeader.length + data.length;
 
   // Central directory header
   const cdHeader = concatU8([
-    sigCD, u16(20), version, flags, methodStore, time, date, crc, size, size, nameLen, extraLen, commentLen,
-    diskNum, intAttr, extAttr, u32(localOffset), fileNameBytes
+    sigCD,
+    u16(20),
+    version,
+    flags,
+    methodStore,
+    time,
+    date,
+    crc,
+    size,
+    size,
+    nameLen,
+    extraLen,
+    commentLen,
+    diskNum,
+    intAttr,
+    extAttr,
+    u32(localOffset),
+    fileNameBytes,
   ]);
 
   // End of central directory
   const cdSize = u32(cdHeader.length);
   const cdOffset = u32(afterLocalLen);
   const total = u16(1);
-  const end = concatU8([sigEnd, diskNum, diskNum, total, total, cdSize, cdOffset, commentLen]);
+  const end = concatU8([
+    sigEnd,
+    diskNum,
+    diskNum,
+    total,
+    total,
+    cdSize,
+    cdOffset,
+    commentLen,
+  ]);
 
   const zip = concatU8([localHeader, data, cdHeader, end]);
   return new Blob([zip], { type: "application/vnd.google-earth.kmz" });
 }
 
 /* ---------------------------- KML builder for export ---------------------------- */
-function xmlEscape(s){
-  return String(s ?? "").replace(/[<>&'"]/g, ch => (
-    ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : ch === "&" ? "&amp;" : ch === '"' ? "&quot;" : "&apos;"
-  ));
+function xmlEscape(s) {
+  return String(s ?? "").replace(/[<>&'"]/g, (ch) =>
+    ch === "<"
+      ? "&lt;"
+      : ch === ">"
+        ? "&gt;"
+        : ch === "&"
+          ? "&amp;"
+          : ch === '"'
+            ? "&quot;"
+            : "&apos;",
+  );
 }
 function buildKml(
   subs,
-  {
-    projectNames = {},
-    taskNames = {},
-    milestoneNames = {},
-  } = {}
+  { projectNames = {}, taskNames = {}, milestoneNames = {} } = {},
 ) {
   const header = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -203,61 +269,70 @@ function buildKml(
     <IconStyle><color>ff7f7f7f</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon></IconStyle>
   </Style>
 `;
-  const placemarks = subs.map(s => {
-    const loc = pickLocation(s);
-    if (!loc) return "";
-    const subj = subjectDisplay(s);
-const title = s.formTitle || s.title || "Inspection";
+  const placemarks = subs
+    .map((s) => {
+      const loc = pickLocation(s);
+      if (!loc) return "";
+      const subj = subjectDisplay(s);
+      const title = s.formTitle || s.title || "Inspection";
 
-// IDs
-const projId = s?.links?.projectId;
-const taskId = s?.links?.taskId;
-const mileId = s?.links?.milestoneId;
+      // IDs
+      const projId = s?.links?.projectId;
+      const taskId = s?.links?.taskId;
+      const mileId = s?.links?.milestoneId;
 
-// Human names using the maps from component state
-const proj = projId ? (projectNames[String(projId)] || String(projId)) : "";
-const task = taskId ? (taskNames[String(taskId)] || String(taskId)) : "";
-const mileKey = taskId && mileId ? `${taskId}:${mileId}` : null;
-const mile =
-  mileId && mileKey
-    ? (milestoneNames[mileKey] || String(mileId))
-    : (mileId ? String(mileId) : "");
+      // Human names using the maps from component state
+      const proj = projId ? projectNames[String(projId)] || String(projId) : "";
+      const task = taskId ? taskNames[String(taskId)] || String(taskId) : "";
+      const mileKey = taskId && mileId ? `${taskId}:${mileId}` : null;
+      const mile =
+        mileId && mileKey
+          ? milestoneNames[mileKey] || String(mileId)
+          : mileId
+            ? String(mileId)
+            : "";
 
-// Inspector
-const inspector =
-  s?.runBy?.name ||
-  s?.runBy?.email ||
-  s?.signoff?.name ||
-  s?.signoff?.email ||
-  "";
+      // Inspector
+      const inspector =
+        s?.runBy?.name ||
+        s?.runBy?.email ||
+        s?.signoff?.name ||
+        s?.signoff?.email ||
+        "";
 
-// Outcome / status with fallback from answers
-const answers = Array.isArray(s?.answers) ? s.answers : [];
-const anyFail = answers.some((a) => a?.result === "fail" || a?.pass === false);
+      // Outcome / status with fallback from answers
+      const answers = Array.isArray(s?.answers) ? s.answers : [];
+      const anyFail = answers.some(
+        (a) => a?.result === "fail" || a?.pass === false,
+      );
 
-let status = String(s?.overallResult || "").toLowerCase();
-if (!status || status === "na") {
-  status = anyFail ? "fail" : "pass";
-}
+      let status = String(s?.overallResult || "").toLowerCase();
+      if (!status || status === "na") {
+        status = anyFail ? "fail" : "pass";
+      }
 
-// Scope
-const scope = s?.scopeAtRun || s?.scope?.type || "";
+      // Scope
+      const scope = s?.scopeAtRun || s?.scope?.type || "";
 
-// When
-const createdRaw =
-  s?.submittedAt || s?.createdAt || s?.completedAt || s?.finishedAt || s?.updatedAt;
-const dateStr = createdRaw ? new Date(createdRaw).toLocaleString() : "";
+      // When
+      const createdRaw =
+        s?.submittedAt ||
+        s?.createdAt ||
+        s?.completedAt ||
+        s?.finishedAt ||
+        s?.updatedAt;
+      const dateStr = createdRaw ? new Date(createdRaw).toLocaleString() : "";
 
-// “Description” / subject text – best-effort
-const descriptionText =
-  s?.subjectAtRun?.description ||
-  s?.description ||
-  s?.summary ||
-  s?.note ||
-  s?.managerNote ||
-  "";
+      // “Description” / subject text – best-effort
+      const descriptionText =
+        s?.subjectAtRun?.description ||
+        s?.description ||
+        s?.summary ||
+        s?.note ||
+        s?.managerNote ||
+        "";
 
-    const descHtml = `
+      const descHtml = `
       <![CDATA[
         <div style="font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;font-size:12px">
           <h3 style="margin:0 0 6px 0">${xmlEscape(title)}</h3>
@@ -266,7 +341,7 @@ const descriptionText =
             <tr><td><b>Inspector</b></td><td>${xmlEscape(inspector)}</td></tr>
             <tr><td><b>Project</b></td><td>${xmlEscape(proj)}</td></tr>
             <tr><td><b>Task</b></td><td>${xmlEscape(task)}</td></tr>
-            <tr><td><b>Milestone</b></td><td>${xmlEscape(mile)}</td></tr>
+            <tr><td><b>Deliverable</b></td><td>${xmlEscape(mile)}</td></tr>
             <tr><td><b>Subject</b></td><td>${xmlEscape(subj.type)} – ${xmlEscape(subj.label)}</td></tr>
             <tr><td><b>Status</b></td><td>${xmlEscape(status.toUpperCase())}</td></tr>
             <tr><td><b>Scope</b></td><td>${xmlEscape(String(scope))}</td></tr>
@@ -274,20 +349,22 @@ const descriptionText =
         </div>
       ]]>`;
 
-    const styleUrl = status === "pass" ? "#pass" : status === "fail" ? "#fail" : "#na";
+      const styleUrl =
+        status === "pass" ? "#pass" : status === "fail" ? "#fail" : "#na";
 
-    // KML uses lon,lat[,alt]
-    const lon = loc.lng; const lat = loc.lat;
-    return `
+      // KML uses lon,lat[,alt]
+      const lon = loc.lng;
+      const lat = loc.lat;
+      return `
   <Placemark>
     <name>${xmlEscape(title)}</name>
     <styleUrl>${styleUrl}</styleUrl>
     <description>${descHtml}</description>
     <ExtendedData>
-  <Data name="title"><value>${xmlEscape(title)}</value></Data>
+  <Data>
   <Data name="project"><value>${xmlEscape(proj || "")}</value></Data>
   <Data name="task"><value>${xmlEscape(task || "")}</value></Data>
-  <Data name="milestone"><value>${xmlEscape(mile || "")}</value></Data>
+  <Data name="deliverable"><value>${xmlEscape(mile || "")}</value></Data>
   <Data name="subjectType"><value>${xmlEscape(subj.rawType || "")}</value></Data>
   <Data name="subjectLabel"><value>${xmlEscape(subj.label)}</value></Data>
   <Data name="description"><value>${xmlEscape(descriptionText)}</value></Data>
@@ -297,7 +374,9 @@ const descriptionText =
 </ExtendedData>
     <Point><coordinates>${lon},${lat},0</coordinates></Point>
   </Placemark>`;
-  }).filter(Boolean).join("\n");
+    })
+    .filter(Boolean)
+    .join("\n");
 
   const footer = `
 </Document>
@@ -354,7 +433,9 @@ export default function Inspections() {
       setSubs(Array.isArray(rows) ? rows : []);
     } catch (e) {
       setSubs([]);
-      setErrSubs(e?.response?.data?.error || e?.message || "Failed to load submissions");
+      setErrSubs(
+        e?.response?.data?.error || e?.message || "Failed to load submissions",
+      );
     } finally {
       setLoadingSubs(false);
     }
@@ -374,7 +455,9 @@ export default function Inspections() {
       setForms(Array.isArray(rows) ? rows : []);
     } catch (e) {
       setForms([]);
-      setErrForms(e?.response?.data?.error || e?.message || "Failed to load forms");
+      setErrForms(
+        e?.response?.data?.error || e?.message || "Failed to load forms",
+      );
     } finally {
       setLoadingForms(false);
     }
@@ -398,7 +481,8 @@ export default function Inspections() {
     }
     for (const f of forms || []) {
       const sc = f?.scope || {};
-      if (sc.projectId && !sc.projectName) wantProjects.add(String(sc.projectId));
+      if (sc.projectId && !sc.projectName)
+        wantProjects.add(String(sc.projectId));
       if (sc.taskId && !sc.taskName) wantTasks.add(String(sc.taskId));
       if (sc.taskId && sc.milestoneId && !sc.milestoneName) {
         wantMilestones.add(`${sc.taskId}:${sc.milestoneId}`);
@@ -419,10 +503,11 @@ export default function Inspections() {
             } catch {
               next[id] = id;
             }
-          })
+          }),
         );
       }
-      if (Object.keys(next).length) setProjectNames((prev) => ({ ...prev, ...next }));
+      if (Object.keys(next).length)
+        setProjectNames((prev) => ({ ...prev, ...next }));
     })();
 
     (async () => {
@@ -439,14 +524,17 @@ export default function Inspections() {
             } catch {
               next[id] = id;
             }
-          })
+          }),
         );
       }
-      if (Object.keys(next).length) setTaskNames((prev) => ({ ...prev, ...next }));
+      if (Object.keys(next).length)
+        setTaskNames((prev) => ({ ...prev, ...next }));
     })();
 
     (async () => {
-      const missingPairs = [...wantMilestones].filter((k) => !milestoneNames[k]);
+      const missingPairs = [...wantMilestones].filter(
+        (k) => !milestoneNames[k],
+      );
       if (!missingPairs.length) return;
       const byTask = new Map();
       for (const key of missingPairs) {
@@ -465,7 +553,9 @@ export default function Inspections() {
               const arr = Array.isArray(data) ? data : [];
               const wanted = byTask.get(taskId) || new Set();
               for (const mId of wanted) {
-                const found = arr.find((m) => String(m._id || m.id) === String(mId));
+                const found = arr.find(
+                  (m) => String(m._id || m.id) === String(mId),
+                );
                 next[`${taskId}:${mId}`] = labelOf(found) || mId;
               }
             } catch {
@@ -473,10 +563,11 @@ export default function Inspections() {
                 next[`${taskId}:${mId}`] = mId;
               }
             }
-          })
+          }),
         );
       }
-      if (Object.keys(next).length) setMilestoneNames((prev) => ({ ...prev, ...next }));
+      if (Object.keys(next).length)
+        setMilestoneNames((prev) => ({ ...prev, ...next }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subs, forms]);
@@ -548,9 +639,10 @@ export default function Inspections() {
         const subj = subjectDisplay(s);
         const locTxt = locationBadgeText(s) || "";
 
-        const searchable = `${title} ${type} ${scope} ${proj} ${task} ${mile} ${inspector} ${dateStr} ${status} ${
-          isDeleted ? "deleted" : ""
-        } ${subj.type} ${subj.label} ${locTxt}`.toLowerCase();
+        const searchable =
+          `${title} ${type} ${scope} ${proj} ${task} ${mile} ${inspector} ${dateStr} ${status} ${
+            isDeleted ? "deleted" : ""
+          } ${subj.type} ${subj.label} ${locTxt}`.toLowerCase();
         const matchesSearch = !needle || searchable.includes(needle);
         const matchesMine = !mineOnly || isMine(s);
         const matchesDeleted = showDeletedSubs || !isDeleted; // FIX: hide deleted unless toggle is on
@@ -580,7 +672,15 @@ export default function Inspections() {
 
     rows.sort((a, b) => b.createdAt - a.createdAt);
     return rows;
-  }, [subs, qDeb, mineOnly, projectNames, taskNames, milestoneNames, showDeletedSubs]); // FIX: depend on showDeletedSubs
+  }, [
+    subs,
+    qDeb,
+    mineOnly,
+    projectNames,
+    taskNames,
+    milestoneNames,
+    showDeletedSubs,
+  ]); // FIX: depend on showDeletedSubs
 
   const submittedPage = useMemo(() => {
     const start = (page - 1) * pageSize;
@@ -594,8 +694,8 @@ export default function Inspections() {
 
   // For KMZ export, use ALL filtered rows (ignore pagination) but only those with coords
   const filteredWithCoords = useMemo(
-    () => submittedFiltered.map(r => r.raw).filter(s => !!pickLocation(s)),
-    [submittedFiltered]
+    () => submittedFiltered.map((r) => r.raw).filter((s) => !!pickLocation(s)),
+    [submittedFiltered],
   );
 
   /* ===== Available forms (search only) ===== */
@@ -606,16 +706,21 @@ export default function Inspections() {
         const scope = f?.scope?.type || "global";
         const type = f?.formType || "standard";
         const title = f?.title || "Form";
-        const proj = f?.scope?.projectName || idToName(f?.scope?.projectId, projectNames);
-        const task = f?.scope?.taskName || idToName(f?.scope?.taskId, taskNames);
+        const proj =
+          f?.scope?.projectName || idToName(f?.scope?.projectId, projectNames);
+        const task =
+          f?.scope?.taskName || idToName(f?.scope?.taskId, taskNames);
         const mile =
           f?.scope?.milestoneName ||
-          (f?.scope?.taskId && f?.scope?.milestoneId ? milestoneNames[`${f.scope.taskId}:${f.scope.milestoneId}`] : "");
+          (f?.scope?.taskId && f?.scope?.milestoneId
+            ? milestoneNames[`${f.scope.taskId}:${f.scope.milestoneId}`]
+            : "");
 
         const isDeleted = !!f.isDeleted; // FIX: inspect deletion
         if (!showDeletedForms && isDeleted) return null; // FIX: hide unless toggled
 
-        const searchable = `${title} ${type} ${scope} ${proj} ${task} ${mile}`.toLowerCase();
+        const searchable =
+          `${title} ${type} ${scope} ${proj} ${task} ${mile}`.toLowerCase();
         const match = !needle || searchable.includes(needle);
         if (!match) return null;
 
@@ -656,7 +761,8 @@ export default function Inspections() {
     }
   }
   async function onHardDeleteSub(id) {
-    if (!confirm("This will permanently delete the submission. Continue?")) return;
+    if (!confirm("This will permanently delete the submission. Continue?"))
+      return;
     try {
       await hardDeleteSubmission(id);
       await loadSubs();
@@ -666,9 +772,11 @@ export default function Inspections() {
   }
 
   const canAdminSub = canAdminSubFrom(me);
-  const isAdmin = (me.roles || []).includes("admin") || (me.roles || []).includes("superadmin");
+  const isAdmin =
+    (me.roles || []).includes("admin") ||
+    (me.roles || []).includes("superadmin");
 
-    function exportKmz() {
+  function exportKmz() {
     // Prefer filtered rows (respect search/mineOnly), but if none,
     // fall back to ALL submissions that have coordinates.
     const preferred = filteredWithCoords;
@@ -720,7 +828,11 @@ export default function Inspections() {
               className="btn btn-sm"
               disabled={!filteredWithCoords.length}
               onClick={exportKmz}
-              title={filteredWithCoords.length ? "Export the filtered list to KMZ" : "Nothing to export (no coordinates in filtered set)"}
+              title={
+                filteredWithCoords.length
+                  ? "Export the filtered list to KMZ"
+                  : "Nothing to export (no coordinates in filtered set)"
+              }
             >
               Export KMZ ({filteredWithCoords.length})
             </button>
@@ -733,7 +845,7 @@ export default function Inspections() {
         <input
           className="input input-bordered"
           style={{ minWidth: 280 }}
-          placeholder="Search title, type, scope, project, task, milestone, inspector, subject, location…"
+          placeholder="Search title, type, scope, project, task, deliverable, inspector, subject, location…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -816,7 +928,7 @@ export default function Inspections() {
                   <th>Scope</th>
                   <th>Project</th>
                   <th>Task</th>
-                  <th>Milestone</th>
+                  <th>Deliverable</th>
                   <th>Subject</th>
                   <th>Inspector</th>
                   <th>Date Submitted</th>
@@ -843,7 +955,11 @@ export default function Inspections() {
                             </span>
                           )}
                           {r.locationText ? (
-                            <span className="loc-pill" title={r.locationText} aria-label={`Location ${r.locationText}`}>
+                            <span
+                              className="loc-pill"
+                              title={r.locationText}
+                              aria-label={`Location ${r.locationText}`}
+                            >
                               📍
                             </span>
                           ) : null}
@@ -857,7 +973,10 @@ export default function Inspections() {
                       <td>
                         <div className="text-xs">
                           <div className="font-medium">{r.subjectType}</div>
-                          <div className="text-gray-600 truncate max-w-[180px]" title={r.subjectLabel}>
+                          <div
+                            className="text-gray-600 truncate max-w-[180px]"
+                            title={r.subjectLabel}
+                          >
                             {r.subjectLabel || "—"}
                           </div>
                         </div>
@@ -867,7 +986,11 @@ export default function Inspections() {
                       <td>
                         <span
                           className={`chip ${
-                            r.status === "pass" ? "chip-pass" : r.status === "fail" ? "chip-fail" : "chip-na"
+                            r.status === "pass"
+                              ? "chip-pass"
+                              : r.status === "fail"
+                                ? "chip-fail"
+                                : "chip-na"
                           }`}
                         >
                           {r.status.toUpperCase()}
@@ -875,20 +998,32 @@ export default function Inspections() {
                       </td>
                       <td className="text-right">
                         <div className="inline-flex gap-2">
-                          <Link to={`/inspections/${r._id}`} className="btn btn-sm">
+                          <Link
+                            to={`/inspections/${r._id}`}
+                            className="btn btn-sm"
+                          >
                             View
                           </Link>
                           {canAdminSub && !r.isDeleted && (
-                            <button className="btn btn-sm" onClick={() => onSoftDeleteSub(r._id)}>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => onSoftDeleteSub(r._id)}
+                            >
                               Delete
                             </button>
                           )}
                           {canAdminSub && r.isDeleted && (
                             <>
-                              <button className="btn btn-sm" onClick={() => onRestoreSub(r._id)}>
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => onRestoreSub(r._id)}
+                              >
                                 Restore
                               </button>
-                              <button className="btn btn-sm btn-error" onClick={() => onHardDeleteSub(r._id)}>
+                              <button
+                                className="btn btn-sm btn-error"
+                                onClick={() => onHardDeleteSub(r._id)}
+                              >
                                 Delete
                               </button>
                             </>
@@ -900,7 +1035,9 @@ export default function Inspections() {
                 ) : (
                   <tr>
                     <td colSpan={11} className="p-4 text-gray-600">
-                      {mineOnly ? "No submissions found for you." : "No submissions found."}
+                      {mineOnly
+                        ? "No submissions found for you."
+                        : "No submissions found."}
                     </td>
                   </tr>
                 )}
@@ -929,13 +1066,21 @@ export default function Inspections() {
                   </option>
                 ))}
               </select>
-              <button className="btn btn-sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+              <button
+                className="btn btn-sm"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
                 Prev
               </button>
               <div className="text-sm">
                 Page {page} / {pageCount}
               </div>
-              <button className="btn btn-sm" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>
+              <button
+                className="btn btn-sm"
+                disabled={page >= pageCount}
+                onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+              >
                 Next
               </button>
             </div>
@@ -958,7 +1103,7 @@ export default function Inspections() {
                   <th>Scope</th>
                   <th>Project</th>
                   <th>Task</th>
-                  <th>Milestone</th>
+                  <th>Deliverable</th>
                   <th className="text-right">Actions</th>
                 </tr>
               </thead>
@@ -989,7 +1134,10 @@ export default function Inspections() {
                       <td>{f.milestone}</td>
                       <td className="text-right">
                         <div className="inline-flex gap-2">
-                          <Link to={`/inspections/run/${f._id}`} className="btn btn-sm">
+                          <Link
+                            to={`/inspections/run/${f._id}`}
+                            className="btn btn-sm"
+                          >
                             Run
                           </Link>
                           {isAdmin ? (
@@ -1010,7 +1158,8 @@ export default function Inspections() {
                                 <button
                                   className="btn btn-sm btn-error"
                                   onClick={async () => {
-                                    if (!confirm("Hard delete permanently?")) return;
+                                    if (!confirm("Hard delete permanently?"))
+                                      return;
                                     await hardDeleteForm(f._id);
                                     await loadForms();
                                   }}
