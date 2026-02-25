@@ -528,6 +528,14 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [activitySort, setActivitySort] = useState("desc"); // 'desc' newest first | 'asc'
   const [editingLogId, setEditingLogId] = useState(null); // null => add, else edit
 
+    // NEW: Event-based activity logs (mobile app writes these into Events collection)
+  const [eventActivities, setEventActivities] = useState([]);
+  const [eventActivitiesErr, setEventActivitiesErr] = useState("");
+
+  // NEW: Task coverage records (so they can show in Activity + export together)
+  const [coverageItems, setCoverageItems] = useState([]);
+  const [coverageErr, setCoverageErr] = useState("");
+
   // Image lightbox
   const [imgOpen, setImgOpen] = useState(false);
   const [imgSrc, setImgSrc] = useState("");
@@ -706,6 +714,146 @@ export default function TaskDetail({ id: propId, onClose }) {
   }
   useEffect(() => {
     loadTask();
+  }, [id]);
+
+    // ---------- load event-based activity logs (mobile) ----------
+  function normalizeEventActivity(doc) {
+    // supports your mongo example:
+    // { eventType:"activity-log", entityRef:"<taskId>", payload:{ note, milestone, lat, lng, capturedAt, createdAt, ... } }
+    const p = doc?.payload || {};
+    const at =
+      p.capturedAt ||
+      p.at ||
+      p.createdAt ||
+      doc?.createdAtClient ||
+      doc?.createdAt ||
+      doc?.receivedAt ||
+      null;
+
+    return {
+      _id: String(doc?._id || doc?.id || ""),
+      source: "event",
+      at,
+      action: p.action || "activity",
+      note: p.note || "",
+      milestoneId: p.milestoneId || p.milestone || p.milestone_id || "",
+      lat: p.lat ?? null,
+      lng: p.lng ?? null,
+      by:
+        doc?.actorName ||
+        doc?.actorEmail ||
+        p.actorName ||
+        p.actorEmail ||
+        p.userName ||
+        p.userId ||
+        doc?.userId ||
+        "—",
+      // keep raw for KML/coverage fallback if needed
+      _raw: doc,
+    };
+  }
+
+  async function loadEventActivities() {
+    setEventActivitiesErr("");
+    try {
+      // Try common endpoint shapes; first one that works wins.
+      // 1) /events?eventType=activity-log&entityRef=:taskId
+      try {
+        const { data } = await api.get("/events", {
+          params: {
+            eventType: "activity-log",
+            entityRef: id,
+            limit: 1000,
+            _ts: Date.now(),
+          },
+        });
+
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.items)
+            ? data.items
+            : Array.isArray(data?.rows)
+              ? data.rows
+              : Array.isArray(data?.data)
+                ? data.data
+                : [];
+
+        setEventActivities(list.map(normalizeEventActivity).filter((x) => x._id));
+        return;
+      } catch (e1) {
+        // 2) /events/activity-log?taskId=:id
+        const { data } = await api.get("/events/activity-log", {
+          params: { taskId: id, limit: 1000, _ts: Date.now() },
+        });
+
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.items)
+            ? data.items
+            : Array.isArray(data?.rows)
+              ? data.rows
+              : Array.isArray(data?.data)
+                ? data.data
+                : [];
+
+        setEventActivities(list.map(normalizeEventActivity).filter((x) => x._id));
+      }
+    } catch (e) {
+      setEventActivities([]);
+      setEventActivitiesErr(e?.response?.data?.error || "Failed to load mobile activity logs");
+    }
+  }
+
+  // ---------- load task coverage (so it can appear in activity log + KMZ) ----------
+  function normalizeCoverageRow(c) {
+    const when = c?.date || c?.createdAt || c?.capturedAt || c?.updatedAt || null;
+    return {
+      _id: String(c?._id || c?.id || ""),
+      source: "coverage",
+      at: when,
+      action: "coverage",
+      note: c?.title || c?.filename || "Task coverage",
+      milestoneId: c?.milestoneId || c?.milestone || "",
+      // no guaranteed point; we derive a representative point later for exports if needed
+      lat: null,
+      lng: null,
+      geometry:
+        c?.geometry ||
+        c?.geojson ||
+        c?.geoJSON ||
+        (c?.feature && c.feature.geometry) ||
+        null,
+      _raw: c,
+    };
+  }
+
+  async function loadCoverageItems() {
+    setCoverageErr("");
+    try {
+      const { data } = await api.get(`/tasks/${id}/coverage`, {
+        params: { limit: 1000, _ts: Date.now() },
+      });
+
+      const list = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.rows)
+          ? data.rows
+          : Array.isArray(data)
+            ? data
+            : [];
+
+      setCoverageItems(list.map(normalizeCoverageRow).filter((x) => x._id));
+    } catch (e) {
+      setCoverageItems([]);
+      setCoverageErr(e?.response?.data?.error || "Failed to load coverage");
+    }
+  }
+
+  // load on task change
+  useEffect(() => {
+    if (!id) return;
+    loadEventActivities();
+    loadCoverageItems();
   }, [id]);
 
   /* ---------- milestones ---------- */
@@ -1730,6 +1878,45 @@ export default function TaskDetail({ id: propId, onClose }) {
     );
     return m;
   }, [milestones]);
+
+    // ---------- unified activity list (task logs + mobile events + coverage) ----------
+  function normalizeTaskLogRow(e) {
+                        const rowId = String(e._id || "");
+                    const by = e.by || "—";
+
+    const milestoneId =
+      e?.milestoneId || e?.milestone || (e?.meta && e.meta.milestoneId) || "";
+
+    return {
+      _id: rowId || `tasklog:${Math.random().toString(16).slice(2)}`,
+      source: "task",
+      at: e?.at || null,
+      action: e?.action || "",
+      note: e?.note || "",
+      milestoneId,
+      lat: e?.lat ?? null,
+      lng: e?.lng ?? null,
+      by,
+      _raw: e,
+    };
+  }
+
+  const activityRows = useMemo(() => {
+    const taskRows = (task?.actualDurationLog || []).map(normalizeTaskLogRow);
+
+    // de-dup by _id (best-effort)
+    const seen = new Set();
+    const all = [...taskRows, ...(eventActivities || []), ...(coverageItems || [])]
+      .filter((r) => r && r._id)
+      .filter((r) => {
+        if (seen.has(r._id)) return false;
+        seen.add(r._id);
+        return true;
+      })
+      .filter((r) => (!fltFrom && !fltTo ? true : inDateWindow(r.at)));
+
+    return all;
+  }, [task, eventActivities, coverageItems, fltFrom, fltTo]);
 
   if (!task) return <div className="p-4">{err ? err : "Loading…"}</div>;
 
@@ -2952,7 +3139,7 @@ export default function TaskDetail({ id: propId, onClose }) {
               <button
                 className="px-3 py-2 border rounded"
                 onClick={async () => {
-                  const rows = (task.actualDurationLog || []).filter((e) =>
+                    const rows = activityRows;
                     !fltFrom && !fltTo ? true : inDateWindow(e.at),
                   );
                   if (!rows.length) {
@@ -2976,16 +3163,9 @@ export default function TaskDetail({ id: propId, onClose }) {
                       const safe = (s) =>
                         `"${String(s ?? "").replace(/"/g, '""')}"`;
 
-                      const by =
-                        e.userId && (e.userId.name || e.userId.email)
-                          ? e.userId.name || e.userId.email
-                          : e.actorName || e.actorEmail || e.actorSub || "";
+                                            const by = e.by || "";
 
-                      const rowMilestoneId =
-                        e.milestoneId ||
-                        e.milestone ||
-                        (e.meta && e.meta.milestoneId) ||
-                        "";
+                                          const rowMilestoneId = e.milestoneId || "";
                       const milestoneName = rowMilestoneId
                         ? msTitleById.get(String(rowMilestoneId)) ||
                           String(rowMilestoneId)
@@ -3027,6 +3207,117 @@ export default function TaskDetail({ id: propId, onClose }) {
                 }}
               >
                 Export Activity CSV
+              </button>
+
+                            <button
+                className="px-3 py-2 border rounded"
+                onClick={async () => {
+                  try {
+                    // Ensure freshest coverage list for geometry export
+                    await loadCoverageItems();
+
+                    // 1) Point placemarks for any activity row that has lat/lng
+                    const points = activityRows.filter((r) => {
+                      const has =
+                        Number.isFinite(Number(r.lat)) &&
+                        Number.isFinite(Number(r.lng));
+                      return has;
+                    });
+
+                    // 2) Coverage geometry placemarks (LineString/Polygon)
+                    const coveragePlacemarks = (coverageItems || [])
+                      .map((c, i) => {
+                        let geom = c.geometry;
+                        if (!geom) return "";
+
+                        if (geom.type === "Feature" && geom.geometry) geom = geom.geometry;
+
+                        const name = c.note || `Coverage ${i + 1}`;
+
+                        if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
+                          const coords = geom.coordinates
+                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
+                            .join(" ");
+                          return `
+<Placemark>
+  <name>${escapeXml(name)}</name>
+  <LineString><coordinates>${coords}</coordinates></LineString>
+</Placemark>`;
+                        }
+
+                        if (
+                          geom.type === "Polygon" &&
+                          Array.isArray(geom.coordinates) &&
+                          geom.coordinates[0]
+                        ) {
+                          const outer = geom.coordinates[0];
+                          const coords = outer
+                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
+                            .join(" ");
+                          return `
+<Placemark>
+  <name>${escapeXml(name)}</name>
+  <Polygon>
+    <outerBoundaryIs>
+      <LinearRing><coordinates>${coords}</coordinates></LinearRing>
+    </outerBoundaryIs>
+  </Polygon>
+</Placemark>`;
+                        }
+
+                        return "";
+                      })
+                      .join("");
+
+                    const pointPlacemarks = points
+                      .map((r, idx) => {
+                        const when = r.at ? new Date(r.at).toLocaleString() : "—";
+                        const msName = r.milestoneId
+                          ? msTitleById.get(String(r.milestoneId)) || String(r.milestoneId)
+                          : "";
+
+                        const desc = [
+                          `When: ${when}`,
+                          `Action: ${r.action || "—"}`,
+                          msName ? `Milestone: ${msName}` : null,
+                          r.by ? `By: ${r.by}` : null,
+                          r.note ? `Note: ${r.note}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join("\n");
+
+                        return `
+<Placemark>
+  <name>${escapeXml(`${r.action || "activity"} #${idx + 1}`)}</name>
+  <description>${escapeXml(desc)}</description>
+  <Point><coordinates>${r6(Number(r.lng))},${r6(Number(r.lat))},0</coordinates></Point>
+</Placemark>`;
+                      })
+                      .join("");
+
+                    const placemarks = `${pointPlacemarks}${coveragePlacemarks}`.trim();
+
+                    if (!placemarks) {
+                      setErr("No activities with coordinates and no coverage geometry to export.");
+                      return;
+                    }
+
+                    const title = `activities_${(task?.title || id).replace(/[^\w\-]+/g, "_")}`;
+
+                    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document><name>${escapeXml(title)}</name>${placemarks}</Document>
+</kml>`;
+
+                    await downloadKMZ(`${title}.kmz`, kml);
+                    setInfo("Exported Activities KMZ.");
+                    setTimeout(() => setInfo(""), 1000);
+                  } catch (e) {
+                    setErr(e?.response?.data?.error || String(e));
+                  }
+                }}
+              >
+                Export Activities KMZ
               </button>
 
               <button
@@ -3136,11 +3427,7 @@ export default function TaskDetail({ id: propId, onClose }) {
                           ? new Date(e.at).toLocaleString()
                           : "—";
 
-                        const rowMilestoneId =
-                          e.milestoneId ||
-                          e.milestone ||
-                          (e.meta && e.meta.milestoneId) ||
-                          "";
+                                              const rowMilestoneId = e.milestoneId || "";
                         const milestoneName = rowMilestoneId
                           ? msTitleById.get(String(rowMilestoneId)) ||
                             String(rowMilestoneId)
@@ -3222,8 +3509,8 @@ export default function TaskDetail({ id: propId, onClose }) {
               </tr>
             </thead>
             <tbody>
-              {(task.actualDurationLog || []).length ? (
-                (task.actualDurationLog || [])
+               {activityRows.length ? (
+                activityRows
                   .filter((e) =>
                     !fltFrom && !fltTo ? true : inDateWindow(e.at),
                   )
@@ -3309,7 +3596,7 @@ export default function TaskDetail({ id: propId, onClose }) {
                           <div className="flex items-center gap-3">
                             {thumb}
                             <div className="whitespace-pre-wrap">
-                              {e.note || "—"}
+                                                            {e.note || (e.action === "coverage" ? "Coverage captured" : "—")}
                             </div>
                           </div>
                         </td>

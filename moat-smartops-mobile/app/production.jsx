@@ -11,7 +11,6 @@ import {
   FlatList,
   Image,
   Modal,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -77,6 +76,32 @@ function decodeJwtPayload(token) {
   } catch {
     return null;
   }
+}
+
+function nowUtcIso() {
+  return new Date().toISOString();
+}
+
+function localIsoWithOffset(d = new Date()) {
+  // "YYYY-MM-DDTHH:mm:ss.sss+02:00" style
+  const pad = (n) => String(Math.abs(Math.trunc(n))).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+
+  const offMin = -d.getTimezoneOffset(); // local - UTC in minutes (SA: +120)
+  const sign = offMin >= 0 ? "+" : "-";
+  const offH = pad(offMin / 60);
+  const offM = pad(offMin % 60);
+
+  return {
+    localIso: `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}.${ms}${sign}${offH}:${offM}`,
+    tzOffsetMinutes: offMin,
+  };
 }
 
 function pickId(x) {
@@ -375,90 +400,6 @@ export default function ProductionScreen() {
   const router = useRouter();
   const [mode, setMode] = useState("project");
 
-  // ----- DEBUG PANEL (shows AsyncStorage + JWT on screen) -----
-  const [debugOpen, setDebugOpen] = useState(false);
-  const [debugText, setDebugText] = useState(
-    "Tap 'Debug' to load storage info...",
-  );
-
-  async function loadDebugInfo() {
-    try {
-      const lines = []; // ✅ MUST be first
-
-      const keys = await AsyncStorage.getAllKeys();
-
-      const token = await AsyncStorage.getItem(TOKEN_KEY);
-      const orgId = await AsyncStorage.getItem(ORG_KEY);
-
-      // ✅ Try multiple userId keys
-      let storedUserId = null;
-      for (const k of USER_ID_KEYS) {
-        const v = await AsyncStorage.getItem(k);
-        if (v) {
-          storedUserId = v;
-          break;
-        }
-      }
-
-      const payload = token ? decodeJwtPayload(token) : null;
-
-      const preview = (v) => {
-        if (!v) return "";
-        const s = String(v);
-        return s.length > 250 ? s.slice(0, 250) + "..." : s;
-      };
-
-      // ✅ Show sample cached data shapes (tasks/users)
-      const cachedTasksRaw = await AsyncStorage.getItem(CACHE_TASKS_KEY);
-      const cachedUsersRaw = await AsyncStorage.getItem("@moat:cache:users");
-
-      const cachedTasks = safeJsonParse(cachedTasksRaw) || [];
-      const cachedUsers = safeJsonParse(cachedUsersRaw) || [];
-
-      const firstTask = Array.isArray(cachedTasks) ? cachedTasks[0] : null;
-      const firstUser = Array.isArray(cachedUsers) ? cachedUsers[0] : null;
-
-      lines.push("=== ASYNC STORAGE KEYS ===");
-      lines.push(keys.join("\n") || "(no keys found)");
-      lines.push("");
-
-      lines.push("=== IMPORTANT VALUES ===");
-      lines.push(`ORG_KEY (${ORG_KEY}): ${orgId || "(missing)"}`);
-      lines.push(
-        `USER_ID (from ${USER_ID_KEYS.join(", ")}): ${storedUserId || "(missing)"}`,
-      );
-      lines.push(
-        `TOKEN_KEY (${TOKEN_KEY}): ${token ? preview(token) : "(missing)"}`,
-      );
-      lines.push("");
-
-      lines.push("=== JWT PAYLOAD (decoded) ===");
-      lines.push(
-        payload
-          ? JSON.stringify(payload, null, 2)
-          : "(could not decode token payload)",
-      );
-      lines.push("");
-
-      lines.push("=== SAMPLE TASK (first item) ===");
-      lines.push(
-        firstTask ? JSON.stringify(firstTask, null, 2) : "(no tasks cached)",
-      );
-      lines.push("");
-
-      lines.push("=== SAMPLE USER (first item) ===");
-      lines.push(
-        firstUser ? JSON.stringify(firstUser, null, 2) : "(no users cached)",
-      );
-
-      setDebugText(lines.join("\n"));
-      setDebugOpen(true);
-    } catch (e) {
-      setDebugText("DEBUG ERROR: " + (e?.message || String(e)));
-      setDebugOpen(true);
-    }
-  }
-
   /* -------------------- OFFLINE LIST STATE -------------------- */
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -721,6 +662,34 @@ export default function ProductionScreen() {
     }
   }
 
+  /* -------------------- AUDIT LOCATION HELPERS -------------------- */
+  async function getAuditLocation() {
+    try {
+      // Don’t crash if permissions denied; just return null
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") return null;
+
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+
+      const c = pos?.coords;
+      if (!c) return null;
+
+      return {
+        lat: c.latitude,
+        lng: c.longitude,
+        accuracy: c.accuracy ?? null,
+        altitude: c.altitude ?? null,
+        heading: c.heading ?? null,
+        speed: c.speed ?? null,
+        capturedAt: new Date(pos.timestamp).toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /* -------------------- ORG / USER from storage -------------------- */
   async function getOrgAndUser() {
     const orgId = await AsyncStorage.getItem(ORG_KEY);
@@ -794,7 +763,10 @@ export default function ProductionScreen() {
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIso = nowUtcIso();
+      const { localIso: nowLocalIso, tzOffsetMinutes } = localIsoWithOffset(
+        new Date(),
+      );
       const { orgId, userId } = await getOrgAndUser();
 
       const doc = {
@@ -808,6 +780,11 @@ export default function ProductionScreen() {
         syncStatus: "pending",
         createdAt: nowIso,
         updatedAt: nowIso,
+
+        capturedAtLocal: nowLocalIso,
+        createdAtLocal: nowLocalIso,
+        updatedAtLocal: nowLocalIso,
+        tzOffsetMinutes,
       };
 
       await saveUserDocumentAttachment(doc);
@@ -850,8 +827,12 @@ export default function ProductionScreen() {
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIso = nowUtcIso();
+      const { localIso: nowLocalIso, tzOffsetMinutes } = localIsoWithOffset(
+        new Date(),
+      );
       const { orgId, userId } = await getOrgAndUser();
+      const loc = await getAuditLocation();
 
       const update = {
         orgId,
@@ -869,9 +850,16 @@ export default function ProductionScreen() {
         status: taskStatus || null,
         note: taskNote || "",
 
+        ...(loc ? loc : {}),
+
         syncStatus: "pending",
         createdAt: nowIso,
         updatedAt: nowIso,
+
+        capturedAtLocal: nowLocalIso,
+        createdAtLocal: nowLocalIso,
+        updatedAtLocal: nowLocalIso,
+        tzOffsetMinutes,
       };
 
       await saveTaskUpdate(update);
@@ -907,7 +895,10 @@ export default function ProductionScreen() {
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const nowIso = nowUtcIso();
+      const { localIso: nowLocalIso, tzOffsetMinutes } = localIsoWithOffset(
+        new Date(),
+      );
       const { orgId, userId } = await getOrgAndUser();
 
       const update = {
@@ -920,6 +911,11 @@ export default function ProductionScreen() {
         syncStatus: "pending",
         createdAt: nowIso,
         updatedAt: nowIso,
+
+        capturedAtLocal: nowLocalIso,
+        createdAtLocal: nowLocalIso,
+        updatedAtLocal: nowLocalIso,
+        tzOffsetMinutes,
       };
 
       await saveProjectUpdate(update);
@@ -1053,8 +1049,12 @@ export default function ProductionScreen() {
   /* -------------------- SAVE ACTIVITY LOG -------------------- */
   const handleSaveActivityLog = async () => {
     try {
-      const nowIso = new Date().toISOString();
+      const nowIso = nowUtcIso();
+      const { localIso: nowLocalIso, tzOffsetMinutes } = localIsoWithOffset(
+        new Date(),
+      );
       const { orgId, userId } = await getOrgAndUser();
+      const loc = await getAuditLocation();
 
       const fenceJson =
         activityFencePoints && activityFencePoints.length > 0
@@ -1070,9 +1070,18 @@ export default function ProductionScreen() {
         note: activityNote || "",
         photoUri: activityPhoto || null,
         fenceJson,
+
+        // ✅ audit location
+        ...(loc ? loc : {}),
+
         syncStatus: "pending",
         createdAt: nowIso,
         updatedAt: nowIso,
+
+        capturedAtLocal: nowLocalIso,
+        createdAtLocal: nowLocalIso,
+        updatedAtLocal: nowLocalIso,
+        tzOffsetMinutes,
       };
 
       await saveActivityLog(log);
@@ -1239,30 +1248,6 @@ export default function ProductionScreen() {
               style={styles.homeIcon}
             />
           </TouchableOpacity>
-        </View>
-
-        <View
-          style={{
-            flexDirection: "row",
-            justifyContent: "flex-end",
-            marginBottom: 10,
-          }}
-        >
-          <Pressable
-            onPress={loadDebugInfo}
-            style={{
-              paddingVertical: 6,
-              paddingHorizontal: 10,
-              borderRadius: 6,
-              borderWidth: 1,
-              borderColor: "#999",
-              backgroundColor: "#fff",
-            }}
-          >
-            <Text style={{ fontSize: 12, color: "#333", fontWeight: "700" }}>
-              Debug
-            </Text>
-          </Pressable>
         </View>
 
         <View style={styles.modeRow}>
@@ -1602,31 +1587,6 @@ export default function ProductionScreen() {
         getId={(s) => (typeof s === "string" ? s : String(s))}
         getLabel={(s) => (typeof s === "string" ? s : String(s))}
       />
-
-      {/* -------------------- DEBUG MODAL -------------------- */}
-      <Modal
-        visible={debugOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setDebugOpen(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxHeight: "85%" }]}>
-            <Text style={styles.modalTitle}>Debug info</Text>
-
-            <ScrollView style={{ marginBottom: 10 }}>
-              <Text style={{ fontSize: 12, color: "#111" }}>{debugText}</Text>
-            </ScrollView>
-
-            <TouchableOpacity
-              style={styles.saveButton}
-              onPress={() => setDebugOpen(false)}
-            >
-              <Text style={styles.saveButtonText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
 
       {/* -------------------- Attach User Document Modal -------------------- */}
       <Modal
