@@ -1753,7 +1753,14 @@ export default function TaskDetail({ id: propId, onClose }) {
   function normalizeActivityRow(e, idx, source = "log") {
     if (!e || typeof e !== "object") return null;
 
+    // offlineEvents commonly store the actual activity inside payload
+    const p = e.payload && typeof e.payload === "object" ? e.payload : null;
+
+    // time (prefer capturedAt, then createdAt, then top-level timestamps)
     const atRaw =
+      p?.capturedAt ||
+      p?.createdAt ||
+      p?.updatedAt ||
       e.at ||
       e.when ||
       e.timestamp ||
@@ -1766,27 +1773,61 @@ export default function TaskDetail({ id: propId, onClose }) {
 
     const atIso = atRaw ? new Date(atRaw).toISOString() : null;
 
+    // action/type
     const action =
+      p?.action ||
+      p?.type ||
+      p?.event ||
       e.action ||
       e.type ||
       e.event ||
       e.kind ||
-      (e.photoUrl || e.attachmentId ? "photo" : "note");
+      // your offline shape
+      (e.eventType === "activity-log"
+        ? p?.photoUri
+          ? "photo"
+          : "note"
+        : "") ||
+      (p?.photoUri ? "photo" : "note");
 
+    // note/message
     const note =
-      e.note || e.message || e.text || e.caption || e.description || "";
+      p?.note ||
+      p?.message ||
+      p?.text ||
+      p?.caption ||
+      p?.description ||
+      e.note ||
+      e.message ||
+      e.text ||
+      e.caption ||
+      e.description ||
+      "";
 
     // milestone id variants
     const milestoneId =
+      p?.milestone ||
+      p?.milestoneId ||
+      p?.milestone_id ||
       e.milestoneId ||
       e.milestone ||
       e.milestone_id ||
       (e.meta && (e.meta.milestoneId || e.meta.milestone)) ||
       "";
 
-    // actor/by variants
+    // actor/by variants (offlineEvents: top userId is often an ObjectId, payload.userId may be auth uid)
     const by =
-      (e.userId && (e.userId.name || e.userId.email)) ||
+      (e.userId &&
+        typeof e.userId === "object" &&
+        (e.userId.name || e.userId.email)) ||
+      (e.userId && typeof e.userId !== "object" ? String(e.userId) : "") ||
+      p?.userName ||
+      p?.userEmail ||
+      p?.userId ||
+      (e.userId && typeof e.userId === "object"
+        ? String(e.userId._id || e.userId.id || "")
+        : "") ||
+      (e.userId && typeof e.userId !== "object" ? String(e.userId) : "") ||
       e.actorName ||
       e.actorEmail ||
       e.actorSub ||
@@ -1794,12 +1835,22 @@ export default function TaskDetail({ id: propId, onClose }) {
       e.userName ||
       "";
 
-    // coords variants
+    // coords variants (offlineEvents: payload.lat/lng)
     let lat = null;
     let lng = null;
 
-    // direct
-    if (lat == null && lng == null) {
+    // payload direct
+    {
+      const latN = Number(p?.lat ?? p?.latitude ?? null);
+      const lngN = Number(p?.lng ?? p?.lon ?? p?.longitude ?? null);
+      if (Number.isFinite(latN) && Number.isFinite(lngN)) {
+        lat = latN;
+        lng = lngN;
+      }
+    }
+
+    // top-level direct
+    if (lat == null || lng == null) {
       const latN = Number(e.lat ?? e.latitude ?? null);
       const lngN = Number(e.lng ?? e.lon ?? e.longitude ?? null);
       if (Number.isFinite(latN) && Number.isFinite(lngN)) {
@@ -1808,9 +1859,15 @@ export default function TaskDetail({ id: propId, onClose }) {
       }
     }
 
-    // nested
+    // nested (payload/location/meta)
     if (lat == null || lng == null) {
       const nests = [
+        p?.location,
+        p?.coords,
+        p?.gps,
+        p?.geo,
+        p?.position,
+        p?.where,
         e.location,
         e.coords,
         e.gps,
@@ -1831,15 +1888,21 @@ export default function TaskDetail({ id: propId, onClose }) {
       }
     }
 
+    // id: offlineEvents uses _id, but that's NOT a /tasks/:id/logs/:logId
     const id = String(e._id || e.id || "");
+
+    // stable key
     const rowKey = id || `${source}:${idx}:${atIso || "no-time"}`;
+
+    // photo hint (offline payload.photoUri)
+    const isPhoto = !!(p?.photoUri || e.photoUri || e.photoUrl);
 
     return {
       _rowKey: rowKey,
-      _id: id || null, // only true backend logs have _id (usually)
-      _source: source, // "actualDurationLog" | "offlineEvents" | etc
+      _id: id || null,
+      _source: source,
       at: atIso,
-      action: String(action || ""),
+      action: String(action || (isPhoto ? "photo" : "note")),
       note: String(note || ""),
       milestoneId: milestoneId ? String(milestoneId) : "",
       by: String(by || ""),
@@ -3383,10 +3446,10 @@ export default function TaskDetail({ id: propId, onClose }) {
               </tr>
             </thead>
             <tbody>
-              {(task.actualDurationLog || []).length ? (
-                (task.actualDurationLog || [])
-                  .filter((e) =>
-                    !fltFrom && !fltTo ? true : inDateWindow(e.at),
+              {(activityRows || []).length ? (
+                (activityRows || [])
+                  .filter((r) =>
+                    !fltFrom && !fltTo ? true : inDateWindow(r.at),
                   )
                   .slice()
                   .sort((a, b) => {
@@ -3395,12 +3458,11 @@ export default function TaskDetail({ id: propId, onClose }) {
                     return activitySort === "desc" ? db - da : da - db;
                   })
                   .map((e) => {
-                    const rowId = String(e._id || "");
-                    const by =
-                      e.userId && (e.userId.name || e.userId.email)
-                        ? e.userId.name || e.userId.email
-                        : e.actorName || e.actorEmail || e.actorSub || "—";
+                    const rowId = String(e._id || e._rowKey || "");
 
+                    const by = e.by || "—";
+
+                    // photo thumb only possible if it’s a backend-created photo log and attachments exist
                     let thumb = null;
                     if (
                       String(e.action) === "photo" &&
@@ -3448,22 +3510,23 @@ export default function TaskDetail({ id: propId, onClose }) {
                       }
                     }
 
-                    const rowMilestoneId =
-                      e.milestoneId ||
-                      e.milestone ||
-                      (e.meta && e.meta.milestoneId) ||
-                      "";
+                    const rowMilestoneId = e.milestoneId || "";
                     const milestoneName = rowMilestoneId
                       ? msTitleById.get(String(rowMilestoneId)) ||
                         String(rowMilestoneId)
                       : "—";
+
+                    const canEdit =
+                      !!e._id &&
+                      (e._source === "actualDurationLog" ||
+                        e._source === "logs");
 
                     return (
                       <tr key={rowId}>
                         <td className="border-t p-2">
                           {e.at ? new Date(e.at).toLocaleString() : "—"}
                         </td>
-                        <td className="border-t p-2">{e.action}</td>
+                        <td className="border-t p-2">{e.action || "—"}</td>
                         <td className="border-t p-2">{milestoneName}</td>
                         <td className="border-t p-2">{by}</td>
                         <td className="border-t p-2" style={{ maxWidth: 480 }}>
@@ -3476,8 +3539,10 @@ export default function TaskDetail({ id: propId, onClose }) {
                         </td>
                         <td className="border-t p-2 text-right whitespace-nowrap">
                           <button
-                            className="px-2 py-1 border rounded mr-2"
+                            className="px-2 py-1 border rounded mr-2 disabled:opacity-50"
+                            disabled={!canEdit}
                             onClick={() => {
+                              if (!canEdit) return;
                               setLogErr("");
                               setLogType(
                                 String(e.action) === "photo"
@@ -3499,21 +3564,23 @@ export default function TaskDetail({ id: propId, onClose }) {
                               setLogMilestoneId(
                                 rowMilestoneId ? String(rowMilestoneId) : "",
                               );
-                              setEditingLogId(rowId);
+                              setEditingLogId(String(e._id));
                               setLogOpen(true);
                             }}
                           >
                             Edit
                           </button>
                           <button
-                            className="px-2 py-1 border rounded"
+                            className="px-2 py-1 border rounded disabled:opacity-50"
+                            disabled={!canEdit}
                             onClick={() => {
+                              if (!canEdit) return;
                               if (!window.confirm("Delete this log entry?"))
                                 return;
                               (async () => {
                                 try {
                                   await api.delete(
-                                    `/tasks/${id}/logs/${rowId}`,
+                                    `/tasks/${id}/logs/${String(e._id)}`,
                                   );
                                   await loadTask();
                                 } catch (er) {
