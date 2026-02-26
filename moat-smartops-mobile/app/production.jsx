@@ -1006,7 +1006,7 @@ export default function ProductionScreen() {
         };
         setActivityFencePoints((prev) => [...prev, point]);
       } catch {}
-    }, 5000);
+    }, 2500);
 
     captureTimerRef.current = timer;
     setAutoCapturing(true);

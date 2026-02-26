@@ -171,6 +171,7 @@ function fencesToKML(name, fences) {
 }
 async function downloadKMZ(filename, kmlString) {
   try {
+    // Primary path: zip KML as KMZ
     const { default: JSZip } = await import("jszip");
     const zip = new JSZip();
     zip.file("doc.kml", kmlString);
@@ -189,6 +190,7 @@ async function downloadKMZ(filename, kmlString) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
+    // Safety net: if JSZip/module fails, fall back to plain KML download
     console.error("KMZ export failed, falling back to KML:", err);
 
     const fallbackName = filename.replace(/\.kmz$/i, ".kml");
@@ -330,6 +332,7 @@ function normMilestone(ms) {
     false
   );
 
+  // Normalize dependency into a SINGLE ID string
   const rawDep =
     ms.dependsOn ??
     ms.roadblockDependency ??
@@ -358,7 +361,7 @@ function normMilestone(ms) {
     dueAt,
     status,
     isRoadblock,
-    dependsOnId,
+    dependsOnId, // <-- use THIS in the UI
     actualEndAt,
   };
 }
@@ -482,11 +485,6 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [showPin, setShowPin] = useState(true);
   const [showTaskGeofence, setShowTaskGeofence] = useState(true);
 
-  // NEW: Coverage overlay on map (extraFences)
-  const [showCoverageOverlay, setShowCoverageOverlay] = useState(true);
-  const [coverageOverlays, setCoverageOverlays] = useState([]); // array of extraFences
-  const [coverageErr, setCoverageErr] = useState("");
-
   // Exporting state (kmz only)
   const [exporting, setExporting] = useState(null);
 
@@ -526,7 +524,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [logErr, setLogErr] = useState("");
   const [logMilestoneId, setLogMilestoneId] = useState("");
 
-  // Activity sorting + edit binding
+  // NEW: Activity sorting + edit binding
   const [activitySort, setActivitySort] = useState("desc"); // 'desc' newest first | 'asc'
   const [editingLogId, setEditingLogId] = useState(null); // null => add, else edit
 
@@ -545,7 +543,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     users.forEach((u) => m.set(String(u._id), u));
     return m;
   }, [users]);
-
   const userLabel = (u) => {
     if (!u) return "—";
     const idStr = String(u._id || u);
@@ -554,12 +551,10 @@ export default function TaskDetail({ id: propId, onClose }) {
       ? populated.name || populated.email || populated.username || idStr
       : idStr;
   };
-
   const projectLabel = (pid) => {
     const p = projects.find((pr) => String(pr._id) === String(pid));
     return p?.name || "—";
   };
-
   const groupsById = useMemo(() => {
     const m = new Map();
     groups.forEach((g) => m.set(String(g._id), g));
@@ -578,8 +573,8 @@ export default function TaskDetail({ id: propId, onClose }) {
 
     const normId = (x) => {
       if (!x) return x;
-      const _id = x._id ?? x.id;
-      return { ...x, _id: _id != null ? String(_id) : "" };
+      const id = x._id ?? x.id;
+      return { ...x, _id: id != null ? String(id) : "" };
     };
 
     (async () => {
@@ -606,7 +601,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             .filter((x) => x._id),
         );
       } catch (e) {
-        // lookup load fail is non-fatal
+        // console.warn("Lookup load failed:", e?.response?.data || e);
       }
     })();
   }, []);
@@ -683,9 +678,11 @@ export default function TaskDetail({ id: propId, onClose }) {
       setLng(norm?.locationGeoFence?.lng ?? "");
       setRadius(norm?.locationGeoFence?.radius ?? "");
 
+      // manager controls seed
       setMgrStatus(canonStatus(norm?.status || "pending"));
       setMgrNote("");
 
+      // Load manager notes
       try {
         const notes = await fetchManagerNotes(
           id,
@@ -814,12 +811,13 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
+  // Create Milestone
   async function createMilestone() {
     setMErr("");
     setMInfo("");
     try {
-      const ttitle = (msForm.title || "").trim();
-      if (!ttitle) {
+      const title = (msForm.title || "").trim();
+      if (!title) {
         setMErr("Title is required");
         return;
       }
@@ -827,8 +825,8 @@ export default function TaskDetail({ id: propId, onClose }) {
       const sISO = msForm.startAt ? fromLocalDateOnly(msForm.startAt) : null;
       const eISO = msForm.endAt ? fromLocalDateOnly(msForm.endAt) : null;
       const payload = {
-        title: ttitle,
-        name: ttitle,
+        title,
+        name: title,
         status,
         isRoadblock: !!msForm.isRoadblock,
         roadblock: !!msForm.isRoadblock,
@@ -908,6 +906,8 @@ export default function TaskDetail({ id: propId, onClose }) {
       (Array.isArray(t?.assignedTo) && t.assignedTo[0]) ??
       (Array.isArray(t?.assignedUserIds) && t.assignedUserIds[0]) ??
       null;
+
+    // always return an ID string (not an object)
     return a ? String(a._id || a.id || a) : "";
   };
 
@@ -923,6 +923,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       await optimisticSave(
         {
+          // cover multiple backend shapes
           assignee: nextAssigneeId || null,
           assigneeId: nextAssigneeId || null,
           assignedUserIds: nextAssigneeId ? [nextAssigneeId] : [],
@@ -930,6 +931,7 @@ export default function TaskDetail({ id: propId, onClose }) {
           assignedToId: nextAssigneeId || null,
           userId: nextAssigneeId || null,
         },
+
         () =>
           setTask((t) => ({
             ...(t || {}),
@@ -944,7 +946,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       saveGateRef.current.assignee = false;
     }
   }
-
   async function saveStartOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
@@ -972,7 +973,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       saveGateRef.current.start = false;
     }
   }
-
   async function saveDueOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
@@ -982,7 +982,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     if (haveLocal === String(nextLocalDateStr || "")) return;
     if (saveGateRef.current.due) return;
     const iso = nextLocalDateStr ? fromLocalDateOnly(nextLocalDateStr) : null;
-
     saveGateRef.current.due = true;
     try {
       await optimisticSave(
@@ -1000,51 +999,53 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  /* ---------- date filter helpers ---------- */
-  const submissionWhenIso = (s) =>
-    s?.submittedAt ||
-    s?.createdAt ||
-    s?.completedAt ||
-    s?.finishedAt ||
-    s?.updatedAt ||
-    null;
+  /* ---------- forms & submissions ---------- */
+  async function loadForms() {
+    try {
+      const params = { limit: 200, taskId: id };
+      if (projectId) params.projectId = projectId;
+      const { data } = await api.get("/inspections/forms", { params });
+      setForms(Array.isArray(data) ? data : []);
+      setFormsErr("");
+    } catch (e) {
+      setForms([]);
+      setFormsErr(e?.response?.data?.error || "Failed to load forms");
+    }
+  }
+  async function loadSubs() {
+    try {
+      const params = { limit: 200, taskId: id };
+      if (projectId) params.projectId = projectId;
 
-  const inDateWindow = (d) => {
-    if (!fltFrom && !fltTo) return true;
+      const { data } = await api.get("/inspections/submissions", { params });
 
-    const dt =
-      d instanceof Date
-        ? d
-        : typeof d === "string" || typeof d === "number"
-          ? new Date(d)
-          : null;
+      // ✅ handle multiple backend shapes
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data?.rows)
+            ? data.rows
+            : Array.isArray(data?.data)
+              ? data.data
+              : [];
 
-    if (!dt || isNaN(+dt)) return false;
-
-    const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
-    const toOk = !fltTo || dt <= new Date(`${fltTo}T23:59:59.999`);
-    return fromOk && toOk;
-  };
-
-  const isoToLocalDateOnly = (iso) => {
-    if (!iso) return "";
-    const dt = new Date(iso);
-    if (isNaN(+dt)) return "";
-    return toLocalDateOnly(dt);
-  };
-
-  const inInspectionWindow = (s) => {
-    if (!inspFrom && !inspTo) return true;
-    const whenIso = submissionWhenIso(s);
-    const day = isoToLocalDateOnly(whenIso);
-    if (!day) return false;
-    if (inspFrom && day < inspFrom) return false;
-    if (inspTo && day > inspTo) return false;
-    return true;
-  };
+      setSubs(list);
+      setSubsErr("");
+    } catch (e) {
+      setSubs([]);
+      setSubsErr(e?.response?.data?.error || "Failed to load submissions");
+    }
+  }
+  useEffect(() => {
+    loadForms();
+    loadSubs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, projectId]);
 
   /* ---------- submission field resolver (robust) ---------- */
   function resolveSubmissionFields(s) {
+    // DATE
     const submittedRaw =
       s?.submittedAt ||
       s?.createdAt ||
@@ -1054,6 +1055,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       null;
     const submitted = submittedRaw ? new Date(submittedRaw) : null;
 
+    // INSPECTOR (many shapes)
     const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
     const actorObj =
       runBy ||
@@ -1086,6 +1088,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       actorId ||
       "—";
 
+    // MANAGER NOTE (common nests)
     let managerNote = "—";
     if (Array.isArray(s?.managerComments) && s.managerComments.length) {
       const latest = s.managerComments
@@ -1106,10 +1109,12 @@ export default function TaskDetail({ id: propId, onClose }) {
         "—";
     }
 
+    // OUTCOME (MUST use overallResult)
     const readStr = (v) => {
       if (v == null) return "";
       if (typeof v === "string") return v.trim();
       if (typeof v === "number" || typeof v === "boolean") return String(v);
+      // avoid crashing on objects/arrays
       try {
         return String(v).trim();
       } catch {
@@ -1120,7 +1125,10 @@ export default function TaskDetail({ id: propId, onClose }) {
     const normalizeOverallResult = (v) => {
       const raw = readStr(v);
       if (!raw) return "";
+
       const up = raw.toUpperCase().trim();
+
+      // normalize common variants
       if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up))
         return "PASS";
       if (
@@ -1138,8 +1146,10 @@ export default function TaskDetail({ id: propId, onClose }) {
         ].includes(up)
       )
         return "NEEDS FOLLOW-UP";
+
       if (up === "PASS") return "PASS";
       if (up === "FAIL") return "FAIL";
+
       return raw;
     };
 
@@ -1154,6 +1164,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
     const outcome = normalizeOverallResult(overallResultRaw) || "—";
 
+    // FORM TITLE
     const formTitle =
       s?.form?.title ||
       s?.formTitle ||
@@ -1161,25 +1172,30 @@ export default function TaskDetail({ id: propId, onClose }) {
       s?.templateName ||
       "Form";
 
+    // coords (robust: supports GeoJSON coordinates + multiple nests)
     const pickLatLng = (obj) => {
       if (!obj) return { lat: null, lng: null };
+
       const coords = obj?.coordinates || obj?.coord || obj?.coords || null;
+
       if (Array.isArray(coords) && coords.length >= 2) {
         const lng = coords[0];
         const lat = coords[1];
         return { lat, lng };
       }
+
       const lat = obj?.lat ?? obj?.latitude ?? obj?.y ?? null;
       const lng = obj?.lng ?? obj?.lon ?? obj?.longitude ?? obj?.x ?? null;
+
       return { lat, lng };
     };
 
-    let latV = null;
-    let lngV = null;
+    let lat = null;
+    let lng = null;
 
-    if (latV == null && lngV == null) {
-      latV = s?.lat ?? s?.latitude ?? null;
-      lngV = s?.lng ?? s?.lon ?? s?.longitude ?? null;
+    if (lat == null && lng == null) {
+      lat = s?.lat ?? s?.latitude ?? null;
+      lng = s?.lng ?? s?.lon ?? s?.longitude ?? null;
     }
 
     const candidates = [
@@ -1194,75 +1210,24 @@ export default function TaskDetail({ id: propId, onClose }) {
       s?.where,
     ];
 
-    if (latV == null || lngV == null) {
+    if (lat == null || lng == null) {
       for (const c of candidates) {
         const got = pickLatLng(c);
         if (got.lat != null && got.lng != null) {
-          latV = got.lat;
-          lngV = got.lng;
+          lat = got.lat;
+          lng = got.lng;
           break;
         }
       }
     }
 
-    const latNum = Number(latV);
-    const lngNum = Number(lngV);
-    latV = Number.isFinite(latNum) ? latNum : latV;
-    lngV = Number.isFinite(lngNum) ? lngNum : lngV;
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+    lat = Number.isFinite(latNum) ? latNum : lat;
+    lng = Number.isFinite(lngNum) ? lngNum : lng;
 
-    return {
-      submitted,
-      inspector,
-      managerNote,
-      outcome,
-      formTitle,
-      lat: latV,
-      lng: lngV,
-    };
+    return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
   }
-
-  /* ---------- forms & submissions ---------- */
-  async function loadForms() {
-    try {
-      const params = { limit: 200, taskId: id };
-      if (projectId) params.projectId = projectId;
-      const { data } = await api.get("/inspections/forms", { params });
-      setForms(Array.isArray(data) ? data : []);
-      setFormsErr("");
-    } catch (e) {
-      setForms([]);
-      setFormsErr(e?.response?.data?.error || "Failed to load forms");
-    }
-  }
-  async function loadSubs() {
-    try {
-      const params = { limit: 200, taskId: id };
-      if (projectId) params.projectId = projectId;
-
-      const { data } = await api.get("/inspections/submissions", { params });
-
-      const list = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.items)
-          ? data.items
-          : Array.isArray(data?.rows)
-            ? data.rows
-            : Array.isArray(data?.data)
-              ? data.data
-              : [];
-
-      setSubs(list);
-      setSubsErr("");
-    } catch (e) {
-      setSubs([]);
-      setSubsErr(e?.response?.data?.error || "Failed to load submissions");
-    }
-  }
-  useEffect(() => {
-    loadForms();
-    loadSubs();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, projectId]);
 
   /* ---------- geofence ops ---------- */
   const fallbackCircle =
@@ -1340,7 +1305,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       } catch (e) {
         const status = e?.response?.status;
         if (status && status !== 404) throw e;
-
+        // client-side normalize (fallback)
         const textOrZip = await file.arrayBuffer();
         const name = (file.name || "").toLowerCase();
         let rings = [];
@@ -1448,194 +1413,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     setMapBump((b) => b + 1);
   }
 
-  /* ---------- Coverage overlay (EXTRA FENCES) ---------- */
-  function geojsonToExtraFences(geo) {
-    const out = [];
-
-    const pushLine = (coords, name) => {
-      if (!Array.isArray(coords) || coords.length < 2) return;
-      const line = coords
-        .map((p) =>
-          Array.isArray(p) ? [r6(Number(p[0])), r6(Number(p[1]))] : null,
-        )
-        .filter(Boolean)
-        .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
-      if (line.length >= 2)
-        out.push({ type: "line", line, label: name || "Coverage" });
-    };
-
-    const pushPoly = (coords, name) => {
-      if (!Array.isArray(coords) || !Array.isArray(coords[0])) return;
-      const outer = coords[0]
-        .map((p) =>
-          Array.isArray(p) ? [r6(Number(p[0])), r6(Number(p[1]))] : null,
-        )
-        .filter(Boolean)
-        .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
-      if (outer.length >= 3)
-        out.push({
-          type: "polygon",
-          polygon: closeRing(outer),
-          label: name || "Coverage area",
-        });
-    };
-
-    const pushPoint = (coords, name) => {
-      if (!Array.isArray(coords) || coords.length < 2) return;
-      const lng = Number(coords[0]);
-      const lat = Number(coords[1]);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-      out.push({
-        type: "point",
-        point: { lat: r6(lat), lng: r6(lng) },
-        label: name || "Point",
-      });
-    };
-
-    const handleGeom = (geom, name) => {
-      if (!geom || typeof geom !== "object") return;
-      const g = geom.type === "Feature" && geom.geometry ? geom.geometry : geom;
-
-      if (g?.type === "LineString") pushLine(g.coordinates, name);
-      else if (g?.type === "MultiLineString")
-        (g.coordinates || []).forEach((c, i) =>
-          pushLine(c, `${name || "Coverage"} ${i + 1}`),
-        );
-      else if (g?.type === "Polygon") pushPoly(g.coordinates, name);
-      else if (g?.type === "MultiPolygon")
-        (g.coordinates || []).forEach((c, i) =>
-          pushPoly(c, `${name || "Coverage area"} ${i + 1}`),
-        );
-      else if (g?.type === "Point") pushPoint(g.coordinates, name);
-      else if (g?.type === "MultiPoint")
-        (g.coordinates || []).forEach((c, i) =>
-          pushPoint(c, `${name || "Point"} ${i + 1}`),
-        );
-    };
-
-    if (geo?.type === "FeatureCollection") {
-      (geo.features || []).forEach((f, idx) => {
-        const nm =
-          f?.properties?.title ||
-          f?.properties?.name ||
-          f?.properties?.label ||
-          `Coverage ${idx + 1}`;
-        handleGeom(f, nm);
-      });
-    } else {
-      handleGeom(geo, geo?.properties?.name || "Coverage");
-    }
-
-    return out;
-  }
-
-  async function loadCoverageOverlays() {
-    setCoverageErr("");
-    try {
-      // 1) Try backend coverage endpoint
-      const { data } = await api.get(`/tasks/${id}/coverage`, {
-        params: { limit: 500, _ts: Date.now() },
-      });
-
-      const list = Array.isArray(data?.items)
-        ? data.items
-        : Array.isArray(data?.rows)
-          ? data.rows
-          : Array.isArray(data)
-            ? data
-            : [];
-
-      // Filter by global date range if present
-      const filtered = list.filter((c) => {
-        const when = c?.date || c?.createdAt || c?.at || null;
-        return !fltFrom && !fltTo ? true : inDateWindow(when);
-      });
-
-      let extras = [];
-      filtered.forEach((c, idx) => {
-        const name = c?.title || c?.filename || `Coverage ${idx + 1}`;
-        let geom =
-          c?.geometry ||
-          c?.geojson ||
-          c?.geoJSON ||
-          (c?.feature && c.feature.geometry) ||
-          null;
-
-        if (!geom) return;
-
-        // Ensure a "FeatureCollection-like" shape for converter if needed
-        if (geom?.type === "Feature" || geom?.type === "FeatureCollection") {
-          const converted = geojsonToExtraFences(geom);
-          converted.forEach((x) => (x.label = x.label || name));
-          extras = extras.concat(converted);
-        } else {
-          const fakeFeature = {
-            type: "Feature",
-            properties: { name },
-            geometry: geom,
-          };
-          extras = extras.concat(geojsonToExtraFences(fakeFeature));
-        }
-      });
-
-      // 2) Fall back to logs with lat/lng if no geometry
-      if (!extras.length) {
-        const logsWithCoords = (task?.actualDurationLog || []).filter((e) => {
-          const ok =
-            Number.isFinite(Number(e.lat)) && Number.isFinite(Number(e.lng));
-          if (!ok) return false;
-          return !fltFrom && !fltTo ? true : inDateWindow(e.at);
-        });
-
-        if (logsWithCoords.length) {
-          const sorted = logsWithCoords
-            .slice()
-            .sort((a, b) => +new Date(a.at || 0) - +new Date(b.at || 0));
-
-          // points
-          sorted.forEach((e, i) => {
-            extras.push({
-              type: "point",
-              point: { lat: r6(Number(e.lat)), lng: r6(Number(e.lng)) },
-              label: `${e.action || "log"} #${i + 1}`,
-            });
-          });
-
-          // track line
-          if (sorted.length > 1) {
-            const line = sorted.map((e) => [
-              r6(Number(e.lng)),
-              r6(Number(e.lat)),
-            ]);
-            extras.push({
-              type: "line",
-              line,
-              label: `${task?.title || id} track`,
-            });
-          }
-        }
-      }
-
-      setCoverageOverlays(extras);
-    } catch (e) {
-      setCoverageOverlays([]);
-      setCoverageErr(
-        e?.response?.data?.error || e?.message || "Failed to load coverage",
-      );
-    }
-  }
-
-  // load coverage whenever: task loaded OR date filter changes OR toggle on
-  useEffect(() => {
-    if (!task) return;
-    if (!showCoverageOverlay) {
-      setCoverageOverlays([]);
-      return;
-    }
-    loadCoverageOverlays();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task?._id, showCoverageOverlay, fltFrom, fltTo]);
-
   /* ---------- actions/logs ---------- */
   async function doAction(action) {
     setErr("");
@@ -1643,6 +1420,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       const body = { action };
 
+      // Always *attempt* to capture location if available
       const coords = await new Promise((resolve) => {
         if (!navigator.geolocation) return resolve(null);
         navigator.geolocation.getCurrentPosition(
@@ -1665,10 +1443,12 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
+  // Add / Edit Log submit (productivity or photo)
   async function submitLog() {
     setLogErr("");
     try {
       if (logType === "attachment") {
+        // PHOTO
         if (!editingLogId) {
           if (!logFile) throw new Error("Choose a photo to upload.");
 
@@ -1676,12 +1456,14 @@ export default function TaskDetail({ id: propId, onClose }) {
           fd.append("file", logFile);
           if (logNote) fd.append("note", logNote);
 
+          // If you want milestone info to travel with the photo, send it too
           if (logMilestoneId) {
             fd.append("milestoneId", logMilestoneId);
             fd.append("milestone", logMilestoneId);
             fd.append("milestone_id", logMilestoneId);
           }
 
+          // Always try capture lat/lng when taking a photo
           if (navigator.geolocation) {
             const coords = await new Promise((resolve) => {
               navigator.geolocation.getCurrentPosition(
@@ -1703,7 +1485,10 @@ export default function TaskDetail({ id: propId, onClose }) {
           await api.post(`/tasks/${id}/attachments`, fd, {
             headers: { "Content-Type": "multipart/form-data" },
           });
+
+          // Rely on the backend to create the "photo" log entry for this attachment.
         } else {
+          // Editing an existing photo log: still patch the log metadata (time, note, milestone)
           await api.patch(`/tasks/${id}/logs/${editingLogId}`, {
             at: fromLocalDateTimeInput(logAt),
             action: "photo",
@@ -1718,6 +1503,7 @@ export default function TaskDetail({ id: propId, onClose }) {
           });
         }
       } else {
+        // PRODUCTIVITY
         const payload = {
           action: logAction,
           at: fromLocalDateTimeInput(logAt),
@@ -1731,6 +1517,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             : { milestoneId: null, milestone: null, milestone_id: null }),
         };
 
+        // Always *attempt* location capture if available (for any action)
         if (navigator.geolocation) {
           const coords = await new Promise((resolve) => {
             navigator.geolocation.getCurrentPosition(
@@ -1762,10 +1549,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       setLogNote("");
       setLogMilestoneId("");
       await loadTask();
-
-      // refresh coverage overlay too (because logs may have new points)
-      if (showCoverageOverlay) loadCoverageOverlays();
-
       setInfo("Log saved.");
       setTimeout(() => setInfo(""), 1000);
     } catch (e) {
@@ -1842,7 +1625,8 @@ export default function TaskDetail({ id: propId, onClose }) {
       document
         .querySelectorAll('link[rel="stylesheet"], style')
         .forEach((el) => {
-          head.appendChild(el.cloneNode(true));
+          const clone = el.cloneNode(true);
+          head.appendChild(clone);
         });
 
       const style = doc.createElement("style");
@@ -1882,6 +1666,53 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
+  /* ---------- date filter helpers ---------- */
+  const submissionWhenIso = (s) =>
+    s?.submittedAt ||
+    s?.createdAt ||
+    s?.completedAt ||
+    s?.finishedAt ||
+    s?.updatedAt ||
+    null;
+
+  // accepts ISO string OR Date
+  const inDateWindow = (d) => {
+    if (!fltFrom && !fltTo) return true;
+
+    const dt =
+      d instanceof Date
+        ? d
+        : typeof d === "string" || typeof d === "number"
+          ? new Date(d)
+          : null;
+
+    if (!dt || isNaN(+dt)) return false;
+
+    const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
+    const toOk = !fltTo || dt <= new Date(`${fltTo}T23:59:59.999`);
+    return fromOk && toOk;
+  };
+
+  // INSPECTIONS: separate date filter (date-only compare to avoid timezone weirdness)
+  const isoToLocalDateOnly = (iso) => {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (isNaN(+dt)) return "";
+    return toLocalDateOnly(dt);
+  };
+
+  const inInspectionWindow = (s) => {
+    if (!inspFrom && !inspTo) return true;
+
+    const whenIso = submissionWhenIso(s);
+    const day = isoToLocalDateOnly(whenIso);
+    if (!day) return false;
+
+    if (inspFrom && day < inspFrom) return false;
+    if (inspTo && day > inspTo) return false;
+    return true;
+  };
+
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
     const m = new Map();
@@ -1890,6 +1721,177 @@ export default function TaskDetail({ id: propId, onClose }) {
     );
     return m;
   }, [milestones]);
+
+  // ============================
+  // Activity normalizer (includes offlineEvents)
+  // ============================
+  function pickLatLng(obj) {
+    if (!obj) return { lat: null, lng: null };
+
+    // GeoJSON style [lng, lat]
+    if (Array.isArray(obj.coordinates) && obj.coordinates.length >= 2) {
+      const lng = Number(obj.coordinates[0]);
+      const lat = Number(obj.coordinates[1]);
+      return {
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null,
+      };
+    }
+
+    const lat = obj.lat ?? obj.latitude ?? obj.y ?? null;
+    const lng = obj.lng ?? obj.lon ?? obj.longitude ?? obj.x ?? null;
+
+    const latN = Number(lat);
+    const lngN = Number(lng);
+
+    return {
+      lat: Number.isFinite(latN) ? latN : null,
+      lng: Number.isFinite(lngN) ? lngN : null,
+    };
+  }
+
+  function normalizeActivityRow(e, idx, source = "log") {
+    if (!e || typeof e !== "object") return null;
+
+    const atRaw =
+      e.at ||
+      e.when ||
+      e.timestamp ||
+      e.time ||
+      e.occurredAt ||
+      e.createdAt ||
+      e.loggedAt ||
+      e.date ||
+      null;
+
+    const atIso = atRaw ? new Date(atRaw).toISOString() : null;
+
+    const action =
+      e.action ||
+      e.type ||
+      e.event ||
+      e.kind ||
+      (e.photoUrl || e.attachmentId ? "photo" : "note");
+
+    const note =
+      e.note || e.message || e.text || e.caption || e.description || "";
+
+    // milestone id variants
+    const milestoneId =
+      e.milestoneId ||
+      e.milestone ||
+      e.milestone_id ||
+      (e.meta && (e.meta.milestoneId || e.meta.milestone)) ||
+      "";
+
+    // actor/by variants
+    const by =
+      (e.userId && (e.userId.name || e.userId.email)) ||
+      e.actorName ||
+      e.actorEmail ||
+      e.actorSub ||
+      e.by ||
+      e.userName ||
+      "";
+
+    // coords variants
+    let lat = null;
+    let lng = null;
+
+    // direct
+    if (lat == null && lng == null) {
+      const latN = Number(e.lat ?? e.latitude ?? null);
+      const lngN = Number(e.lng ?? e.lon ?? e.longitude ?? null);
+      if (Number.isFinite(latN) && Number.isFinite(lngN)) {
+        lat = latN;
+        lng = lngN;
+      }
+    }
+
+    // nested
+    if (lat == null || lng == null) {
+      const nests = [
+        e.location,
+        e.coords,
+        e.gps,
+        e.geo,
+        e.position,
+        e.where,
+        e.meta?.location,
+        e.meta?.coords,
+        e.meta?.gps,
+      ];
+      for (const n of nests) {
+        const got = pickLatLng(n);
+        if (got.lat != null && got.lng != null) {
+          lat = got.lat;
+          lng = got.lng;
+          break;
+        }
+      }
+    }
+
+    const id = String(e._id || e.id || "");
+    const rowKey = id || `${source}:${idx}:${atIso || "no-time"}`;
+
+    return {
+      _rowKey: rowKey,
+      _id: id || null, // only true backend logs have _id (usually)
+      _source: source, // "actualDurationLog" | "offlineEvents" | etc
+      at: atIso,
+      action: String(action || ""),
+      note: String(note || ""),
+      milestoneId: milestoneId ? String(milestoneId) : "",
+      by: String(by || ""),
+      lat,
+      lng,
+      raw: e,
+    };
+  }
+
+  function collectActivityRows(taskObj) {
+    if (!taskObj) return [];
+
+    const candidates = [
+      { key: "actualDurationLog", val: taskObj.actualDurationLog },
+      { key: "logs", val: taskObj.logs },
+      { key: "activityLog", val: taskObj.activityLog },
+      { key: "events", val: taskObj.events },
+
+      // ✅ common offline containers
+      { key: "offlineEvents", val: taskObj.offlineEvents },
+      { key: "offlineActivity", val: taskObj.offlineActivity },
+      { key: "pendingEvents", val: taskObj.pendingEvents },
+      { key: "queuedEvents", val: taskObj.queuedEvents },
+
+      // ✅ meta nests some backends use
+      { key: "meta.offlineEvents", val: taskObj.meta?.offlineEvents },
+      { key: "meta.pendingEvents", val: taskObj.meta?.pendingEvents },
+    ];
+
+    const out = [];
+    for (const c of candidates) {
+      if (!Array.isArray(c.val) || !c.val.length) continue;
+      c.val.forEach((e, idx) => {
+        const row = normalizeActivityRow(e, idx, c.key);
+        if (row) out.push(row);
+      });
+    }
+
+    // de-dupe by _id if present; else by _rowKey
+    const seen = new Set();
+    const uniq = [];
+    for (const r of out) {
+      const k = r._id ? `id:${r._id}` : `k:${r._rowKey}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      uniq.push(r);
+    }
+
+    return uniq;
+  }
+
+  const activityRows = useMemo(() => collectActivityRows(task), [task]);
 
   if (!task) return <div className="p-4">{err ? err : "Loading…"}</div>;
 
@@ -1970,7 +1972,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
       {/* Top row: Overview (left) | Manager (right) */}
       <div className="grid gap-4 lg:grid-cols-2 mt-3">
-        {/* Overview */}
+        {/* Overview (inline edits) */}
         <div className="border rounded-2xl p-4 space-y-3 bg-white">
           <div className="font-semibold">Details</div>
 
@@ -2076,10 +2078,12 @@ export default function TaskDetail({ id: propId, onClose }) {
                 onChange={(e) => {
                   const gid = e.target.value || "";
                   setGroupId(gid);
+
                   const patch = {
                     groupId: gid ? gid : null,
                     assignedGroupIds: gid ? [gid] : [],
                   };
+
                   optimisticSave(patch, () =>
                     setTask((t) => ({
                       ...(t || {}),
@@ -2209,7 +2213,7 @@ export default function TaskDetail({ id: propId, onClose }) {
           </div>
         </div>
 
-        {/* Manager */}
+        {/* Manager (status selector + notes area) */}
         <div className="space-y-4">
           <div className="border rounded-2xl p-4 bg-white">
             <div className="font-semibold mb-2">Task Manager</div>
@@ -2318,7 +2322,6 @@ export default function TaskDetail({ id: propId, onClose }) {
             />
             Show task pin
           </label>
-
           <label className="inline-flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -2327,26 +2330,10 @@ export default function TaskDetail({ id: propId, onClose }) {
             />
             Show task geofence
           </label>
-
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={showCoverageOverlay}
-              onChange={(e) => setShowCoverageOverlay(e.target.checked)}
-            />
-            Show coverage overlay
-          </label>
-
           <div className="ml-auto text-xs text-gray-500">
             Legend shows automatically when features are present.
           </div>
         </div>
-
-        {coverageErr && (
-          <div className="mt-2 text-xs text-amber-700">
-            Coverage overlay: {coverageErr}
-          </div>
-        )}
 
         {/* Map */}
         <div className="mt-3">
@@ -2358,11 +2345,22 @@ export default function TaskDetail({ id: propId, onClose }) {
             showTaskCoverage={true}
             height={360}
             className="relative rounded z-0"
-            reloadKey={`${mapBump}:${gfCount}:${lat}:${lng}:${radius}:${showPin}:${showTaskGeofence}:${showCoverageOverlay}:${coverageOverlays.length}`}
+            reloadKey={`${mapBump}:${gfCount}:${lat}:${lng}:${radius}:${showPin}:${showTaskGeofence}`}
             fallbackCircle={fallbackCircle}
             taskCircle={taskCircle}
-            // ✅ Coverage overlays are passed as extraFences so they NEVER replace fences
-            extraFences={showCoverageOverlay ? coverageOverlays : []}
+            extraFences={(activityRows || [])
+              .filter(
+                (r) =>
+                  Number.isFinite(Number(r.lat)) &&
+                  Number.isFinite(Number(r.lng)),
+              )
+              .filter((r) => (!fltFrom && !fltTo ? true : inDateWindow(r.at)))
+              .map((r) => ({
+                type: "point",
+                point: { lat: Number(r.lat), lng: Number(r.lng) },
+                label: r.note || r.action || "Activity",
+                meta: { when: r.at, source: r._source },
+              }))}
             allowPicking={true}
             legend={true}
             onPickLocation={({ lat: L, lng: G }) => {
@@ -2384,6 +2382,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
         {/* controls */}
         <form onSubmit={saveGeofence} className="mt-3 space-y-3">
+          {/* coords row */}
           <div className="flex flex-wrap gap-3 items-end">
             <label className="text-sm">
               Lat
@@ -2445,6 +2444,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             </button>
           </div>
 
+          {/* upload/clear row */}
           <div className="flex flex-wrap items-end gap-3">
             <label className="text-sm" style={{ minWidth: 260 }}>
               GeoJSON/KML/KMZ
@@ -2534,6 +2534,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             </div>
           </div>
 
+          {/* enforcement toggles */}
           <div className="flex flex-wrap items-center gap-4">
             <label className="text-sm inline-flex items-center gap-2">
               <input
@@ -2569,6 +2570,7 @@ export default function TaskDetail({ id: propId, onClose }) {
         />
       </div>
 
+      {/* ===== EVERYTHING BELOW HERE MATCHES YOUR "CONTINUATION" (Part 3/3) ===== */}
       {/* Milestones list */}
       <div className="border rounded-2xl p-4 mt-4 bg-white space-y-3">
         <div className="flex items-center justify-between">
@@ -2912,10 +2914,8 @@ export default function TaskDetail({ id: propId, onClose }) {
                   setErr("");
                   setInfo("");
 
-                  // 1) filter by INSPECTION window (standalone)
                   const filtered = (subs || []).filter(inInspectionWindow);
 
-                  // 2) then require coords (using the SAME resolver as the table)
                   const withCoords = filtered.filter((s) => {
                     const { lat, lng } = resolveSubmissionFields(s);
                     return (
@@ -3023,10 +3023,9 @@ export default function TaskDetail({ id: propId, onClose }) {
                           onClick={async () => {
                             const subId = s._id || s.id;
 
-                            // Always open modal
                             setSubViewErr("");
-                            setSubView(s); // quick placeholder
-                            setSubViewIframeUrl(""); // clear iframe fallback
+                            setSubView(s);
+                            setSubViewIframeUrl("");
                             setSubViewOpen(true);
 
                             try {
@@ -3038,7 +3037,6 @@ export default function TaskDetail({ id: propId, onClose }) {
                                 },
                               );
 
-                              // If it's a valid submission shape, show JSON render
                               if (
                                 data &&
                                 typeof data === "object" &&
@@ -3051,13 +3049,11 @@ export default function TaskDetail({ id: propId, onClose }) {
                                 return;
                               }
 
-                              // Otherwise fall back to iframe
                               setSubView(null);
                               setSubViewIframeUrl(
                                 `/inspections/submissions/${subId}?embed=1`,
                               );
                             } catch (e) {
-                              // ✅ No new tab. Fall back to iframe inside modal.
                               setSubViewErr(
                                 e?.response?.data?.error ||
                                   e?.message ||
@@ -3131,7 +3127,6 @@ export default function TaskDetail({ id: propId, onClose }) {
                     return;
                   }
 
-                  // Added lat/lng into the export
                   const headers = [
                     "when",
                     "action",
@@ -3218,7 +3213,6 @@ export default function TaskDetail({ id: propId, onClose }) {
 
                     let placemarks = "";
 
-                    // 1) Try coverage geometry from backend
                     if (list.length) {
                       const filtered = list.filter((c) =>
                         !fltFrom && !fltTo
@@ -3275,17 +3269,16 @@ export default function TaskDetail({ id: propId, onClose }) {
                       });
                     }
 
-                    // 2) If no usable coverage from backend, FALL BACK to logs with lat/lng
                     if (!placemarks.trim()) {
-                      const logsWithCoords = (
-                        task.actualDurationLog || []
-                      ).filter((e) => {
-                        const hasCoords =
-                          Number.isFinite(Number(e.lat)) &&
-                          Number.isFinite(Number(e.lng));
-                        if (!hasCoords) return false;
-                        return !fltFrom && !fltTo ? true : inDateWindow(e.at);
-                      });
+                      const logsWithCoords = (activityRows || []).filter(
+                        (e) => {
+                          const hasCoords =
+                            Number.isFinite(Number(e.lat)) &&
+                            Number.isFinite(Number(e.lng));
+                          if (!hasCoords) return false;
+                          return !fltFrom && !fltTo ? true : inDateWindow(e.at);
+                        },
+                      );
 
                       if (!logsWithCoords.length) {
                         setErr(
@@ -3294,14 +3287,12 @@ export default function TaskDetail({ id: propId, onClose }) {
                         return;
                       }
 
-                      // Sort logs by time
                       const sorted = logsWithCoords
                         .slice()
                         .sort(
                           (a, b) => +new Date(a.at || 0) - +new Date(b.at || 0),
                         );
 
-                      // 2a) One Point Placemark per log entry (gives you markers + info)
                       sorted.forEach((e, idx) => {
                         const when = e.at
                           ? new Date(e.at).toLocaleString()
@@ -3334,7 +3325,6 @@ export default function TaskDetail({ id: propId, onClose }) {
 </Placemark>`;
                       });
 
-                      // 2b) Optional LineString track joining all log points
                       if (sorted.length > 1) {
                         const coords = sorted
                           .map((e) => `${r6(e.lng)},${r6(e.lat)},0`)
