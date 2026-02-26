@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-24-09"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-02-26-01"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -197,23 +197,160 @@ function boolish(v) {
   return s === "1" || s === "true" || s === "yes" || s === "y" || s === "on";
 }
 
+function toObjectIdOrNull(v) {
+  const s = String(v || "").trim();
+  return mongoose.isValidObjectId(s) ? new mongoose.Types.ObjectId(s) : null;
+}
+
+function asIsoOrNull(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  // eslint-disable-next-line no-restricted-globals
+  return isNaN(+d) ? null : d.toISOString();
+}
+
+function parseDateSafe(v, fallback = new Date()) {
+  const d = new Date(v);
+  // eslint-disable-next-line no-restricted-globals
+  return isNaN(+d) ? fallback : d;
+}
+
+/**
+ * ✅ “Single source of truth” activity log adapter
+ * We try to write into a canonical ActivityLog-style model (if present),
+ * so TaskDetail/CSV/KMZ all consume the same log entries as web-created activities.
+ *
+ * We don’t assume the exact model name; we attempt a few common ones.
+ * If none exist, we fall back to the legacy Task.actualDurationLog + Task.attachments.
+ */
+function tryRequireAny(paths) {
+  for (const p of paths) {
+    try {
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      return require(p);
+    } catch {}
+  }
+  return null;
+}
+
+const ActivityLogModel = tryRequireAny([
+  "../models/ActivityLog",
+  "../models/TaskActivityLog",
+  "../models/TaskActivity",
+  "../models/TaskEvent",
+  "../models/Activity",
+]);
+
+/**
+ * Build attachment records that are browser-loadable without auth token (signed key URL).
+ */
+function buildMobileOfflineAttachments({
+  uploadedFiles,
+  at,
+  req,
+  offlineEventId,
+  noteText,
+}) {
+  const out = [];
+  for (const f of uploadedFiles || []) {
+    const fid = String(f?.fileId || "").trim();
+    if (!mongoose.isValidObjectId(fid)) continue;
+
+    const k = String(f?.downloadKey || "").trim();
+    const apiUrl = k
+      ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
+      : `/api/mobile/offline-files/${fid}`;
+
+    out.push({
+      filename: f.filename || "offline_upload",
+      url: apiUrl,
+      mobileUrl: apiUrl,
+      mime: f.contentType || "",
+      contentType: f.contentType || "",
+      size: typeof f.size === "number" ? f.size : undefined,
+      uploadedBy:
+        req.user?.name || req.user?.email || String(req.user?._id || ""),
+      uploadedAt: at,
+      note: noteText || "",
+      storage: "mobileOffline",
+      fileId: new mongoose.Types.ObjectId(fid),
+      sourceOfflineEventId: offlineEventId,
+    });
+  }
+  return out;
+}
+
+/**
+ * Idempotently upsert an activity log entry into the canonical model, if present.
+ * Uses sourceOfflineEventId for dedupe.
+ */
+async function upsertCanonicalActivityLog({
+  orgId,
+  taskId,
+  projectId,
+  milestoneId,
+  at,
+  action,
+  noteText,
+  attachments,
+  req,
+  offlineEventId,
+  payload,
+}) {
+  if (!ActivityLogModel?.findOneAndUpdate)
+    return { ok: false, reason: "no_model" };
+
+  const actorUserId =
+    req.user?._id && mongoose.isValidObjectId(String(req.user._id))
+      ? new mongoose.Types.ObjectId(String(req.user._id))
+      : undefined;
+
+  // We keep the document shape flexible; different projects name fields differently.
+  // The goal is: TaskDetail/exports see the same collection they already query.
+  const setOnInsert = {
+    orgId,
+    taskId,
+    projectId: projectId || undefined,
+    milestoneId: milestoneId || undefined,
+    at,
+    createdAt: new Date(),
+    source: "mobile-offline",
+    sourceOfflineEventId: offlineEventId,
+  };
+
+  const set = {
+    updatedAt: new Date(),
+    note: noteText || String(payload?.note || "").trim() || "",
+    action: action || (attachments?.length ? "photo" : "note"),
+    attachments: Array.isArray(attachments) ? attachments : [],
+    actor: {
+      userId: actorUserId,
+      name: req.user?.name || undefined,
+      email: req.user?.email || undefined,
+      sub: req.user?.sub || req.user?.id || undefined,
+    },
+  };
+
+  const query = {
+    orgId,
+    taskId,
+    sourceOfflineEventId: offlineEventId,
+  };
+
+  // Some schemas might not have this field; still safe to include in update payload.
+  // If Mongo strict schema rejects unknown fields, this will throw — and we’ll fall back.
+  const updated = await ActivityLogModel.findOneAndUpdate(
+    query,
+    { $setOnInsert: setOnInsert, $set: set },
+    { upsert: true, new: true },
+  );
+
+  return { ok: true, doc: updated };
+}
+
 /* -----------------------------------------------------------------------------------
    ✅ PUBLIC DOWNLOAD GRIDFS FILE (mobileOffline bucket)
    GET/HEAD /api/mobile/offline-files/:fileId?k=<downloadKey>
-
-   Why this exists:
-   - Your web app tries to load images via <img src="...">.
-   - Browsers DO NOT send your auth token with <img> requests.
-   - So without this, you get 401 and the image won’t render.
-
-   Rules:
-   - If correct ?k= is provided (matches metadata.downloadKey) -> allow (no login required)
-   - Otherwise -> require login + org context
-
-   ✅ IMPORTANT FIX:
-   This handler now works BOTH ways:
-   - If this router is mounted publicly (no requireAuth), it will still enforce auth when needed
-   - If it is mounted behind requireAuth, it still works (signed key path simply becomes redundant)
 ----------------------------------------------------------------------------------- */
 router.all("/offline-files/:fileId", async (req, res) => {
   try {
@@ -246,7 +383,6 @@ router.all("/offline-files/:fileId", async (req, res) => {
         "Content-Disposition",
         `inline; filename="${fileDoc.filename || "file"}"`,
       );
-      // cache OK: key is unguessable; can still keep it private
       res.setHeader("Cache-Control", "private, max-age=31536000");
 
       if (req.method === "HEAD") return res.status(200).end();
@@ -262,7 +398,6 @@ router.all("/offline-files/:fileId", async (req, res) => {
     }
 
     // ✅ PATH B: secured access (token required)
-    // If caller doesn't have req.user attached, run auth middleware manually.
     if (!req.user || !req.user._id) {
       try {
         await runMiddleware(req, res, requireAuth);
@@ -271,7 +406,6 @@ router.all("/offline-files/:fileId", async (req, res) => {
         return res.status(401).json({ error: "Missing token" });
       }
     } else {
-      // ensure org context is attached if already authed but org not resolved
       if (!req.orgObjectId && !req.orgId) {
         try {
           await runMiddleware(req, res, resolveOrgContext);
@@ -462,6 +596,8 @@ const OfflineEventSchema = new mongoose.Schema(
     uploadedFiles: { type: [Object], default: [] }, // {fileId, filename, contentType, size, downloadKey?}
     createdAtClient: { type: String },
     receivedAt: { type: Date, default: Date.now },
+    appliedAt: { type: Date, default: null }, // ✅ helps debug “received but not applied”
+    appliedTo: { type: Object, default: {} }, // ✅ debug: { activityLogId, taskId, ... }
   },
   { minimize: false },
 );
@@ -527,6 +663,14 @@ router.post(
         uploadedFiles = [];
       }
 
+      // ✅ Normalize mobile event aliases so they behave like web “task activities”
+      const eventTypeNorm = String(eventType || "")
+        .trim()
+        .toLowerCase();
+      if (eventTypeNorm === "mobile-activity-log") eventType = "activity-log";
+      if (eventTypeNorm === "task-activity") eventType = "activity-log";
+      if (eventTypeNorm === "task-activity-log") eventType = "activity-log";
+
       const doc = await OfflineEvent.create({
         orgId,
         userId,
@@ -537,6 +681,8 @@ router.post(
         uploadedFiles,
         createdAtClient,
       });
+
+      const appliedTo = {};
 
       // ✅ APPLY PROJECT UPDATES (manager note + status + optional attachments)
       if (eventType === "project-update") {
@@ -590,7 +736,7 @@ router.post(
                 ? doc.uploadedFiles
                 : [];
 
-              await ProjectManagerNote.create({
+              const noteDoc = await ProjectManagerNote.create({
                 orgId: orgId2,
                 projectId: projectObjectId,
                 status: status || statusRaw || "active",
@@ -607,6 +753,9 @@ router.post(
                 sourceOfflineEventId: doc._id,
                 createdAtClient: createdAtClient || null,
               });
+
+              appliedTo.projectManagerNoteId = String(noteDoc?._id || "");
+              appliedTo.projectId = String(projectObjectId);
             }
           }
         } catch (e3) {
@@ -653,74 +802,91 @@ router.post(
                 offlineEventId: String(doc?._id),
               });
             } else {
-              const first = uploaded[0];
-              const newFileId = await copyGridFSFile({
-                fromBucket,
-                toBucket,
-                fromFileId: first.fileId,
-                filename: first.filename || null,
-                contentType: first.contentType || null,
-                metadata: {
-                  orgId: String(orgId2 || ""),
-                  uploadedBy: actor ? String(actor) : "",
-                  source: "mobile-offline-event",
-                  offlineEventId: String(doc._id),
-                  projectId: String(projectRefId),
-                  targetUserId: targetUserRefId
-                    ? String(targetUserRefId)
-                    : undefined,
-                },
-              });
+              // ✅ idempotency: if a previous sync already created a Document for this event, skip creating another
+              const existing = await Document.findOne({
+                orgId: orgId2,
+                "latest.meta.offlineEventId": String(doc._id),
+              })
+                .lean()
+                .catch(() => null);
 
-              const fileIdStr = String(newFileId);
-              const url = `/documents/files/${fileIdStr}`;
-
-              const title = String(payload?.title || "User document").trim();
-              const tag = String(payload?.tag || "").trim();
-
-              const links = [
-                { type: "project", module: "project", refId: projectRefId },
-              ];
-              if (targetUserRefId) {
-                links.push({
-                  type: "user",
-                  module: "user",
-                  refId: targetUserRefId,
+              if (existing?._id) {
+                appliedTo.documentId = String(existing._id);
+              } else {
+                const first = uploaded[0];
+                const newFileId = await copyGridFSFile({
+                  fromBucket,
+                  toBucket,
+                  fromFileId: first.fileId,
+                  filename: first.filename || null,
+                  contentType: first.contentType || null,
+                  metadata: {
+                    orgId: String(orgId2 || ""),
+                    uploadedBy: actor ? String(actor) : "",
+                    source: "mobile-offline-event",
+                    offlineEventId: String(doc._id),
+                    projectId: String(projectRefId),
+                    targetUserId: targetUserRefId
+                      ? String(targetUserRefId)
+                      : undefined,
+                  },
                 });
+
+                const fileIdStr = String(newFileId);
+                const url = `/documents/files/${fileIdStr}`;
+
+                const title = String(payload?.title || "User document").trim();
+                const tag = String(payload?.tag || "").trim();
+
+                const links = [
+                  { type: "project", module: "project", refId: projectRefId },
+                ];
+                if (targetUserRefId) {
+                  links.push({
+                    type: "user",
+                    module: "user",
+                    refId: targetUserRefId,
+                  });
+                }
+
+                const version = {
+                  filename: first.filename || "file",
+                  url,
+                  fileId: fileIdStr,
+                  mime: first.contentType || "application/octet-stream",
+                  size: typeof first.size === "number" ? first.size : undefined,
+                  uploadedBy: actor,
+                  uploadedAt: new Date(),
+                  meta: { offlineEventId: String(doc._id) },
+                };
+
+                const now = new Date();
+
+                const body = {
+                  orgId:
+                    req.orgObjectId ||
+                    (mongoose.Types.ObjectId.isValid(String(orgId2))
+                      ? new mongoose.Types.ObjectId(String(orgId2))
+                      : undefined),
+                  title,
+                  folder: "",
+                  tags: tag ? [tag] : [],
+                  links,
+                  access: { visibility: "org", owners: actor ? [actor] : [] },
+                  versions: [version],
+                  latest: {
+                    ...version,
+                    meta: { offlineEventId: String(doc._id) },
+                  },
+                  createdAt: now,
+                  updatedAt: now,
+                  createdBy: actor,
+                  updatedBy: actor,
+                };
+
+                const docCreated = await Document.create(body);
+                appliedTo.documentId = String(docCreated?._id || "");
               }
-
-              const version = {
-                filename: first.filename || "file",
-                url,
-                fileId: fileIdStr,
-                mime: first.contentType || "application/octet-stream",
-                size: typeof first.size === "number" ? first.size : undefined,
-                uploadedBy: actor,
-                uploadedAt: new Date(),
-              };
-
-              const now = new Date();
-
-              const body = {
-                orgId:
-                  req.orgObjectId ||
-                  (mongoose.Types.ObjectId.isValid(String(orgId2))
-                    ? new mongoose.Types.ObjectId(String(orgId2))
-                    : undefined),
-                title,
-                folder: "",
-                tags: tag ? [tag] : [],
-                links,
-                access: { visibility: "org", owners: actor ? [actor] : [] },
-                versions: [version],
-                latest: version,
-                createdAt: now,
-                updatedAt: now,
-                createdBy: actor,
-                updatedBy: actor,
-              };
-
-              await Document.create(body);
             }
           }
         } catch (e4) {
@@ -761,8 +927,7 @@ router.post(
               payload?.createdAt ||
               createdAtClient ||
               new Date().toISOString();
-            const d = new Date(raw);
-            return isNaN(+d) ? new Date() : d;
+            return parseDateSafe(raw, new Date());
           })();
 
           function normalizeTaskStatusForTaskModel(s) {
@@ -871,6 +1036,7 @@ router.post(
                 taskId: String(taskDoc._id),
                 status: taskDoc.status,
               });
+              appliedTo.taskId = String(taskDoc._id);
             }
           }
 
@@ -922,6 +1088,7 @@ router.post(
                 milestoneId: String(msDoc._id),
                 status: msDoc.status,
               });
+              appliedTo.milestoneId = String(msDoc._id);
             }
           } else if (payload?.milestoneStatus != null && !newMilestoneStatus) {
             console.warn("[task-update] unrecognized milestoneStatus", {
@@ -937,27 +1104,40 @@ router.post(
             ? new mongoose.Types.ObjectId(projectIdStr)
             : undefined;
 
-          await ManagerNote.create({
+          // ✅ idempotent ManagerNote: don't create duplicates on resync
+          const existingNote = await ManagerNote.findOne({
             taskId: taskObjectId,
-            projectId: projectObjectId,
             orgId: orgIdObj || undefined,
-            at,
-            status:
-              newTaskStatus || String(payload?.status || "pending").trim(),
-            note: noteText || "",
-            author: {
-              id: actorUserId,
-              name: req.user?.name || undefined,
-              email: req.user?.email || undefined,
-            },
-            deletedAt: null,
-          });
+            sourceOfflineEventId: doc._id,
+          })
+            .lean()
+            .catch(() => null);
+
+          if (!existingNote?._id) {
+            const noteDoc = await ManagerNote.create({
+              taskId: taskObjectId,
+              projectId: projectObjectId,
+              orgId: orgIdObj || undefined,
+              at,
+              status:
+                newTaskStatus || String(payload?.status || "pending").trim(),
+              note: noteText || "",
+              author: {
+                id: actorUserId,
+                name: req.user?.name || undefined,
+                email: req.user?.email || undefined,
+              },
+              deletedAt: null,
+              sourceOfflineEventId: doc._id,
+            });
+            appliedTo.managerNoteId = String(noteDoc?._id || "");
+          }
         } catch (e) {
           console.error("[task-update] failed to apply task update", e);
         }
       }
 
-      // ✅ APPLY ACTIVITY LOG (Task.actualDurationLog + Task.attachments)
+      // ✅ APPLY ACTIVITY LOG (CANONICAL FIRST, LEGACY FALLBACK)
       if (eventType === "activity-log") {
         try {
           const Task = require("../models/Task");
@@ -1004,73 +1184,113 @@ router.post(
                   payload?.createdAt ||
                   createdAtClient ||
                   new Date().toISOString();
-                const d = new Date(raw);
-                return Number.isNaN(d.getTime()) ? new Date() : d;
+                return parseDateSafe(raw, new Date());
               })();
 
               const uploaded = Array.isArray(doc?.uploadedFiles)
                 ? doc.uploadedFiles
                 : [];
 
-              taskDoc.attachments = Array.isArray(taskDoc.attachments)
-                ? taskDoc.attachments
-                : [];
-              taskDoc.actualDurationLog = Array.isArray(
-                taskDoc.actualDurationLog,
-              )
-                ? taskDoc.actualDurationLog
-                : [];
+              const attachments = buildMobileOfflineAttachments({
+                uploadedFiles: uploaded,
+                at,
+                req,
+                offlineEventId: doc._id,
+                noteText,
+              });
 
-              // ✅ Store an image URL that a browser can load:
-              // /api/mobile/offline-files/:fileId?k=<downloadKey>
-              for (const f of uploaded) {
-                const fid = String(f?.fileId || "").trim();
-                if (!mongoose.isValidObjectId(fid)) continue;
+              const action =
+                String(payload?.action || "").trim() ||
+                (attachments.length ? "photo" : "note");
 
-                const k = String(f?.downloadKey || "").trim();
-                const apiUrl = k
-                  ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
-                  : `/api/mobile/offline-files/${fid}`;
+              const projectIdObj =
+                taskDoc?.projectId &&
+                mongoose.isValidObjectId(String(taskDoc.projectId))
+                  ? new mongoose.Types.ObjectId(String(taskDoc.projectId))
+                  : toObjectIdOrNull(payload?.projectId) || undefined;
 
-                taskDoc.attachments.push({
-                  filename: f.filename || "offline_upload",
-                  url: apiUrl,
-                  mobileUrl: apiUrl,
-                  mime: f.contentType || "",
-                  contentType: f.contentType || "",
-                  size: typeof f.size === "number" ? f.size : undefined,
-                  uploadedBy:
-                    req.user?.name ||
-                    req.user?.email ||
-                    String(req.user?._id || ""),
-                  uploadedAt: at,
-                  note: noteText || "",
-                  storage: "mobileOffline",
-                  fileId: new mongoose.Types.ObjectId(fid),
-                  sourceOfflineEventId: doc._id,
+              // ✅ 1) CANONICAL: write to ActivityLog-style collection (single source of truth)
+              let canonicalOk = false;
+              try {
+                const canon = await upsertCanonicalActivityLog({
+                  orgId: orgIdObj || orgIdStr || orgIdRaw,
+                  taskId: taskObjectId,
+                  projectId: projectIdObj,
+                  milestoneId: milestoneObjectId,
+                  at,
+                  action,
+                  noteText,
+                  attachments,
+                  req,
+                  offlineEventId: doc._id,
+                  payload,
                 });
+                canonicalOk = !!canon?.ok;
+                if (canonicalOk) {
+                  appliedTo.activityLogId = String(canon?.doc?._id || "");
+                  appliedTo.taskId = String(taskObjectId);
+                }
+              } catch (eCanon) {
+                canonicalOk = false;
+                console.warn(
+                  "[activity-log] canonical log write failed; will fallback",
+                  eCanon?.message || eCanon,
+                );
               }
 
-              const actorId =
-                req.user?._id && mongoose.isValidObjectId(String(req.user._id))
-                  ? new mongoose.Types.ObjectId(String(req.user._id))
-                  : undefined;
+              // ✅ 2) LEGACY FALLBACK: keep Task.actualDurationLog + Task.attachments updated
+              // This is ONLY to avoid breaking older UI paths while you transition fully to canonical logs.
+              // It is idempotent using sourceOfflineEventId.
+              try {
+                taskDoc.attachments = Array.isArray(taskDoc.attachments)
+                  ? taskDoc.attachments
+                  : [];
+                taskDoc.actualDurationLog = Array.isArray(
+                  taskDoc.actualDurationLog,
+                )
+                  ? taskDoc.actualDurationLog
+                  : [];
 
-              const action = uploaded.length ? "photo" : "note";
+                const alreadyHasAttachments = taskDoc.attachments.some(
+                  (a) =>
+                    String(a?.sourceOfflineEventId || "") === String(doc._id),
+                );
+                const alreadyHasLog = taskDoc.actualDurationLog.some(
+                  (l) =>
+                    String(l?.sourceOfflineEventId || "") === String(doc._id),
+                );
 
-              taskDoc.actualDurationLog.push({
-                action,
-                at,
-                userId: actorId,
-                actorName: req.user?.name,
-                actorEmail: req.user?.email,
-                actorSub: req.user?.sub || req.user?.id,
-                note: noteText || "",
-                ...(milestoneObjectId
-                  ? { milestoneId: milestoneObjectId }
-                  : {}),
-                sourceOfflineEventId: doc._id,
-              });
+                if (!alreadyHasAttachments && attachments.length) {
+                  for (const a of attachments) taskDoc.attachments.push(a);
+                }
+
+                if (!alreadyHasLog) {
+                  const actorId =
+                    req.user?._id &&
+                    mongoose.isValidObjectId(String(req.user._id))
+                      ? new mongoose.Types.ObjectId(String(req.user._id))
+                      : undefined;
+
+                  taskDoc.actualDurationLog.push({
+                    action,
+                    at,
+                    userId: actorId,
+                    actorName: req.user?.name,
+                    actorEmail: req.user?.email,
+                    actorSub: req.user?.sub || req.user?.id,
+                    note: noteText || "",
+                    ...(milestoneObjectId
+                      ? { milestoneId: milestoneObjectId }
+                      : {}),
+                    sourceOfflineEventId: doc._id,
+                  });
+                }
+              } catch (eLegacy) {
+                console.error(
+                  "[activity-log] legacy task log fallback failed",
+                  eLegacy,
+                );
+              }
 
               // ✅ APPLY ACTIVITY FENCE -> TaskCoverage (from payload.fenceJson)
               try {
@@ -1133,16 +1353,19 @@ router.post(
                       }
 
                       if (geometry) {
-                        const orgId = req.orgObjectId || req.user?.orgId;
+                        const orgId2 = req.orgObjectId || req.user?.orgId;
 
-                        // ✅ use offline event id for dedupe if you add it to the model
                         const sourceOfflineEventId = doc?._id;
 
                         await TaskCoverage.findOneAndUpdate(
-                          { orgId, taskId: taskObjectId, sourceOfflineEventId },
                           {
-                            $setOnInsert: {
-                              orgId,
+                            orgId: orgId2,
+                            taskId: taskObjectId,
+                            sourceOfflineEventId,
+                          },
+                          {
+                            $set: {
+                              orgId: orgId2,
                               taskId: taskObjectId,
                               projectId: taskDoc?.projectId || undefined,
                               date: at,
@@ -1161,11 +1384,16 @@ router.post(
                                 email: req.user?.email || undefined,
                               },
                               note: String(payload?.note || "").trim(),
+                              sourceOfflineEventId,
+                            },
+                            $setOnInsert: {
+                              createdAt: new Date(),
                             },
                           },
                           { upsert: true, new: true },
                         );
 
+                        appliedTo.coverageFromFence = true;
                         console.log(
                           "[activity-log] TaskCoverage saved from fenceJson",
                           {
@@ -1189,18 +1417,13 @@ router.post(
               taskDoc.updatedAt = new Date();
               await taskDoc.save();
 
-              console.log("[activity-log] applied to task", {
+              console.log("[activity-log] applied", {
                 taskId: String(taskDoc._id),
-                uploadedCount: uploaded.length,
+                canonicalModel: !!ActivityLogModel,
+                canonicalAttempted: true,
+                attachments: attachments.length,
                 noteLen: noteText.length,
                 milestoneId: milestoneIdStr || null,
-                firstUrl: uploaded?.[0]?.fileId
-                  ? `/api/mobile/offline-files/${uploaded[0].fileId}${
-                      uploaded[0].downloadKey
-                        ? `?k=${uploaded[0].downloadKey}`
-                        : ""
-                    }`
-                  : null,
               });
             }
           }
@@ -1236,7 +1459,7 @@ router.post(
               performedByUserIdStr,
             });
           } else {
-            await BiometricEnrollmentRequest.findOneAndUpdate(
+            const enrReq = await BiometricEnrollmentRequest.findOneAndUpdate(
               { orgId, sourceOfflineEventId: doc._id },
               {
                 $setOnInsert: {
@@ -1270,6 +1493,7 @@ router.post(
               },
               { upsert: true, new: true },
             );
+            appliedTo.biometricRequestId = String(enrReq?._id || "");
           }
         } catch (e2) {
           console.error(
@@ -1279,6 +1503,14 @@ router.post(
         }
       }
 
+      // ✅ mark applied debug fields (best-effort; never fail the ingest)
+      try {
+        await OfflineEvent.updateOne(
+          { _id: doc._id },
+          { $set: { appliedAt: new Date(), appliedTo } },
+        );
+      } catch {}
+
       return res.json({
         ok: true,
         stage: "received",
@@ -1286,6 +1518,8 @@ router.post(
         uploadedFilesCount: Array.isArray(doc.uploadedFiles)
           ? doc.uploadedFiles.length
           : 0,
+        appliedTo,
+        routerVersion: ROUTER_VERSION,
       });
     } catch (e) {
       console.error("[mobile/offline-events] error", e);
