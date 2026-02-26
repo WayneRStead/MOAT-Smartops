@@ -845,7 +845,7 @@ export default function Inspections() {
         <input
           className="input input-bordered"
           style={{ minWidth: 280 }}
-          placeholder="Search title, type, scope, project, task, deliverable, inspector, subject, location…"
+          placeholder="Search title, type, scope, project, task, milestone, inspector, subject, location…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -928,7 +928,7 @@ export default function Inspections() {
                   <th>Scope</th>
                   <th>Project</th>
                   <th>Task</th>
-                  <th>Deliverable</th>
+                  <th>Milestone</th>
                   <th>Subject</th>
                   <th>Inspector</th>
                   <th>Date Submitted</th>
@@ -1103,7 +1103,7 @@ export default function Inspections() {
                   <th>Scope</th>
                   <th>Project</th>
                   <th>Task</th>
-                  <th>Deliverable</th>
+                  <th>Milestone</th>
                   <th className="text-right">Actions</th>
                 </tr>
               </thead>

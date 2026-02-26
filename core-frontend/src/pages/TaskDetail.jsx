@@ -1,4 +1,4 @@
-// src/pages/TaskDetail.jsx  (Part 1/3)
+// src/pages/TaskDetail.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import MilestonesBlock from "../components/MilestonesBlock.jsx";
@@ -171,7 +171,6 @@ function fencesToKML(name, fences) {
 }
 async function downloadKMZ(filename, kmlString) {
   try {
-    // Primary path: zip KML as KMZ
     const { default: JSZip } = await import("jszip");
     const zip = new JSZip();
     zip.file("doc.kml", kmlString);
@@ -190,7 +189,6 @@ async function downloadKMZ(filename, kmlString) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
-    // Safety net: if JSZip/module fails, fall back to plain KML download
     console.error("KMZ export failed, falling back to KML:", err);
 
     const fallbackName = filename.replace(/\.kmz$/i, ".kml");
@@ -332,7 +330,6 @@ function normMilestone(ms) {
     false
   );
 
-  // Normalize dependency into a SINGLE ID string
   const rawDep =
     ms.dependsOn ??
     ms.roadblockDependency ??
@@ -361,7 +358,7 @@ function normMilestone(ms) {
     dueAt,
     status,
     isRoadblock,
-    dependsOnId, // <-- use THIS in the UI
+    dependsOnId,
     actualEndAt,
   };
 }
@@ -457,7 +454,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
   // Standalone inspection submissions date filter (independent of global filter)
   const [inspFrom, setInspFrom] = useState(""); // YYYY-MM-DD
-  const [inspTo, setInspTo] = useState(""); // YYYY-MM-DD
+  const [inspTo, setInspTo] = useState("");
 
   // Overview inline-edit state (mirrors task)
   const [title, setTitle] = useState("");
@@ -484,6 +481,11 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [dlTask, setDlTask] = useState([]);
   const [showPin, setShowPin] = useState(true);
   const [showTaskGeofence, setShowTaskGeofence] = useState(true);
+
+  // NEW: Coverage overlay on map (extraFences)
+  const [showCoverageOverlay, setShowCoverageOverlay] = useState(true);
+  const [coverageOverlays, setCoverageOverlays] = useState([]); // array of extraFences
+  const [coverageErr, setCoverageErr] = useState("");
 
   // Exporting state (kmz only)
   const [exporting, setExporting] = useState(null);
@@ -524,17 +526,9 @@ export default function TaskDetail({ id: propId, onClose }) {
   const [logErr, setLogErr] = useState("");
   const [logMilestoneId, setLogMilestoneId] = useState("");
 
-  // NEW: Activity sorting + edit binding
+  // Activity sorting + edit binding
   const [activitySort, setActivitySort] = useState("desc"); // 'desc' newest first | 'asc'
   const [editingLogId, setEditingLogId] = useState(null); // null => add, else edit
-
-    // NEW: Event-based activity logs (mobile app writes these into Events collection)
-  const [eventActivities, setEventActivities] = useState([]);
-  const [eventActivitiesErr, setEventActivitiesErr] = useState("");
-
-  // NEW: Task coverage records (so they can show in Activity + export together)
-  const [coverageItems, setCoverageItems] = useState([]);
-  const [coverageErr, setCoverageErr] = useState("");
 
   // Image lightbox
   const [imgOpen, setImgOpen] = useState(false);
@@ -551,6 +545,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     users.forEach((u) => m.set(String(u._id), u));
     return m;
   }, [users]);
+
   const userLabel = (u) => {
     if (!u) return "—";
     const idStr = String(u._id || u);
@@ -559,10 +554,12 @@ export default function TaskDetail({ id: propId, onClose }) {
       ? populated.name || populated.email || populated.username || idStr
       : idStr;
   };
+
   const projectLabel = (pid) => {
     const p = projects.find((pr) => String(pr._id) === String(pid));
     return p?.name || "—";
   };
+
   const groupsById = useMemo(() => {
     const m = new Map();
     groups.forEach((g) => m.set(String(g._id), g));
@@ -581,8 +578,8 @@ export default function TaskDetail({ id: propId, onClose }) {
 
     const normId = (x) => {
       if (!x) return x;
-      const id = x._id ?? x.id;
-      return { ...x, _id: id != null ? String(id) : "" };
+      const _id = x._id ?? x.id;
+      return { ...x, _id: _id != null ? String(_id) : "" };
     };
 
     (async () => {
@@ -609,12 +606,11 @@ export default function TaskDetail({ id: propId, onClose }) {
             .filter((x) => x._id),
         );
       } catch (e) {
-        // console.warn("Lookup load failed:", e?.response?.data || e);
+        // lookup load fail is non-fatal
       }
     })();
   }, []);
 
-  // src/pages/TaskDetail.jsx  (Part 2/3) — continue
   /* ---------- fences helpers ---------- */
   function normalizeFencesPayload(data) {
     if (Array.isArray(data?.geoFences)) return data.geoFences;
@@ -687,11 +683,9 @@ export default function TaskDetail({ id: propId, onClose }) {
       setLng(norm?.locationGeoFence?.lng ?? "");
       setRadius(norm?.locationGeoFence?.radius ?? "");
 
-      // manager controls seed
       setMgrStatus(canonStatus(norm?.status || "pending"));
       setMgrNote("");
 
-      // Load manager notes
       try {
         const notes = await fetchManagerNotes(
           id,
@@ -714,146 +708,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   }
   useEffect(() => {
     loadTask();
-  }, [id]);
-
-    // ---------- load event-based activity logs (mobile) ----------
-  function normalizeEventActivity(doc) {
-    // supports your mongo example:
-    // { eventType:"activity-log", entityRef:"<taskId>", payload:{ note, milestone, lat, lng, capturedAt, createdAt, ... } }
-    const p = doc?.payload || {};
-    const at =
-      p.capturedAt ||
-      p.at ||
-      p.createdAt ||
-      doc?.createdAtClient ||
-      doc?.createdAt ||
-      doc?.receivedAt ||
-      null;
-
-    return {
-      _id: String(doc?._id || doc?.id || ""),
-      source: "event",
-      at,
-      action: p.action || "activity",
-      note: p.note || "",
-      milestoneId: p.milestoneId || p.milestone || p.milestone_id || "",
-      lat: p.lat ?? null,
-      lng: p.lng ?? null,
-      by:
-        doc?.actorName ||
-        doc?.actorEmail ||
-        p.actorName ||
-        p.actorEmail ||
-        p.userName ||
-        p.userId ||
-        doc?.userId ||
-        "—",
-      // keep raw for KML/coverage fallback if needed
-      _raw: doc,
-    };
-  }
-
-  async function loadEventActivities() {
-    setEventActivitiesErr("");
-    try {
-      // Try common endpoint shapes; first one that works wins.
-      // 1) /events?eventType=activity-log&entityRef=:taskId
-      try {
-        const { data } = await api.get("/events", {
-          params: {
-            eventType: "activity-log",
-            entityRef: id,
-            limit: 1000,
-            _ts: Date.now(),
-          },
-        });
-
-        const list = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.items)
-            ? data.items
-            : Array.isArray(data?.rows)
-              ? data.rows
-              : Array.isArray(data?.data)
-                ? data.data
-                : [];
-
-        setEventActivities(list.map(normalizeEventActivity).filter((x) => x._id));
-        return;
-      } catch (e1) {
-        // 2) /events/activity-log?taskId=:id
-        const { data } = await api.get("/events/activity-log", {
-          params: { taskId: id, limit: 1000, _ts: Date.now() },
-        });
-
-        const list = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.items)
-            ? data.items
-            : Array.isArray(data?.rows)
-              ? data.rows
-              : Array.isArray(data?.data)
-                ? data.data
-                : [];
-
-        setEventActivities(list.map(normalizeEventActivity).filter((x) => x._id));
-      }
-    } catch (e) {
-      setEventActivities([]);
-      setEventActivitiesErr(e?.response?.data?.error || "Failed to load mobile activity logs");
-    }
-  }
-
-  // ---------- load task coverage (so it can appear in activity log + KMZ) ----------
-  function normalizeCoverageRow(c) {
-    const when = c?.date || c?.createdAt || c?.capturedAt || c?.updatedAt || null;
-    return {
-      _id: String(c?._id || c?.id || ""),
-      source: "coverage",
-      at: when,
-      action: "coverage",
-      note: c?.title || c?.filename || "Task coverage",
-      milestoneId: c?.milestoneId || c?.milestone || "",
-      // no guaranteed point; we derive a representative point later for exports if needed
-      lat: null,
-      lng: null,
-      geometry:
-        c?.geometry ||
-        c?.geojson ||
-        c?.geoJSON ||
-        (c?.feature && c.feature.geometry) ||
-        null,
-      _raw: c,
-    };
-  }
-
-  async function loadCoverageItems() {
-    setCoverageErr("");
-    try {
-      const { data } = await api.get(`/tasks/${id}/coverage`, {
-        params: { limit: 1000, _ts: Date.now() },
-      });
-
-      const list = Array.isArray(data?.items)
-        ? data.items
-        : Array.isArray(data?.rows)
-          ? data.rows
-          : Array.isArray(data)
-            ? data
-            : [];
-
-      setCoverageItems(list.map(normalizeCoverageRow).filter((x) => x._id));
-    } catch (e) {
-      setCoverageItems([]);
-      setCoverageErr(e?.response?.data?.error || "Failed to load coverage");
-    }
-  }
-
-  // load on task change
-  useEffect(() => {
-    if (!id) return;
-    loadEventActivities();
-    loadCoverageItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   /* ---------- milestones ---------- */
@@ -881,6 +736,7 @@ export default function TaskDetail({ id: propId, onClose }) {
   }
   useEffect(() => {
     loadMilestones();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   function buildMilestonePayload(ms, patch) {
@@ -958,13 +814,12 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  // Create Milestone
   async function createMilestone() {
     setMErr("");
     setMInfo("");
     try {
-      const title = (msForm.title || "").trim();
-      if (!title) {
+      const ttitle = (msForm.title || "").trim();
+      if (!ttitle) {
         setMErr("Title is required");
         return;
       }
@@ -972,8 +827,8 @@ export default function TaskDetail({ id: propId, onClose }) {
       const sISO = msForm.startAt ? fromLocalDateOnly(msForm.startAt) : null;
       const eISO = msForm.endAt ? fromLocalDateOnly(msForm.endAt) : null;
       const payload = {
-        title,
-        name: title,
+        title: ttitle,
+        name: ttitle,
         status,
         isRoadblock: !!msForm.isRoadblock,
         roadblock: !!msForm.isRoadblock,
@@ -1053,8 +908,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       (Array.isArray(t?.assignedTo) && t.assignedTo[0]) ??
       (Array.isArray(t?.assignedUserIds) && t.assignedUserIds[0]) ??
       null;
-
-    // always return an ID string (not an object)
     return a ? String(a._id || a.id || a) : "";
   };
 
@@ -1070,7 +923,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       await optimisticSave(
         {
-          // cover multiple backend shapes
           assignee: nextAssigneeId || null,
           assigneeId: nextAssigneeId || null,
           assignedUserIds: nextAssigneeId ? [nextAssigneeId] : [],
@@ -1078,7 +930,6 @@ export default function TaskDetail({ id: propId, onClose }) {
           assignedToId: nextAssigneeId || null,
           userId: nextAssigneeId || null,
         },
-
         () =>
           setTask((t) => ({
             ...(t || {}),
@@ -1093,6 +944,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       saveGateRef.current.assignee = false;
     }
   }
+
   async function saveStartOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
@@ -1120,6 +972,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       saveGateRef.current.start = false;
     }
   }
+
   async function saveDueOnce(nextLocalDateStr) {
     const current = lastGoodTaskRef.current;
     if (!current) return;
@@ -1129,6 +982,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     if (haveLocal === String(nextLocalDateStr || "")) return;
     if (saveGateRef.current.due) return;
     const iso = nextLocalDateStr ? fromLocalDateOnly(nextLocalDateStr) : null;
+
     saveGateRef.current.due = true;
     try {
       await optimisticSave(
@@ -1146,52 +1000,51 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  /* ---------- forms & submissions ---------- */
-  async function loadForms() {
-    try {
-      const params = { limit: 200, taskId: id };
-      if (projectId) params.projectId = projectId;
-      const { data } = await api.get("/inspections/forms", { params });
-      setForms(Array.isArray(data) ? data : []);
-      setFormsErr("");
-    } catch (e) {
-      setForms([]);
-      setFormsErr(e?.response?.data?.error || "Failed to load forms");
-    }
-  }
-  async function loadSubs() {
-    try {
-      const params = { limit: 200, taskId: id };
-      if (projectId) params.projectId = projectId;
+  /* ---------- date filter helpers ---------- */
+  const submissionWhenIso = (s) =>
+    s?.submittedAt ||
+    s?.createdAt ||
+    s?.completedAt ||
+    s?.finishedAt ||
+    s?.updatedAt ||
+    null;
 
-      const { data } = await api.get("/inspections/submissions", { params });
+  const inDateWindow = (d) => {
+    if (!fltFrom && !fltTo) return true;
 
-      // ✅ handle multiple backend shapes
-      const list = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.items)
-          ? data.items
-          : Array.isArray(data?.rows)
-            ? data.rows
-            : Array.isArray(data?.data)
-              ? data.data
-              : [];
+    const dt =
+      d instanceof Date
+        ? d
+        : typeof d === "string" || typeof d === "number"
+          ? new Date(d)
+          : null;
 
-      setSubs(list);
-      setSubsErr("");
-    } catch (e) {
-      setSubs([]);
-      setSubsErr(e?.response?.data?.error || "Failed to load submissions");
-    }
-  }
-  useEffect(() => {
-    loadForms();
-    loadSubs();
-  }, [id, projectId]);
+    if (!dt || isNaN(+dt)) return false;
+
+    const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
+    const toOk = !fltTo || dt <= new Date(`${fltTo}T23:59:59.999`);
+    return fromOk && toOk;
+  };
+
+  const isoToLocalDateOnly = (iso) => {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (isNaN(+dt)) return "";
+    return toLocalDateOnly(dt);
+  };
+
+  const inInspectionWindow = (s) => {
+    if (!inspFrom && !inspTo) return true;
+    const whenIso = submissionWhenIso(s);
+    const day = isoToLocalDateOnly(whenIso);
+    if (!day) return false;
+    if (inspFrom && day < inspFrom) return false;
+    if (inspTo && day > inspTo) return false;
+    return true;
+  };
 
   /* ---------- submission field resolver (robust) ---------- */
   function resolveSubmissionFields(s) {
-    // DATE
     const submittedRaw =
       s?.submittedAt ||
       s?.createdAt ||
@@ -1201,7 +1054,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       null;
     const submitted = submittedRaw ? new Date(submittedRaw) : null;
 
-    // INSPECTOR (many shapes)
     const runBy = s?.runBy && typeof s.runBy === "object" ? s.runBy : null;
     const actorObj =
       runBy ||
@@ -1234,7 +1086,6 @@ export default function TaskDetail({ id: propId, onClose }) {
       actorId ||
       "—";
 
-    // MANAGER NOTE (common nests)
     let managerNote = "—";
     if (Array.isArray(s?.managerComments) && s.managerComments.length) {
       const latest = s.managerComments
@@ -1255,12 +1106,10 @@ export default function TaskDetail({ id: propId, onClose }) {
         "—";
     }
 
-    // OUTCOME (MUST use overallResult)
     const readStr = (v) => {
       if (v == null) return "";
       if (typeof v === "string") return v.trim();
       if (typeof v === "number" || typeof v === "boolean") return String(v);
-      // avoid crashing on objects/arrays
       try {
         return String(v).trim();
       } catch {
@@ -1271,10 +1120,7 @@ export default function TaskDetail({ id: propId, onClose }) {
     const normalizeOverallResult = (v) => {
       const raw = readStr(v);
       if (!raw) return "";
-
       const up = raw.toUpperCase().trim();
-
-      // normalize common variants
       if (["PASS", "PASSED", "OK", "SUCCESS", "COMPLIANT"].includes(up))
         return "PASS";
       if (
@@ -1292,16 +1138,11 @@ export default function TaskDetail({ id: propId, onClose }) {
         ].includes(up)
       )
         return "NEEDS FOLLOW-UP";
-
-      // if backend uses "pass"/"fail" lowercased
       if (up === "PASS") return "PASS";
       if (up === "FAIL") return "FAIL";
-
-      // last resort: return the raw string (but at least not crash)
       return raw;
     };
 
-    // ✅ This is the field you told me matters
     const overallResultRaw =
       s?.overallResult ??
       s?.overall?.overallResult ??
@@ -1311,11 +1152,8 @@ export default function TaskDetail({ id: propId, onClose }) {
       s?.results?.overallResult ??
       "";
 
-    // IMPORTANT: do NOT default to PASS if missing.
-    // If it's missing, show "—" so you don't lie to users.
     const outcome = normalizeOverallResult(overallResultRaw) || "—";
 
-    // FORM TITLE
     const formTitle =
       s?.form?.title ||
       s?.formTitle ||
@@ -1323,37 +1161,27 @@ export default function TaskDetail({ id: propId, onClose }) {
       s?.templateName ||
       "Form";
 
-    // coords (robust: supports GeoJSON coordinates + multiple nests)
     const pickLatLng = (obj) => {
       if (!obj) return { lat: null, lng: null };
-
-      // Common: GeoJSON Point { type:"Point", coordinates:[lng,lat] }
       const coords = obj?.coordinates || obj?.coord || obj?.coords || null;
-
       if (Array.isArray(coords) && coords.length >= 2) {
         const lng = coords[0];
         const lat = coords[1];
         return { lat, lng };
       }
-
-      // Common: { lat, lng } or { latitude, longitude }
       const lat = obj?.lat ?? obj?.latitude ?? obj?.y ?? null;
       const lng = obj?.lng ?? obj?.lon ?? obj?.longitude ?? obj?.x ?? null;
-
       return { lat, lng };
     };
 
-    // Try multiple likely sources, first hit wins
-    let lat = null;
-    let lng = null;
+    let latV = null;
+    let lngV = null;
 
-    // 1) direct fields
-    if (lat == null && lng == null) {
-      lat = s?.lat ?? s?.latitude ?? null;
-      lng = s?.lng ?? s?.lon ?? s?.longitude ?? null;
+    if (latV == null && lngV == null) {
+      latV = s?.lat ?? s?.latitude ?? null;
+      lngV = s?.lng ?? s?.lon ?? s?.longitude ?? null;
     }
 
-    // 2) location / gps / geo / coords / meta nests
     const candidates = [
       s?.location,
       s?.gps,
@@ -1366,25 +1194,75 @@ export default function TaskDetail({ id: propId, onClose }) {
       s?.where,
     ];
 
-    if (lat == null || lng == null) {
+    if (latV == null || lngV == null) {
       for (const c of candidates) {
         const got = pickLatLng(c);
         if (got.lat != null && got.lng != null) {
-          lat = got.lat;
-          lng = got.lng;
+          latV = got.lat;
+          lngV = got.lng;
           break;
         }
       }
     }
 
-    // Normalize to numbers if possible (but keep original if not)
-    const latNum = Number(lat);
-    const lngNum = Number(lng);
-    lat = Number.isFinite(latNum) ? latNum : lat;
-    lng = Number.isFinite(lngNum) ? lngNum : lng;
+    const latNum = Number(latV);
+    const lngNum = Number(lngV);
+    latV = Number.isFinite(latNum) ? latNum : latV;
+    lngV = Number.isFinite(lngNum) ? lngNum : lngV;
 
-    return { submitted, inspector, managerNote, outcome, formTitle, lat, lng };
+    return {
+      submitted,
+      inspector,
+      managerNote,
+      outcome,
+      formTitle,
+      lat: latV,
+      lng: lngV,
+    };
   }
+
+  /* ---------- forms & submissions ---------- */
+  async function loadForms() {
+    try {
+      const params = { limit: 200, taskId: id };
+      if (projectId) params.projectId = projectId;
+      const { data } = await api.get("/inspections/forms", { params });
+      setForms(Array.isArray(data) ? data : []);
+      setFormsErr("");
+    } catch (e) {
+      setForms([]);
+      setFormsErr(e?.response?.data?.error || "Failed to load forms");
+    }
+  }
+  async function loadSubs() {
+    try {
+      const params = { limit: 200, taskId: id };
+      if (projectId) params.projectId = projectId;
+
+      const { data } = await api.get("/inspections/submissions", { params });
+
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+          ? data.items
+          : Array.isArray(data?.rows)
+            ? data.rows
+            : Array.isArray(data?.data)
+              ? data.data
+              : [];
+
+      setSubs(list);
+      setSubsErr("");
+    } catch (e) {
+      setSubs([]);
+      setSubsErr(e?.response?.data?.error || "Failed to load submissions");
+    }
+  }
+  useEffect(() => {
+    loadForms();
+    loadSubs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, projectId]);
 
   /* ---------- geofence ops ---------- */
   const fallbackCircle =
@@ -1462,7 +1340,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       } catch (e) {
         const status = e?.response?.status;
         if (status && status !== 404) throw e;
-        // client-side normalize (fallback)
+
         const textOrZip = await file.arrayBuffer();
         const name = (file.name || "").toLowerCase();
         let rings = [];
@@ -1570,6 +1448,194 @@ export default function TaskDetail({ id: propId, onClose }) {
     setMapBump((b) => b + 1);
   }
 
+  /* ---------- Coverage overlay (EXTRA FENCES) ---------- */
+  function geojsonToExtraFences(geo) {
+    const out = [];
+
+    const pushLine = (coords, name) => {
+      if (!Array.isArray(coords) || coords.length < 2) return;
+      const line = coords
+        .map((p) =>
+          Array.isArray(p) ? [r6(Number(p[0])), r6(Number(p[1]))] : null,
+        )
+        .filter(Boolean)
+        .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
+      if (line.length >= 2)
+        out.push({ type: "line", line, label: name || "Coverage" });
+    };
+
+    const pushPoly = (coords, name) => {
+      if (!Array.isArray(coords) || !Array.isArray(coords[0])) return;
+      const outer = coords[0]
+        .map((p) =>
+          Array.isArray(p) ? [r6(Number(p[0])), r6(Number(p[1]))] : null,
+        )
+        .filter(Boolean)
+        .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
+      if (outer.length >= 3)
+        out.push({
+          type: "polygon",
+          polygon: closeRing(outer),
+          label: name || "Coverage area",
+        });
+    };
+
+    const pushPoint = (coords, name) => {
+      if (!Array.isArray(coords) || coords.length < 2) return;
+      const lng = Number(coords[0]);
+      const lat = Number(coords[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      out.push({
+        type: "point",
+        point: { lat: r6(lat), lng: r6(lng) },
+        label: name || "Point",
+      });
+    };
+
+    const handleGeom = (geom, name) => {
+      if (!geom || typeof geom !== "object") return;
+      const g = geom.type === "Feature" && geom.geometry ? geom.geometry : geom;
+
+      if (g?.type === "LineString") pushLine(g.coordinates, name);
+      else if (g?.type === "MultiLineString")
+        (g.coordinates || []).forEach((c, i) =>
+          pushLine(c, `${name || "Coverage"} ${i + 1}`),
+        );
+      else if (g?.type === "Polygon") pushPoly(g.coordinates, name);
+      else if (g?.type === "MultiPolygon")
+        (g.coordinates || []).forEach((c, i) =>
+          pushPoly(c, `${name || "Coverage area"} ${i + 1}`),
+        );
+      else if (g?.type === "Point") pushPoint(g.coordinates, name);
+      else if (g?.type === "MultiPoint")
+        (g.coordinates || []).forEach((c, i) =>
+          pushPoint(c, `${name || "Point"} ${i + 1}`),
+        );
+    };
+
+    if (geo?.type === "FeatureCollection") {
+      (geo.features || []).forEach((f, idx) => {
+        const nm =
+          f?.properties?.title ||
+          f?.properties?.name ||
+          f?.properties?.label ||
+          `Coverage ${idx + 1}`;
+        handleGeom(f, nm);
+      });
+    } else {
+      handleGeom(geo, geo?.properties?.name || "Coverage");
+    }
+
+    return out;
+  }
+
+  async function loadCoverageOverlays() {
+    setCoverageErr("");
+    try {
+      // 1) Try backend coverage endpoint
+      const { data } = await api.get(`/tasks/${id}/coverage`, {
+        params: { limit: 500, _ts: Date.now() },
+      });
+
+      const list = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.rows)
+          ? data.rows
+          : Array.isArray(data)
+            ? data
+            : [];
+
+      // Filter by global date range if present
+      const filtered = list.filter((c) => {
+        const when = c?.date || c?.createdAt || c?.at || null;
+        return !fltFrom && !fltTo ? true : inDateWindow(when);
+      });
+
+      let extras = [];
+      filtered.forEach((c, idx) => {
+        const name = c?.title || c?.filename || `Coverage ${idx + 1}`;
+        let geom =
+          c?.geometry ||
+          c?.geojson ||
+          c?.geoJSON ||
+          (c?.feature && c.feature.geometry) ||
+          null;
+
+        if (!geom) return;
+
+        // Ensure a "FeatureCollection-like" shape for converter if needed
+        if (geom?.type === "Feature" || geom?.type === "FeatureCollection") {
+          const converted = geojsonToExtraFences(geom);
+          converted.forEach((x) => (x.label = x.label || name));
+          extras = extras.concat(converted);
+        } else {
+          const fakeFeature = {
+            type: "Feature",
+            properties: { name },
+            geometry: geom,
+          };
+          extras = extras.concat(geojsonToExtraFences(fakeFeature));
+        }
+      });
+
+      // 2) Fall back to logs with lat/lng if no geometry
+      if (!extras.length) {
+        const logsWithCoords = (task?.actualDurationLog || []).filter((e) => {
+          const ok =
+            Number.isFinite(Number(e.lat)) && Number.isFinite(Number(e.lng));
+          if (!ok) return false;
+          return !fltFrom && !fltTo ? true : inDateWindow(e.at);
+        });
+
+        if (logsWithCoords.length) {
+          const sorted = logsWithCoords
+            .slice()
+            .sort((a, b) => +new Date(a.at || 0) - +new Date(b.at || 0));
+
+          // points
+          sorted.forEach((e, i) => {
+            extras.push({
+              type: "point",
+              point: { lat: r6(Number(e.lat)), lng: r6(Number(e.lng)) },
+              label: `${e.action || "log"} #${i + 1}`,
+            });
+          });
+
+          // track line
+          if (sorted.length > 1) {
+            const line = sorted.map((e) => [
+              r6(Number(e.lng)),
+              r6(Number(e.lat)),
+            ]);
+            extras.push({
+              type: "line",
+              line,
+              label: `${task?.title || id} track`,
+            });
+          }
+        }
+      }
+
+      setCoverageOverlays(extras);
+    } catch (e) {
+      setCoverageOverlays([]);
+      setCoverageErr(
+        e?.response?.data?.error || e?.message || "Failed to load coverage",
+      );
+    }
+  }
+
+  // load coverage whenever: task loaded OR date filter changes OR toggle on
+  useEffect(() => {
+    if (!task) return;
+    if (!showCoverageOverlay) {
+      setCoverageOverlays([]);
+      return;
+    }
+    loadCoverageOverlays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?._id, showCoverageOverlay, fltFrom, fltTo]);
+
   /* ---------- actions/logs ---------- */
   async function doAction(action) {
     setErr("");
@@ -1577,7 +1643,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     try {
       const body = { action };
 
-      // Always *attempt* to capture location if available
       const coords = await new Promise((resolve) => {
         if (!navigator.geolocation) return resolve(null);
         navigator.geolocation.getCurrentPosition(
@@ -1600,12 +1665,10 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  // Add / Edit Log submit (productivity or photo)
   async function submitLog() {
     setLogErr("");
     try {
       if (logType === "attachment") {
-        // PHOTO
         if (!editingLogId) {
           if (!logFile) throw new Error("Choose a photo to upload.");
 
@@ -1613,14 +1676,12 @@ export default function TaskDetail({ id: propId, onClose }) {
           fd.append("file", logFile);
           if (logNote) fd.append("note", logNote);
 
-          // If you want milestone info to travel with the photo, send it too
           if (logMilestoneId) {
             fd.append("milestoneId", logMilestoneId);
             fd.append("milestone", logMilestoneId);
             fd.append("milestone_id", logMilestoneId);
           }
 
-          // Always try capture lat/lng when taking a photo
           if (navigator.geolocation) {
             const coords = await new Promise((resolve) => {
               navigator.geolocation.getCurrentPosition(
@@ -1642,10 +1703,7 @@ export default function TaskDetail({ id: propId, onClose }) {
           await api.post(`/tasks/${id}/attachments`, fd, {
             headers: { "Content-Type": "multipart/form-data" },
           });
-
-          // Rely on the backend to create the "photo" log entry for this attachment.
         } else {
-          // Editing an existing photo log: still patch the log metadata (time, note, milestone)
           await api.patch(`/tasks/${id}/logs/${editingLogId}`, {
             at: fromLocalDateTimeInput(logAt),
             action: "photo",
@@ -1660,7 +1718,6 @@ export default function TaskDetail({ id: propId, onClose }) {
           });
         }
       } else {
-        // PRODUCTIVITY
         const payload = {
           action: logAction,
           at: fromLocalDateTimeInput(logAt),
@@ -1674,7 +1731,6 @@ export default function TaskDetail({ id: propId, onClose }) {
             : { milestoneId: null, milestone: null, milestone_id: null }),
         };
 
-        // Always *attempt* location capture if available (for any action)
         if (navigator.geolocation) {
           const coords = await new Promise((resolve) => {
             navigator.geolocation.getCurrentPosition(
@@ -1706,6 +1762,10 @@ export default function TaskDetail({ id: propId, onClose }) {
       setLogNote("");
       setLogMilestoneId("");
       await loadTask();
+
+      // refresh coverage overlay too (because logs may have new points)
+      if (showCoverageOverlay) loadCoverageOverlays();
+
       setInfo("Log saved.");
       setTimeout(() => setInfo(""), 1000);
     } catch (e) {
@@ -1782,8 +1842,7 @@ export default function TaskDetail({ id: propId, onClose }) {
       document
         .querySelectorAll('link[rel="stylesheet"], style')
         .forEach((el) => {
-          const clone = el.cloneNode(true);
-          head.appendChild(clone);
+          head.appendChild(el.cloneNode(true));
         });
 
       const style = doc.createElement("style");
@@ -1823,53 +1882,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     }
   }
 
-  /* ---------- date filter helpers ---------- */
-  const submissionWhenIso = (s) =>
-    s?.submittedAt ||
-    s?.createdAt ||
-    s?.completedAt ||
-    s?.finishedAt ||
-    s?.updatedAt ||
-    null;
-
-  // accepts ISO string OR Date
-  const inDateWindow = (d) => {
-    if (!fltFrom && !fltTo) return true;
-
-    const dt =
-      d instanceof Date
-        ? d
-        : typeof d === "string" || typeof d === "number"
-          ? new Date(d)
-          : null;
-
-    if (!dt || isNaN(+dt)) return false;
-
-    const fromOk = !fltFrom || dt >= new Date(`${fltFrom}T00:00:00`);
-    const toOk = !fltTo || dt <= new Date(`${fltTo}T23:59:59.999`);
-    return fromOk && toOk;
-  };
-  // INSPECTIONS: separate date filter (date-only compare to avoid timezone weirdness)
-  const isoToLocalDateOnly = (iso) => {
-    if (!iso) return "";
-    const dt = new Date(iso);
-    if (isNaN(+dt)) return "";
-    return toLocalDateOnly(dt); // uses your helper (timezone-adjusted)
-  };
-
-  const inInspectionWindow = (s) => {
-    // if no inspection filter, show all
-    if (!inspFrom && !inspTo) return true;
-
-    const whenIso = submissionWhenIso(s);
-    const day = isoToLocalDateOnly(whenIso); // "YYYY-MM-DD"
-    if (!day) return false;
-
-    if (inspFrom && day < inspFrom) return false;
-    if (inspTo && day > inspTo) return false;
-    return true;
-  };
-
   // Map milestoneId => title for quick lookup
   const msTitleById = useMemo(() => {
     const m = new Map();
@@ -1878,45 +1890,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     );
     return m;
   }, [milestones]);
-
-    // ---------- unified activity list (task logs + mobile events + coverage) ----------
-  function normalizeTaskLogRow(e) {
-                        const rowId = String(e._id || "");
-                    const by = e.by || "—";
-
-    const milestoneId =
-      e?.milestoneId || e?.milestone || (e?.meta && e.meta.milestoneId) || "";
-
-    return {
-      _id: rowId || `tasklog:${Math.random().toString(16).slice(2)}`,
-      source: "task",
-      at: e?.at || null,
-      action: e?.action || "",
-      note: e?.note || "",
-      milestoneId,
-      lat: e?.lat ?? null,
-      lng: e?.lng ?? null,
-      by,
-      _raw: e,
-    };
-  }
-
-  const activityRows = useMemo(() => {
-    const taskRows = (task?.actualDurationLog || []).map(normalizeTaskLogRow);
-
-    // de-dup by _id (best-effort)
-    const seen = new Set();
-    const all = [...taskRows, ...(eventActivities || []), ...(coverageItems || [])]
-      .filter((r) => r && r._id)
-      .filter((r) => {
-        if (seen.has(r._id)) return false;
-        seen.add(r._id);
-        return true;
-      })
-      .filter((r) => (!fltFrom && !fltTo ? true : inDateWindow(r.at)));
-
-    return all;
-  }, [task, eventActivities, coverageItems, fltFrom, fltTo]);
 
   if (!task) return <div className="p-4">{err ? err : "Loading…"}</div>;
 
@@ -1997,7 +1970,7 @@ export default function TaskDetail({ id: propId, onClose }) {
 
       {/* Top row: Overview (left) | Manager (right) */}
       <div className="grid gap-4 lg:grid-cols-2 mt-3">
-        {/* Overview (inline edits) */}
+        {/* Overview */}
         <div className="border rounded-2xl p-4 space-y-3 bg-white">
           <div className="font-semibold">Details</div>
 
@@ -2103,13 +2076,10 @@ export default function TaskDetail({ id: propId, onClose }) {
                 onChange={(e) => {
                   const gid = e.target.value || "";
                   setGroupId(gid);
-
-                  // Backend definitely understands groupId (legacy) and assignedGroupIds (new visibility)
                   const patch = {
                     groupId: gid ? gid : null,
                     assignedGroupIds: gid ? [gid] : [],
                   };
-
                   optimisticSave(patch, () =>
                     setTask((t) => ({
                       ...(t || {}),
@@ -2155,7 +2125,6 @@ export default function TaskDetail({ id: propId, onClose }) {
 
                   if (String(v) === String(currentId)) return;
 
-                  // Backend PUT/PATCH updates assignedTo (legacy) + will also sync assignedUserIds via sanitizer
                   const patch = {
                     assignee: v ? v : null,
                     assigneeId: v ? v : null,
@@ -2240,7 +2209,7 @@ export default function TaskDetail({ id: propId, onClose }) {
           </div>
         </div>
 
-        {/* Manager (status selector + notes area) */}
+        {/* Manager */}
         <div className="space-y-4">
           <div className="border rounded-2xl p-4 bg-white">
             <div className="font-semibold mb-2">Task Manager</div>
@@ -2349,6 +2318,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             />
             Show task pin
           </label>
+
           <label className="inline-flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -2357,10 +2327,26 @@ export default function TaskDetail({ id: propId, onClose }) {
             />
             Show task geofence
           </label>
+
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={showCoverageOverlay}
+              onChange={(e) => setShowCoverageOverlay(e.target.checked)}
+            />
+            Show coverage overlay
+          </label>
+
           <div className="ml-auto text-xs text-gray-500">
             Legend shows automatically when features are present.
           </div>
         </div>
+
+        {coverageErr && (
+          <div className="mt-2 text-xs text-amber-700">
+            Coverage overlay: {coverageErr}
+          </div>
+        )}
 
         {/* Map */}
         <div className="mt-3">
@@ -2372,10 +2358,11 @@ export default function TaskDetail({ id: propId, onClose }) {
             showTaskCoverage={true}
             height={360}
             className="relative rounded z-0"
-            reloadKey={`${mapBump}:${gfCount}:${lat}:${lng}:${radius}:${showPin}:${showTaskGeofence}`}
+            reloadKey={`${mapBump}:${gfCount}:${lat}:${lng}:${radius}:${showPin}:${showTaskGeofence}:${showCoverageOverlay}:${coverageOverlays.length}`}
             fallbackCircle={fallbackCircle}
             taskCircle={taskCircle}
-            extraFences={[]}
+            // ✅ Coverage overlays are passed as extraFences so they NEVER replace fences
+            extraFences={showCoverageOverlay ? coverageOverlays : []}
             allowPicking={true}
             legend={true}
             onPickLocation={({ lat: L, lng: G }) => {
@@ -2397,7 +2384,6 @@ export default function TaskDetail({ id: propId, onClose }) {
 
         {/* controls */}
         <form onSubmit={saveGeofence} className="mt-3 space-y-3">
-          {/* coords row */}
           <div className="flex flex-wrap gap-3 items-end">
             <label className="text-sm">
               Lat
@@ -2459,7 +2445,6 @@ export default function TaskDetail({ id: propId, onClose }) {
             </button>
           </div>
 
-          {/* upload/clear row */}
           <div className="flex flex-wrap items-end gap-3">
             <label className="text-sm" style={{ minWidth: 260 }}>
               GeoJSON/KML/KMZ
@@ -2549,7 +2534,6 @@ export default function TaskDetail({ id: propId, onClose }) {
             </div>
           </div>
 
-          {/* enforcement toggles */}
           <div className="flex flex-wrap items-center gap-4">
             <label className="text-sm inline-flex items-center gap-2">
               <input
@@ -3139,7 +3123,7 @@ export default function TaskDetail({ id: propId, onClose }) {
               <button
                 className="px-3 py-2 border rounded"
                 onClick={async () => {
-                    const rows = activityRows;
+                  const rows = (task.actualDurationLog || []).filter((e) =>
                     !fltFrom && !fltTo ? true : inDateWindow(e.at),
                   );
                   if (!rows.length) {
@@ -3163,9 +3147,16 @@ export default function TaskDetail({ id: propId, onClose }) {
                       const safe = (s) =>
                         `"${String(s ?? "").replace(/"/g, '""')}"`;
 
-                                            const by = e.by || "";
+                      const by =
+                        e.userId && (e.userId.name || e.userId.email)
+                          ? e.userId.name || e.userId.email
+                          : e.actorName || e.actorEmail || e.actorSub || "";
 
-                                          const rowMilestoneId = e.milestoneId || "";
+                      const rowMilestoneId =
+                        e.milestoneId ||
+                        e.milestone ||
+                        (e.meta && e.meta.milestoneId) ||
+                        "";
                       const milestoneName = rowMilestoneId
                         ? msTitleById.get(String(rowMilestoneId)) ||
                           String(rowMilestoneId)
@@ -3207,117 +3198,6 @@ export default function TaskDetail({ id: propId, onClose }) {
                 }}
               >
                 Export Activity CSV
-              </button>
-
-                            <button
-                className="px-3 py-2 border rounded"
-                onClick={async () => {
-                  try {
-                    // Ensure freshest coverage list for geometry export
-                    await loadCoverageItems();
-
-                    // 1) Point placemarks for any activity row that has lat/lng
-                    const points = activityRows.filter((r) => {
-                      const has =
-                        Number.isFinite(Number(r.lat)) &&
-                        Number.isFinite(Number(r.lng));
-                      return has;
-                    });
-
-                    // 2) Coverage geometry placemarks (LineString/Polygon)
-                    const coveragePlacemarks = (coverageItems || [])
-                      .map((c, i) => {
-                        let geom = c.geometry;
-                        if (!geom) return "";
-
-                        if (geom.type === "Feature" && geom.geometry) geom = geom.geometry;
-
-                        const name = c.note || `Coverage ${i + 1}`;
-
-                        if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
-                          const coords = geom.coordinates
-                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
-                            .join(" ");
-                          return `
-<Placemark>
-  <name>${escapeXml(name)}</name>
-  <LineString><coordinates>${coords}</coordinates></LineString>
-</Placemark>`;
-                        }
-
-                        if (
-                          geom.type === "Polygon" &&
-                          Array.isArray(geom.coordinates) &&
-                          geom.coordinates[0]
-                        ) {
-                          const outer = geom.coordinates[0];
-                          const coords = outer
-                            .map(([lng, lat]) => `${r6(lng)},${r6(lat)},0`)
-                            .join(" ");
-                          return `
-<Placemark>
-  <name>${escapeXml(name)}</name>
-  <Polygon>
-    <outerBoundaryIs>
-      <LinearRing><coordinates>${coords}</coordinates></LinearRing>
-    </outerBoundaryIs>
-  </Polygon>
-</Placemark>`;
-                        }
-
-                        return "";
-                      })
-                      .join("");
-
-                    const pointPlacemarks = points
-                      .map((r, idx) => {
-                        const when = r.at ? new Date(r.at).toLocaleString() : "—";
-                        const msName = r.milestoneId
-                          ? msTitleById.get(String(r.milestoneId)) || String(r.milestoneId)
-                          : "";
-
-                        const desc = [
-                          `When: ${when}`,
-                          `Action: ${r.action || "—"}`,
-                          msName ? `Milestone: ${msName}` : null,
-                          r.by ? `By: ${r.by}` : null,
-                          r.note ? `Note: ${r.note}` : null,
-                        ]
-                          .filter(Boolean)
-                          .join("\n");
-
-                        return `
-<Placemark>
-  <name>${escapeXml(`${r.action || "activity"} #${idx + 1}`)}</name>
-  <description>${escapeXml(desc)}</description>
-  <Point><coordinates>${r6(Number(r.lng))},${r6(Number(r.lat))},0</coordinates></Point>
-</Placemark>`;
-                      })
-                      .join("");
-
-                    const placemarks = `${pointPlacemarks}${coveragePlacemarks}`.trim();
-
-                    if (!placemarks) {
-                      setErr("No activities with coordinates and no coverage geometry to export.");
-                      return;
-                    }
-
-                    const title = `activities_${(task?.title || id).replace(/[^\w\-]+/g, "_")}`;
-
-                    const kml = `<?xml version="1.0" encoding="UTF-8"?>
-<kml xmlns="http://www.opengis.net/kml/2.2">
-<Document><name>${escapeXml(title)}</name>${placemarks}</Document>
-</kml>`;
-
-                    await downloadKMZ(`${title}.kmz`, kml);
-                    setInfo("Exported Activities KMZ.");
-                    setTimeout(() => setInfo(""), 1000);
-                  } catch (e) {
-                    setErr(e?.response?.data?.error || String(e));
-                  }
-                }}
-              >
-                Export Activities KMZ
               </button>
 
               <button
@@ -3427,7 +3307,11 @@ export default function TaskDetail({ id: propId, onClose }) {
                           ? new Date(e.at).toLocaleString()
                           : "—";
 
-                                              const rowMilestoneId = e.milestoneId || "";
+                        const rowMilestoneId =
+                          e.milestoneId ||
+                          e.milestone ||
+                          (e.meta && e.meta.milestoneId) ||
+                          "";
                         const milestoneName = rowMilestoneId
                           ? msTitleById.get(String(rowMilestoneId)) ||
                             String(rowMilestoneId)
@@ -3509,8 +3393,8 @@ export default function TaskDetail({ id: propId, onClose }) {
               </tr>
             </thead>
             <tbody>
-               {activityRows.length ? (
-                activityRows
+              {(task.actualDurationLog || []).length ? (
+                (task.actualDurationLog || [])
                   .filter((e) =>
                     !fltFrom && !fltTo ? true : inDateWindow(e.at),
                   )
@@ -3596,7 +3480,7 @@ export default function TaskDetail({ id: propId, onClose }) {
                           <div className="flex items-center gap-3">
                             {thumb}
                             <div className="whitespace-pre-wrap">
-                                                            {e.note || (e.action === "coverage" ? "Coverage captured" : "—")}
+                              {e.note || "—"}
                             </div>
                           </div>
                         </td>
