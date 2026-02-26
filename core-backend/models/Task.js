@@ -27,9 +27,19 @@ const DurationLogSchema = new Schema(
   {
     action: {
       type: String,
-      enum: ["start", "pause", "resume", "complete", "photo", "fence"],
+      // ✅ FIX 1: allow note-only activity entries to be persisted + rendered in the UI
+      // (mobile.js currently pushes action: "note" when there are no uploaded files)
+      enum: ["start", "pause", "resume", "complete", "photo", "fence", "note"],
       required: true,
+      // ✅ defensive: if any older clients omit action, don’t reject the log entry
+      default: "note",
+      set(v) {
+        return String(v || "note")
+          .trim()
+          .toLowerCase();
+      },
     },
+
     at: { type: Date, default: Date.now },
 
     userId: { type: Schema.Types.ObjectId, ref: "User" },
@@ -150,39 +160,31 @@ const TaskSchema = new Schema(
     groupId: { type: Schema.Types.ObjectId, ref: "Group", index: true },
 
     /* ===================== Planning / "Analogue" Fields (NEW) ===================== */
-
-    // Optional "lane"/workstream concept (like left-hand responsibility rows in their sheet)
     workstreamId: {
       type: Schema.Types.ObjectId,
       ref: "Workstream",
       index: true,
       default: null,
     },
-    workstreamName: { type: String, default: "" }, // fallback if you don't create a Workstream model yet
+    workstreamName: { type: String, default: "" },
 
-    // Ordering for Gantt display and "analogue" sequencing
-    rowOrder: { type: Number, default: 0, index: true }, // global within project
-    laneOrder: { type: Number, default: 0, index: true }, // within workstream
-    wbs: { type: String, default: "" }, // e.g. "2.1.3" if they plan like that
-    phase: { type: String, default: "" }, // optional (e.g. "Concept", "Design", "Build")
-    discipline: { type: String, default: "" }, // optional (e.g. "Civil", "Ecology")
+    rowOrder: { type: Number, default: 0, index: true },
+    laneOrder: { type: Number, default: 0, index: true },
+    wbs: { type: String, default: "" },
+    phase: { type: String, default: "" },
+    discipline: { type: String, default: "" },
 
-    // Planning dates (keep separate so later you can show planned vs actual)
     plannedStartAt: { type: Date, index: true },
     plannedEndAt: { type: Date, index: true },
 
-    // Actual dates (optional; can be set by mobile workflow later)
     actualStartAt: { type: Date, index: true },
     actualEndAt: { type: Date, index: true },
 
-    // Optional quick flag: created from plan vs ad-hoc task
     createdFromPlan: { type: Boolean, default: false, index: true },
 
     /* ===================== Assignment ===================== */
-
     assignedTo: [{ type: Schema.Types.ObjectId, ref: "User", index: true }],
 
-    // Singular mirror for UI
     assignee: {
       type: Schema.Types.ObjectId,
       ref: "User",
@@ -191,8 +193,6 @@ const TaskSchema = new Schema(
     },
 
     /* ===================== Timeline (existing fields kept) ===================== */
-
-    // Legacy timeline dates (kept for compatibility)
     startDate: { type: Date, index: true },
     dueDate: { type: Date, index: true },
     dueAt: { type: Date, index: true },
@@ -214,11 +214,8 @@ const TaskSchema = new Schema(
 
     tags: [{ type: String, index: true }],
 
-    // Existing dependency list (kept)
     dependentTaskIds: [{ type: Schema.Types.ObjectId, ref: "Task" }],
 
-    // NEW: dependency-ready structure (optional; doesn’t break anything)
-    // lets you depend on tasks OR deliverables later without schema hacks
     dependsOn: [
       {
         kind: {
@@ -227,11 +224,10 @@ const TaskSchema = new Schema(
           default: "task",
         },
         id: { type: Schema.Types.ObjectId },
-        type: { type: String, enum: ["FS", "SS", "FF", "SF"], default: "FS" }, // finish-start default
+        type: { type: String, enum: ["FS", "SS", "FF", "SF"], default: "FS" },
       },
     ],
 
-    // Enforcement flags
     enforceQRScan: { type: Boolean, default: false },
     enforceLocationCheck: { type: Boolean, default: false },
 
@@ -249,10 +245,9 @@ const TaskSchema = new Schema(
 
     triggerOnEnterFence: { type: Boolean, default: false },
 
-    estimatedDuration: { type: Number }, // minutes
-    actualDurationLog: [DurationLogSchema], // sequence
+    estimatedDuration: { type: Number },
+    actualDurationLog: [DurationLogSchema],
 
-    // Legacy embedded milestones (you can keep using this OR migrate fully to TaskMilestone docs)
     milestones: { type: [MilestoneSchema], default: [] },
 
     attachments: [AttachmentSchema],
@@ -279,7 +274,6 @@ const TaskSchema = new Schema(
       { type: Schema.Types.ObjectId, ref: "Group", index: true },
     ],
 
-    // Soft delete
     isDeleted: { type: Boolean, default: false, index: true },
   },
   {
@@ -289,15 +283,12 @@ const TaskSchema = new Schema(
       transform(_doc, ret) {
         ret.id = String(ret._id);
 
-        // Ensure old clients always see these mirrors:
         if (!ret.dueAt && ret.dueDate) ret.dueAt = ret.dueDate;
 
-        // Planning mirrors (for frontends that only know startDate/dueAt)
         if (!ret.startDate && ret.plannedStartAt)
           ret.startDate = ret.plannedStartAt;
         if (!ret.dueAt && ret.plannedEndAt) ret.dueAt = ret.plannedEndAt;
 
-        // Mirror assignee from assignedTo[0] if needed
         if (
           !ret.assignee &&
           Array.isArray(ret.assignedTo) &&
@@ -316,7 +307,6 @@ const TaskSchema = new Schema(
 
 /* ---------------------- Virtuals & Validators ---------------------- */
 
-// Friendly alias for start date (lets old clients use startAt)
 TaskSchema.virtual("startAt")
   .get(function () {
     return this.startDate;
@@ -325,7 +315,6 @@ TaskSchema.virtual("startAt")
     this.startDate = v;
   });
 
-// Friendly aliases for planning fields (defensive)
 TaskSchema.virtual("planStartAt")
   .get(function () {
     return this.plannedStartAt;
@@ -342,12 +331,6 @@ TaskSchema.virtual("planEndAt")
     this.plannedEndAt = v;
   });
 
-/**
- * Normalize tags & keep mirrors in sync before validation.
- * Key rule:
- * - plannedStartAt/plannedEndAt mirror into startDate/dueAt (so existing UI works)
- * - startDate/dueAt mirror back into planned fields (so older writes still populate planning)
- */
 TaskSchema.pre("validate", function normalize(next) {
   if (typeof this.title === "string") this.title = this.title.trim();
   if (typeof this.description === "string")
@@ -366,7 +349,6 @@ TaskSchema.pre("validate", function normalize(next) {
     this.tags = dedup;
   }
 
-  // Keep assignee <-> assignedTo[0] mirrored
   if (this.assignee && (!this.assignedTo || !this.assignedTo.length)) {
     this.assignedTo = [this.assignee];
   } else if (
@@ -384,14 +366,12 @@ TaskSchema.pre("validate", function normalize(next) {
     if (String(this.assignedTo[0]) !== a) this.assignedTo[0] = this.assignee;
   }
 
-  // Keep dueAt <-> dueDate mirrored (prefer dueAt)
   if (this.dueAt && !this.dueDate) this.dueDate = this.dueAt;
   if (!this.dueAt && this.dueDate) this.dueAt = this.dueDate;
   if (this.dueAt && this.dueDate && +this.dueAt !== +this.dueDate) {
     this.dueDate = this.dueAt;
   }
 
-  // Planning mirrors: plannedStartAt/plannedEndAt <-> startDate/dueAt
   const pS = pickDate(this.plannedStartAt);
   const pE = pickDate(this.plannedEndAt);
   const sD = pickDate(this.startDate);
@@ -403,12 +383,10 @@ TaskSchema.pre("validate", function normalize(next) {
   if (!pS && sD) this.plannedStartAt = sD;
   if (!pE && dA) this.plannedEndAt = dA;
 
-  // Ensure plannedEndAt always exists if dueAt exists (helps Gantt spans)
   if (!this.plannedEndAt && this.dueAt) this.plannedEndAt = this.dueAt;
   if (!this.plannedStartAt && this.startDate)
     this.plannedStartAt = this.startDate;
 
-  // If planned dates exist and legacy differs, trust planning (so Gantt wins)
   if (
     this.plannedStartAt &&
     this.startDate &&
@@ -424,7 +402,6 @@ TaskSchema.pre("validate", function normalize(next) {
   next();
 });
 
-// Guard: startDate must not be after dueAt (if both provided)
 TaskSchema.path("startDate").validate(function (value) {
   if (!value) return true;
   const due = this.dueAt || this.dueDate;
@@ -432,7 +409,6 @@ TaskSchema.path("startDate").validate(function (value) {
   return true;
 }, "startDate cannot be after due date");
 
-// Guard: plannedStartAt must not be after plannedEndAt (if both provided)
 TaskSchema.path("plannedStartAt").validate(function (value) {
   if (!value) return true;
   if (!this.plannedEndAt) return true;
