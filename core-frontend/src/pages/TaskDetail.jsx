@@ -1722,240 +1722,6 @@ export default function TaskDetail({ id: propId, onClose }) {
     return m;
   }, [milestones]);
 
-  // ============================
-  // Activity normalizer (includes offlineEvents)
-  // ============================
-  function pickLatLng(obj) {
-    if (!obj) return { lat: null, lng: null };
-
-    // GeoJSON style [lng, lat]
-    if (Array.isArray(obj.coordinates) && obj.coordinates.length >= 2) {
-      const lng = Number(obj.coordinates[0]);
-      const lat = Number(obj.coordinates[1]);
-      return {
-        lat: Number.isFinite(lat) ? lat : null,
-        lng: Number.isFinite(lng) ? lng : null,
-      };
-    }
-
-    const lat = obj.lat ?? obj.latitude ?? obj.y ?? null;
-    const lng = obj.lng ?? obj.lon ?? obj.longitude ?? obj.x ?? null;
-
-    const latN = Number(lat);
-    const lngN = Number(lng);
-
-    return {
-      lat: Number.isFinite(latN) ? latN : null,
-      lng: Number.isFinite(lngN) ? lngN : null,
-    };
-  }
-
-  function normalizeActivityRow(e, idx, source = "log") {
-    if (!e || typeof e !== "object") return null;
-
-    // offlineEvents commonly store the actual activity inside payload
-    const p = e.payload && typeof e.payload === "object" ? e.payload : null;
-
-    // time (prefer capturedAt, then createdAt, then top-level timestamps)
-    const atRaw =
-      p?.capturedAt ||
-      p?.createdAt ||
-      p?.updatedAt ||
-      e.at ||
-      e.when ||
-      e.timestamp ||
-      e.time ||
-      e.occurredAt ||
-      e.createdAt ||
-      e.loggedAt ||
-      e.date ||
-      null;
-
-    const atIso = atRaw ? new Date(atRaw).toISOString() : null;
-
-    // action/type
-    const action =
-      p?.action ||
-      p?.type ||
-      p?.event ||
-      e.action ||
-      e.type ||
-      e.event ||
-      e.kind ||
-      // your offline shape
-      (e.eventType === "activity-log"
-        ? p?.photoUri
-          ? "photo"
-          : "note"
-        : "") ||
-      (p?.photoUri ? "photo" : "note");
-
-    // note/message
-    const note =
-      p?.note ||
-      p?.message ||
-      p?.text ||
-      p?.caption ||
-      p?.description ||
-      e.note ||
-      e.message ||
-      e.text ||
-      e.caption ||
-      e.description ||
-      "";
-
-    // milestone id variants
-    const milestoneId =
-      p?.milestone ||
-      p?.milestoneId ||
-      p?.milestone_id ||
-      e.milestoneId ||
-      e.milestone ||
-      e.milestone_id ||
-      (e.meta && (e.meta.milestoneId || e.meta.milestone)) ||
-      "";
-
-    // actor/by variants (offlineEvents: top userId is often an ObjectId, payload.userId may be auth uid)
-    const by =
-      (e.userId &&
-        typeof e.userId === "object" &&
-        (e.userId.name || e.userId.email)) ||
-      (e.userId && typeof e.userId !== "object" ? String(e.userId) : "") ||
-      p?.userName ||
-      p?.userEmail ||
-      p?.userId ||
-      (e.userId && typeof e.userId === "object"
-        ? String(e.userId._id || e.userId.id || "")
-        : "") ||
-      (e.userId && typeof e.userId !== "object" ? String(e.userId) : "") ||
-      e.actorName ||
-      e.actorEmail ||
-      e.actorSub ||
-      e.by ||
-      e.userName ||
-      "";
-
-    // coords variants (offlineEvents: payload.lat/lng)
-    let lat = null;
-    let lng = null;
-
-    // payload direct
-    {
-      const latN = Number(p?.lat ?? p?.latitude ?? null);
-      const lngN = Number(p?.lng ?? p?.lon ?? p?.longitude ?? null);
-      if (Number.isFinite(latN) && Number.isFinite(lngN)) {
-        lat = latN;
-        lng = lngN;
-      }
-    }
-
-    // top-level direct
-    if (lat == null || lng == null) {
-      const latN = Number(e.lat ?? e.latitude ?? null);
-      const lngN = Number(e.lng ?? e.lon ?? e.longitude ?? null);
-      if (Number.isFinite(latN) && Number.isFinite(lngN)) {
-        lat = latN;
-        lng = lngN;
-      }
-    }
-
-    // nested (payload/location/meta)
-    if (lat == null || lng == null) {
-      const nests = [
-        p?.location,
-        p?.coords,
-        p?.gps,
-        p?.geo,
-        p?.position,
-        p?.where,
-        e.location,
-        e.coords,
-        e.gps,
-        e.geo,
-        e.position,
-        e.where,
-        e.meta?.location,
-        e.meta?.coords,
-        e.meta?.gps,
-      ];
-      for (const n of nests) {
-        const got = pickLatLng(n);
-        if (got.lat != null && got.lng != null) {
-          lat = got.lat;
-          lng = got.lng;
-          break;
-        }
-      }
-    }
-
-    // id: offlineEvents uses _id, but that's NOT a /tasks/:id/logs/:logId
-    const id = String(e._id || e.id || "");
-
-    // stable key
-    const rowKey = id || `${source}:${idx}:${atIso || "no-time"}`;
-
-    // photo hint (offline payload.photoUri)
-    const isPhoto = !!(p?.photoUri || e.photoUri || e.photoUrl);
-
-    return {
-      _rowKey: rowKey,
-      _id: id || null,
-      _source: source,
-      at: atIso,
-      action: String(action || (isPhoto ? "photo" : "note")),
-      note: String(note || ""),
-      milestoneId: milestoneId ? String(milestoneId) : "",
-      by: String(by || ""),
-      lat,
-      lng,
-      raw: e,
-    };
-  }
-
-  function collectActivityRows(taskObj) {
-    if (!taskObj) return [];
-
-    const candidates = [
-      { key: "actualDurationLog", val: taskObj.actualDurationLog },
-      { key: "logs", val: taskObj.logs },
-      { key: "activityLog", val: taskObj.activityLog },
-      { key: "events", val: taskObj.events },
-
-      // ✅ common offline containers
-      { key: "offlineEvents", val: taskObj.offlineEvents },
-      { key: "offlineActivity", val: taskObj.offlineActivity },
-      { key: "pendingEvents", val: taskObj.pendingEvents },
-      { key: "queuedEvents", val: taskObj.queuedEvents },
-
-      // ✅ meta nests some backends use
-      { key: "meta.offlineEvents", val: taskObj.meta?.offlineEvents },
-      { key: "meta.pendingEvents", val: taskObj.meta?.pendingEvents },
-    ];
-
-    const out = [];
-    for (const c of candidates) {
-      if (!Array.isArray(c.val) || !c.val.length) continue;
-      c.val.forEach((e, idx) => {
-        const row = normalizeActivityRow(e, idx, c.key);
-        if (row) out.push(row);
-      });
-    }
-
-    // de-dupe by _id if present; else by _rowKey
-    const seen = new Set();
-    const uniq = [];
-    for (const r of out) {
-      const k = r._id ? `id:${r._id}` : `k:${r._rowKey}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      uniq.push(r);
-    }
-
-    return uniq;
-  }
-
-  const activityRows = useMemo(() => collectActivityRows(task), [task]);
-
   if (!task) return <div className="p-4">{err ? err : "Loading…"}</div>;
 
   const actualMins = task.actualDurationMinutes ?? 0;
@@ -2411,19 +2177,7 @@ export default function TaskDetail({ id: propId, onClose }) {
             reloadKey={`${mapBump}:${gfCount}:${lat}:${lng}:${radius}:${showPin}:${showTaskGeofence}`}
             fallbackCircle={fallbackCircle}
             taskCircle={taskCircle}
-            extraFences={(activityRows || [])
-              .filter(
-                (r) =>
-                  Number.isFinite(Number(r.lat)) &&
-                  Number.isFinite(Number(r.lng)),
-              )
-              .filter((r) => (!fltFrom && !fltTo ? true : inDateWindow(r.at)))
-              .map((r) => ({
-                type: "point",
-                point: { lat: Number(r.lat), lng: Number(r.lng) },
-                label: r.note || r.action || "Activity",
-                meta: { when: r.at, source: r._source },
-              }))}
+            extraFences={[]}
             allowPicking={true}
             legend={true}
             onPickLocation={({ lat: L, lng: G }) => {
@@ -3333,15 +3087,15 @@ export default function TaskDetail({ id: propId, onClose }) {
                     }
 
                     if (!placemarks.trim()) {
-                      const logsWithCoords = (activityRows || []).filter(
-                        (e) => {
-                          const hasCoords =
-                            Number.isFinite(Number(e.lat)) &&
-                            Number.isFinite(Number(e.lng));
-                          if (!hasCoords) return false;
-                          return !fltFrom && !fltTo ? true : inDateWindow(e.at);
-                        },
-                      );
+                      const logsWithCoords = (
+                        task.actualDurationLog || []
+                      ).filter((e) => {
+                        const hasCoords =
+                          Number.isFinite(Number(e.lat)) &&
+                          Number.isFinite(Number(e.lng));
+                        if (!hasCoords) return false;
+                        return !fltFrom && !fltTo ? true : inDateWindow(e.at);
+                      });
 
                       if (!logsWithCoords.length) {
                         setErr(
@@ -3446,10 +3200,10 @@ export default function TaskDetail({ id: propId, onClose }) {
               </tr>
             </thead>
             <tbody>
-              {(activityRows || []).length ? (
-                (activityRows || [])
-                  .filter((r) =>
-                    !fltFrom && !fltTo ? true : inDateWindow(r.at),
+              {(task.actualDurationLog || []).length ? (
+                (task.actualDurationLog || [])
+                  .filter((e) =>
+                    !fltFrom && !fltTo ? true : inDateWindow(e.at),
                   )
                   .slice()
                   .sort((a, b) => {
@@ -3458,11 +3212,12 @@ export default function TaskDetail({ id: propId, onClose }) {
                     return activitySort === "desc" ? db - da : da - db;
                   })
                   .map((e) => {
-                    const rowId = String(e._id || e._rowKey || "");
+                    const rowId = String(e._id || "");
+                    const by =
+                      e.userId && (e.userId.name || e.userId.email)
+                        ? e.userId.name || e.userId.email
+                        : e.actorName || e.actorEmail || e.actorSub || "—";
 
-                    const by = e.by || "—";
-
-                    // photo thumb only possible if it’s a backend-created photo log and attachments exist
                     let thumb = null;
                     if (
                       String(e.action) === "photo" &&
@@ -3510,23 +3265,22 @@ export default function TaskDetail({ id: propId, onClose }) {
                       }
                     }
 
-                    const rowMilestoneId = e.milestoneId || "";
+                    const rowMilestoneId =
+                      e.milestoneId ||
+                      e.milestone ||
+                      (e.meta && e.meta.milestoneId) ||
+                      "";
                     const milestoneName = rowMilestoneId
                       ? msTitleById.get(String(rowMilestoneId)) ||
                         String(rowMilestoneId)
                       : "—";
-
-                    const canEdit =
-                      !!e._id &&
-                      (e._source === "actualDurationLog" ||
-                        e._source === "logs");
 
                     return (
                       <tr key={rowId}>
                         <td className="border-t p-2">
                           {e.at ? new Date(e.at).toLocaleString() : "—"}
                         </td>
-                        <td className="border-t p-2">{e.action || "—"}</td>
+                        <td className="border-t p-2">{e.action}</td>
                         <td className="border-t p-2">{milestoneName}</td>
                         <td className="border-t p-2">{by}</td>
                         <td className="border-t p-2" style={{ maxWidth: 480 }}>
@@ -3539,10 +3293,8 @@ export default function TaskDetail({ id: propId, onClose }) {
                         </td>
                         <td className="border-t p-2 text-right whitespace-nowrap">
                           <button
-                            className="px-2 py-1 border rounded mr-2 disabled:opacity-50"
-                            disabled={!canEdit}
+                            className="px-2 py-1 border rounded mr-2"
                             onClick={() => {
-                              if (!canEdit) return;
                               setLogErr("");
                               setLogType(
                                 String(e.action) === "photo"
@@ -3564,23 +3316,21 @@ export default function TaskDetail({ id: propId, onClose }) {
                               setLogMilestoneId(
                                 rowMilestoneId ? String(rowMilestoneId) : "",
                               );
-                              setEditingLogId(String(e._id));
+                              setEditingLogId(rowId);
                               setLogOpen(true);
                             }}
                           >
                             Edit
                           </button>
                           <button
-                            className="px-2 py-1 border rounded disabled:opacity-50"
-                            disabled={!canEdit}
+                            className="px-2 py-1 border rounded"
                             onClick={() => {
-                              if (!canEdit) return;
                               if (!window.confirm("Delete this log entry?"))
                                 return;
                               (async () => {
                                 try {
                                   await api.delete(
-                                    `/tasks/${id}/logs/${String(e._id)}`,
+                                    `/tasks/${id}/logs/${rowId}`,
                                   );
                                   await loadTask();
                                 } catch (er) {
