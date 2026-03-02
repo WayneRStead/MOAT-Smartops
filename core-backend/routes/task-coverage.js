@@ -15,32 +15,69 @@ const router = express.Router();
 
 /* ------------------------ Common helpers ------------------------ */
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
-const OID = (v) => (isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined);
-const getRole = (req) => (req.user?.role || req.user?.claims?.role || "user");
-const isAdminRole = (role) => ["admin", "superadmin"].includes(String(role).toLowerCase());
+const OID = (v) =>
+  isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined;
+const getRole = (req) => req.user?.role || req.user?.claims?.role || "user";
+const isAdminRole = (role) =>
+  ["admin", "superadmin"].includes(String(role).toLowerCase());
 const isAdmin = (req) => isAdminRole(getRole(req));
 
 function hasPath(model, p) {
   return !!(model && model.schema && model.schema.path && model.schema.path(p));
 }
-const wantsObjectId = (model, p) => model?.schema?.path(p)?.instance === "ObjectId";
+const wantsObjectId = (model, p) =>
+  model?.schema?.path(p)?.instance === "ObjectId";
+const wantsString = (model, p) => model?.schema?.path(p)?.instance === "String";
+const wantsMixed = (model, p) => model?.schema?.path(p)?.instance === "Mixed";
 
-/** org scope consistent with /routes/tasks.js */
+/**
+ * ✅ Org scope that tolerates mixed storage (string OR ObjectId).
+ * - Prefers explicit ?orgId= (admin only), otherwise req.user.orgId
+ * - If model wants ObjectId -> match ObjectId
+ * - If model wants String -> match string
+ * - If model is Mixed -> match BOTH (ObjectId and string) so exports don’t miss rows
+ */
 function orgScope(model, req) {
   if (!hasPath(model, "orgId")) return {};
-  const raw = req.user?.orgId;
+
+  // Admins may override org via query (your frontend is sending it already)
+  const rawFromQuery = String(req.query?.orgId || "").trim();
+  const rawFromToken = String(req.user?.orgId || "").trim();
+  const raw = isAdmin(req) && rawFromQuery ? rawFromQuery : rawFromToken;
+
   if (!raw) return {};
-  const s = String(raw);
-  if (!mongoose.Types.ObjectId.isValid(s)) return {};
-  return wantsObjectId(model, "orgId")
-    ? { orgId: new mongoose.Types.ObjectId(s) }
-    : { orgId: s };
+
+  const asString = raw;
+  const asObjectId = isId(raw) ? OID(raw) : null;
+
+  if (wantsObjectId(model, "orgId")) {
+    if (!asObjectId) return {}; // cannot scope safely
+    return { orgId: asObjectId };
+  }
+
+  if (wantsString(model, "orgId")) {
+    return { orgId: asString };
+  }
+
+  // Mixed / unknown: match both (covers legacy + new writes)
+  if (wantsMixed(model, "orgId") || true) {
+    const ors = [];
+    if (asObjectId) ors.push({ orgId: asObjectId });
+    if (asString) ors.push({ orgId: asString });
+    // if nothing valid, no scope
+    return ors.length ? { $or: ors } : {};
+
+  return {};
 }
 
 /** Visibility filter consistent with /routes/tasks.js */
 function buildVisibilityFilter(req) {
   if (isAdmin(req)) return {};
-  const me = OID(req.user?._id) || OID(req.user?.id) || OID(req.user?.sub) || OID(req.user?.userId);
+  const me =
+    OID(req.user?._id) ||
+    OID(req.user?.id) ||
+    OID(req.user?.sub) ||
+    OID(req.user?.userId);
   const myGroups = (req.myGroupIds || []).map((g) => OID(g)).filter(Boolean);
 
   return {
@@ -54,7 +91,10 @@ function buildVisibilityFilter(req) {
       ...(myGroups.length
         ? [
             { visibilityMode: "groups", assignedGroupIds: { $in: myGroups } },
-            { visibilityMode: "assignees+groups", assignedGroupIds: { $in: myGroups } },
+            {
+              visibilityMode: "assignees+groups",
+              assignedGroupIds: { $in: myGroups },
+            },
             { visibilityMode: "groups", groupId: { $in: myGroups } }, // legacy single group
             { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
           ]
@@ -66,7 +106,11 @@ function buildVisibilityFilter(req) {
 /** Ensure the requester can see this task (or is admin) */
 async function assertCanSeeTaskOrAdmin(req, taskId) {
   if (isAdmin(req)) return true;
-  const filter = { _id: OID(taskId), ...orgScope(Task, req), ...buildVisibilityFilter(req) };
+  const filter = {
+    _id: OID(taskId),
+    ...orgScope(Task, req),
+    ...buildVisibilityFilter(req),
+  };
   const exists = await Task.exists(filter);
   return !!exists;
 }
@@ -77,28 +121,39 @@ const coverageDir = path.join(uploadsRoot, "coverage", "tasks");
 fs.mkdirSync(coverageDir, { recursive: true });
 
 function cleanFilename(name) {
-  return String(name || "").replace(/[^\w.\-]+/g, "_").slice(0, 120);
+  return String(name || "")
+    .replace(/[^\w.\-]+/g, "_")
+    .slice(0, 120);
 }
 const disk = multer.diskStorage({
   destination: (req, _file, cb) => {
-    const dir = path.join(coverageDir, String(req.params.id || "_task"), String(Date.now()));
+    const dir = path.join(
+      coverageDir,
+      String(req.params.id || "_task"),
+      String(Date.now()),
+    );
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  filename: (_req, file, cb) => cb(null, cleanFilename(file.originalname || "coverage")),
+  filename: (_req, file, cb) =>
+    cb(null, cleanFilename(file.originalname || "coverage")),
 });
 const uploadDisk = multer({
   storage: disk,
   limits: { fileSize: 60 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ok = /\.(kml|kmz|geojson|json)$/i.test(file.originalname || "");
-    cb(ok ? null : new Error("Unsupported file type. Use .kml, .kmz or .geojson"), ok);
+    cb(
+      ok
+        ? null
+        : new Error("Unsupported file type. Use .kml, .kmz or .geojson"),
+      ok,
+    );
   },
 });
 
 /* -------------------------- Light parsers -------------------------- */
 function parseGeoJSON(obj) {
-  // Returns { polygons: [ [ [lng,lat], ...] ], lines: [ [ [lng,lat], ...] ] }
   const out = { polygons: [], lines: [] };
   const pushPoly = (coords) => {
     if (!Array.isArray(coords)) return;
@@ -138,7 +193,8 @@ function parseGeoJSON(obj) {
     }
   };
 
-  if (obj.type === "FeatureCollection") (obj.features || []).forEach((f) => handle(f?.geometry));
+  if (obj.type === "FeatureCollection")
+    (obj.features || []).forEach((f) => handle(f?.geometry));
   else if (obj.type === "Feature") handle(obj.geometry);
   else handle(obj);
 
@@ -146,9 +202,10 @@ function parseGeoJSON(obj) {
 }
 
 function parseKMLCoordsBlocks(kmlText) {
-  // returns array of arrays of [lng,lat] — we won't distinguish Poly vs Line here
   const out = [];
-  const blocks = Array.from(kmlText.matchAll(/<coordinates>([\s\S]*?)<\/coordinates>/gi));
+  const blocks = Array.from(
+    kmlText.matchAll(/<coordinates>([\s\S]*?)<\/coordinates>/gi),
+  );
   blocks.forEach((m) => {
     const raw = (m[1] || "").trim();
     if (!raw) return;
@@ -168,14 +225,14 @@ function parseKMZToLinesPolys(buf) {
   const zip = new AdmZip(buf);
   const entries = zip.getEntries();
   const preferred = entries.find((e) => /(^|\/)doc\.kml$/i.test(e.entryName));
-  const kmlEntry = preferred || entries.find((e) => /\.kml$/i.test(e.entryName));
+  const kmlEntry =
+    preferred || entries.find((e) => /\.kml$/i.test(e.entryName));
   if (!kmlEntry) return { polygons: [], lines: [] };
   const kmlText = kmlEntry.getData().toString("utf8");
   return parseKMLToLinesPolys(kmlText);
 }
 
 function parseKMLToLinesPolys(kmlText) {
-  // Heuristic: if first == last (closed) and len>=3 => polygon ring, else line
   const blocks = parseKMLCoordsBlocks(kmlText);
   const polys = [];
   const lines = [];
@@ -214,7 +271,9 @@ function covsToKML(docName, covs) {
     if (c.geometry?.type === "MultiPolygon") {
       (c.geometry.coordinates || []).forEach((poly, j) => {
         const outer = Array.isArray(poly?.[0]) ? poly[0] : poly;
-        const coords = (outer || []).map(([lng, lat]) => `${lng},${lat},0`).join(" ");
+        const coords = (outer || [])
+          .map(([lng, lat]) => `${lng},${lat},0`)
+          .join(" ");
         placemarks += `
 <Placemark>
   <name>${escapeXml(nm)} (poly ${j + 1})</name>
@@ -223,7 +282,9 @@ function covsToKML(docName, covs) {
       });
     } else if (c.geometry?.type === "MultiLineString") {
       (c.geometry.coordinates || []).forEach((line, j) => {
-        const coords = (line || []).map(([lng, lat]) => `${lng},${lat},0`).join(" ");
+        const coords = (line || [])
+          .map(([lng, lat]) => `${lng},${lat},0`)
+          .join(" ");
         placemarks += `
 <Placemark>
   <name>${escapeXml(nm)} (path ${j + 1})</name>
@@ -240,9 +301,17 @@ function covsToKML(docName, covs) {
 }
 
 function covsToCSV(covs) {
-  // Flatten vertices for simple analysis in Excel/QGIS
   const rows = [
-    ["coverageId", "date", "type", "featureIndex", "vertexIndex", "lng", "lat", "label"].join(","),
+    [
+      "coverageId",
+      "date",
+      "type",
+      "featureIndex",
+      "vertexIndex",
+      "lng",
+      "lat",
+      "label",
+    ].join(","),
   ];
   covs.forEach((c) => {
     const dateStr = c.date ? new Date(c.date).toISOString() : "";
@@ -252,14 +321,18 @@ function covsToCSV(covs) {
         const outer = Array.isArray(poly?.[0]) ? poly[0] : poly;
         (outer || []).forEach(([lng, lat], vi) => {
           rows.push(
-            [c._id, dateStr, "polygon", fi, vi, lng, lat, `"${label}"`].join(",")
+            [c._id, dateStr, "polygon", fi, vi, lng, lat, `"${label}"`].join(
+              ",",
+            ),
           );
         });
       });
     } else if (c.geometry?.type === "MultiLineString") {
       (c.geometry.coordinates || []).forEach((line, fi) => {
         (line || []).forEach(([lng, lat], vi) => {
-          rows.push([c._id, dateStr, "line", fi, vi, lng, lat, `"${label}"`].join(","));
+          rows.push(
+            [c._id, dateStr, "line", fi, vi, lng, lat, `"${label}"`].join(","),
+          );
         });
       });
     }
@@ -289,7 +362,11 @@ router.get("/:id/coverage", requireAuth, async (req, res) => {
     }
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 1000);
-    const rows = await TaskCoverage.find(q).sort({ date: -1, uploadedAt: -1 }).limit(lim).lean();
+    const rows = await TaskCoverage.find(q)
+      .sort({ date: -1, uploadedAt: -1, _id: -1 })
+      .limit(lim)
+      .lean();
+
     res.json(rows);
   } catch (e) {
     console.error("GET /tasks/:id/coverage error:", e);
@@ -301,7 +378,8 @@ router.get("/:id/coverage", requireAuth, async (req, res) => {
 router.get("/:id/coverage/:covId", requireAuth, async (req, res) => {
   try {
     const { id, covId } = req.params;
-    if (!isId(id) || !isId(covId)) return res.status(400).json({ error: "bad id" });
+    if (!isId(id) || !isId(covId))
+      return res.status(400).json({ error: "bad id" });
 
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
@@ -328,18 +406,32 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
 
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
-    if (!isAdmin(req)) return res.status(403).json({ error: "Admin only for now" });
+    if (!isAdmin(req))
+      return res.status(403).json({ error: "Admin only for now" });
 
     const body = req.body || {};
-    if (!body.geometry || !body.geometry.type || !Array.isArray(body.geometry.coordinates)) {
-      return res.status(400).json({ error: "geometry required (GeoJSON-like)" });
+    if (
+      !body.geometry ||
+      !body.geometry.type ||
+      !Array.isArray(body.geometry.coordinates)
+    ) {
+      return res
+        .status(400)
+        .json({ error: "geometry required (GeoJSON-like)" });
     }
 
     const t = await Task.findOne({ _id: id, ...orgScope(Task, req) }).lean();
     if (!t) return res.status(404).json({ error: "task missing" });
 
+    // Write orgId in a consistent “best” form: ObjectId if valid, else string
+    const rawOrg =
+      isAdmin(req) && String(req.query?.orgId || "").trim()
+        ? String(req.query.orgId).trim()
+        : String(req.user?.orgId || "").trim();
+    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg || undefined;
+
     const doc = await TaskCoverage.create({
-      orgId: req.user?.orgId,
+      orgId: writeOrgId,
       taskId: OID(id),
       projectId: t.projectId || undefined,
       geometry: {
@@ -347,8 +439,8 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
           body.geometry.type === "Polygon"
             ? "MultiPolygon"
             : body.geometry.type === "LineString"
-            ? "MultiLineString"
-            : body.geometry.type,
+              ? "MultiLineString"
+              : body.geometry.type,
         coordinates:
           body.geometry.type === "Polygon"
             ? [body.geometry.coordinates]
@@ -387,7 +479,6 @@ router.post(
       if (!canSee) return res.status(403).json({ error: "Forbidden" });
       if (!req.file) return res.status(400).json({ error: "file required" });
 
-      // Optional hints
       const label = String(req.body?.label || "").trim();
       const color = String(req.body?.color || "").trim();
       const date = req.body?.date ? new Date(req.body.date) : undefined;
@@ -395,7 +486,9 @@ router.post(
       const t = await Task.findOne({ _id: id, ...orgScope(Task, req) }).lean();
       if (!t) return res.status(404).json({ error: "task missing" });
 
-      const relUrl = "/files/" + path.relative(uploadsRoot, req.file.path).replace(/\\/g, "/");
+      const relUrl =
+        "/files/" +
+        path.relative(uploadsRoot, req.file.path).replace(/\\/g, "/");
       const sourceFile = {
         url: relUrl,
         name: req.file.originalname,
@@ -438,14 +531,22 @@ router.post(
         return res.status(400).json({ error: "No usable shapes found" });
       }
 
-      // Prefer the shape type that exists; if both exist we emit two docs
+      const rawOrg =
+        isAdmin(req) && String(req.query?.orgId || "").trim()
+          ? String(req.query.orgId).trim()
+          : String(req.user?.orgId || "").trim();
+      const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg || undefined;
+
       const docs = [];
       if (polys.length) {
         docs.push({
-          orgId: req.user?.orgId,
+          orgId: writeOrgId,
           taskId: OID(id),
           projectId: t.projectId || undefined,
-          geometry: { type: "MultiPolygon", coordinates: polys.map((ring) => [ring]) },
+          geometry: {
+            type: "MultiPolygon",
+            coordinates: polys.map((ring) => [ring]),
+          },
           date,
           label: label || "coverage area",
           color,
@@ -460,7 +561,7 @@ router.post(
       }
       if (lines.length) {
         docs.push({
-          orgId: req.user?.orgId,
+          orgId: writeOrgId,
           taskId: OID(id),
           projectId: t.projectId || undefined,
           geometry: { type: "MultiLineString", coordinates: lines },
@@ -483,18 +584,20 @@ router.post(
       console.error("POST /tasks/:id/coverage/upload error:", e);
       res.status(500).json({ error: "Server error" });
     }
-  }
+  },
 );
 
 /* -------------------------- DELETE -------------------------- */
 router.delete("/:id/coverage/:covId", requireAuth, async (req, res) => {
   try {
     const { id, covId } = req.params;
-    if (!isId(id) || !isId(covId)) return res.status(400).json({ error: "bad id" });
+    if (!isId(id) || !isId(covId))
+      return res.status(400).json({ error: "bad id" });
 
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
-    if (!isAdmin(req)) return res.status(403).json({ error: "Admin only for now" });
+    if (!isAdmin(req))
+      return res.status(403).json({ error: "Admin only for now" });
 
     const del = await TaskCoverage.findOneAndDelete({
       _id: OID(covId),
@@ -527,7 +630,9 @@ router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
       };
     }
 
-    const covs = await TaskCoverage.find(q).sort({ date: 1, uploadedAt: 1 }).lean();
+    const covs = await TaskCoverage.find(q)
+      .sort({ date: 1, uploadedAt: 1, _id: 1 })
+      .lean();
     const task = await Task.findById(id).lean();
 
     const kml = covsToKML(task?.title || `task_${id}`, covs);
@@ -563,7 +668,9 @@ router.get("/:id/coverage/export.csv", requireAuth, async (req, res) => {
       };
     }
 
-    const covs = await TaskCoverage.find(q).sort({ date: 1, uploadedAt: 1 }).lean();
+    const covs = await TaskCoverage.find(q)
+      .sort({ date: 1, uploadedAt: 1, _id: 1 })
+      .lean();
     const csv = covsToCSV(covs);
     const name = `task_${id}_coverage.csv`;
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
