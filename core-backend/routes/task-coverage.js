@@ -1,4 +1,11 @@
 // core-backend/routes/task-coverage.js
+// ✅ DROP-IN replacement
+// Fixes:
+// 1) ✅ orgScope now matches legacy TaskCoverage rows where orgId may be stored as STRING OR ObjectId
+// 2) ✅ Writes TaskCoverage using fields that actually exist in models/TaskCoverage.js (fileRef, note, uploadedBy.userId)
+// 3) ✅ Exports (CSV/KMZ) read note/label safely (note preferred)
+// 4) ✅ Sort uses createdAt (TaskCoverage has timestamps) instead of uploadedAt (not in model)
+
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
@@ -16,6 +23,7 @@ const router = express.Router();
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v));
 const OID = (v) =>
   isId(v) ? new mongoose.Types.ObjectId(String(v)) : undefined;
+
 const getRole = (req) =>
   (req.user && (req.user.role || (req.user.claims && req.user.claims.role))) ||
   "user";
@@ -36,20 +44,24 @@ function orgFieldType(model) {
 
 /**
  * ✅ Org scope that tolerates mixed storage (string OR ObjectId)
- * - For admin: allow ?orgId= override (since your UI is already sending it)
- * - For non-admin: always use token org
- * - If schema is ObjectId -> match ObjectId
- * - If schema is String -> match String
- * - If schema is Mixed/unknown -> match BOTH using $or
+ * IMPORTANT BEHAVIOR:
+ * - Non-admin: ALWAYS uses token orgId
+ * - Admin: may use ?orgId= override (your UI sends it)
+ * - Regardless of schema type, we match BOTH forms using $or when possible.
+ *
+ * Why:
+ * - Older TaskCoverage rows may have orgId stored as string from earlier schema versions
+ * - New schema uses ObjectId
+ * - Without $or you get "missing mobile/fence exports"
  */
 function orgScope(model, req) {
   if (!hasPath(model, "orgId")) return {};
 
   let raw = "";
-  if (isAdmin(req) && req.query && req.query.orgId)
+  if (isAdmin(req) && req.query && req.query.orgId) {
     raw = String(req.query.orgId || "").trim();
+  }
   if (!raw) raw = String((req.user && req.user.orgId) || "").trim();
-
   if (!raw) return {};
 
   const t = orgFieldType(model);
@@ -57,26 +69,26 @@ function orgScope(model, req) {
   const asString = raw;
   const asObjectId = isId(raw) ? OID(raw) : null;
 
-  if (t === "ObjectId") {
-    if (!asObjectId) return {};
-    return { orgId: asObjectId };
-  }
-
-  if (t === "String") {
-    return { orgId: asString };
-  }
-
-  // Mixed / unknown -> match both
+  // If we can't form either, return empty
   const ors = [];
   if (asObjectId) ors.push({ orgId: asObjectId });
   if (asString) ors.push({ orgId: asString });
 
-  return ors.length ? { $or: ors } : {};
+  if (!ors.length) return {};
+
+  // If schema is strictly ObjectId, still match both (legacy string rows exist)
+  if (t === "ObjectId" || t === "String" || t === "Mixed" || !t) {
+    return ors.length === 1 ? ors[0] : { $or: ors };
+  }
+
+  // Fallback
+  return ors.length === 1 ? ors[0] : { $or: ors };
 }
 
 /** Visibility filter consistent with /routes/tasks.js */
 function buildVisibilityFilter(req) {
   if (isAdmin(req)) return {};
+
   const me =
     OID(req.user && req.user._id) ||
     OID(req.user && req.user.id) ||
@@ -118,6 +130,12 @@ async function assertCanSeeTaskOrAdmin(req, taskId) {
   );
   const exists = await Task.exists(filter);
   return !!exists;
+}
+
+function parseDate(v) {
+  if (!v) return undefined;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
 /* -------------------------- Upload plumbing -------------------------- */
@@ -276,14 +294,18 @@ function escapeXml(s) {
     .replace(/"/g, "&quot;");
 }
 
+function covLabel(c, idx) {
+  // model has note; some older docs might have label
+  const base = c.note || c.label || "";
+  if (base) return base;
+  const d = c.date ? " — " + new Date(c.date).toLocaleDateString() : "";
+  return "Coverage " + (idx + 1) + d;
+}
+
 function covsToKML(docName, covs) {
   let placemarks = "";
   covs.forEach((c, idx) => {
-    const nm =
-      c.label ||
-      "Coverage " +
-        (idx + 1) +
-        (c.date ? " — " + new Date(c.date).toLocaleDateString() : "");
+    const nm = covLabel(c, idx);
 
     if (c.geometry && c.geometry.type === "MultiPolygon") {
       (c.geometry.coordinates || []).forEach((poly, j) => {
@@ -324,20 +346,23 @@ function covsToCSV(covs) {
       "vertexIndex",
       "lng",
       "lat",
-      "label",
+      "note",
     ].join(","),
   ];
 
-  covs.forEach((c) => {
+  covs.forEach((c, idx) => {
     const dateStr = c.date ? new Date(c.date).toISOString() : "";
-    const label = String(c.label || "").replace(/"/g, '""');
+    const note = String(c.note || c.label || covLabel(c, idx)).replace(
+      /"/g,
+      '""',
+    );
 
     if (c.geometry && c.geometry.type === "MultiPolygon") {
       (c.geometry.coordinates || []).forEach((poly, fi) => {
         const outer = Array.isArray(poly && poly[0]) ? poly[0] : poly;
         (outer || []).forEach((p, vi) => {
           rows.push(
-            [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${label}"`].join(
+            [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${note}"`].join(
               ",",
             ),
           );
@@ -347,9 +372,7 @@ function covsToCSV(covs) {
       (c.geometry.coordinates || []).forEach((line, fi) => {
         (line || []).forEach((p, vi) => {
           rows.push(
-            [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${label}"`].join(
-              ",",
-            ),
+            [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${note}"`].join(","),
           );
         });
       });
@@ -376,16 +399,18 @@ router.get("/:id/coverage", requireAuth, async (req, res) => {
     if (from || to) {
       q.date = Object.assign(
         {},
-        from ? { $gte: new Date(from) } : null,
-        to ? { $lte: new Date(to) } : null,
+        from ? { $gte: new Date(from) } : {},
+        to ? { $lte: new Date(to) } : {},
       );
     }
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 1000);
+
     const rows = await TaskCoverage.find(q)
-      .sort({ date: -1, uploadedAt: -1 })
+      .sort({ date: -1, createdAt: -1 })
       .limit(lim)
       .lean();
+
     return res.json(rows);
   } catch (e) {
     console.error("GET /tasks/:id/coverage error:", e);
@@ -446,39 +471,44 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
     ).lean();
     if (!t) return res.status(404).json({ error: "task missing" });
 
-    // write orgId in consistent best-form
+    // ✅ write orgId in consistent best-form (ObjectId if valid)
     let rawOrg = "";
     if (isAdmin(req) && req.query && req.query.orgId)
       rawOrg = String(req.query.orgId || "").trim();
     if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
+    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg; // legacy tolerated
 
-    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
+    const actorUserId =
+      OID(
+        req.user &&
+          (req.user._id || req.user.id || req.user.sub || req.user.userId),
+      ) || undefined;
+
+    const geomType =
+      body.geometry.type === "Polygon"
+        ? "MultiPolygon"
+        : body.geometry.type === "LineString"
+          ? "MultiLineString"
+          : body.geometry.type;
+
+    const geomCoords =
+      body.geometry.type === "Polygon"
+        ? [body.geometry.coordinates]
+        : body.geometry.coordinates;
 
     const doc = await TaskCoverage.create({
       orgId: writeOrgId,
       taskId: OID(id),
       projectId: t.projectId || undefined,
-      geometry: {
-        type:
-          body.geometry.type === "Polygon"
-            ? "MultiPolygon"
-            : body.geometry.type === "LineString"
-              ? "MultiLineString"
-              : body.geometry.type,
-        coordinates:
-          body.geometry.type === "Polygon"
-            ? [body.geometry.coordinates]
-            : body.geometry.coordinates,
-      },
+      geometry: { type: geomType, coordinates: geomCoords },
       date: body.date ? new Date(body.date) : undefined,
-      label: body.label || "",
-      color: body.color || "",
-      sourceFile: body.sourceFile || undefined,
+      source: "api",
+      note: String(body.note || body.label || "").trim(),
+      fileRef: body.fileRef || body.sourceFile || undefined,
       uploadedBy: {
-        _id: OID(req.user && (req.user._id || req.user.id || req.user.sub)),
+        userId: actorUserId,
         name: req.user && req.user.name,
         email: req.user && req.user.email,
-        sub: req.user && (req.user.sub || req.user.id),
       },
     });
 
@@ -504,7 +534,6 @@ router.post(
       if (!req.file) return res.status(400).json({ error: "file required" });
 
       const label = String((req.body && req.body.label) || "").trim();
-      const color = String((req.body && req.body.color) || "").trim();
       const date =
         req.body && req.body.date ? new Date(req.body.date) : undefined;
 
@@ -516,7 +545,9 @@ router.post(
       const relUrl =
         "/files/" +
         path.relative(uploadsRoot, req.file.path).replace(/\\/g, "/");
-      const sourceFile = {
+
+      // ✅ model expects fileRef (not sourceFile)
+      const fileRef = {
         url: relUrl,
         name: req.file.originalname,
         size: req.file.size,
@@ -562,7 +593,13 @@ router.post(
       if (isAdmin(req) && req.query && req.query.orgId)
         rawOrg = String(req.query.orgId || "").trim();
       if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
-      const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
+      const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg; // legacy tolerated
+
+      const actorUserId =
+        OID(
+          req.user &&
+            (req.user._id || req.user.id || req.user.sub || req.user.userId),
+        ) || undefined;
 
       const docs = [];
 
@@ -575,15 +612,14 @@ router.post(
             type: "MultiPolygon",
             coordinates: polys.map((ring) => [ring]),
           },
-          date: date,
-          label: label || "coverage area",
-          color: color,
-          sourceFile: sourceFile,
+          date,
+          source: "file-upload",
+          note: label || "coverage area",
+          fileRef,
           uploadedBy: {
-            _id: OID(req.user && (req.user._id || req.user.id || req.user.sub)),
+            userId: actorUserId,
             name: req.user && req.user.name,
             email: req.user && req.user.email,
-            sub: req.user && (req.user.sub || req.user.id),
           },
         });
       }
@@ -594,15 +630,14 @@ router.post(
           taskId: OID(id),
           projectId: t.projectId || undefined,
           geometry: { type: "MultiLineString", coordinates: lines },
-          date: date,
-          label: label || "coverage path",
-          color: color,
-          sourceFile: sourceFile,
+          date,
+          source: "file-upload",
+          note: label || "coverage path",
+          fileRef,
           uploadedBy: {
-            _id: OID(req.user && (req.user._id || req.user.id || req.user.sub)),
+            userId: actorUserId,
             name: req.user && req.user.name,
             email: req.user && req.user.email,
-            sub: req.user && (req.user.sub || req.user.id),
           },
         });
       }
@@ -660,14 +695,15 @@ router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
     if (from || to) {
       q.date = Object.assign(
         {},
-        from ? { $gte: new Date(from) } : null,
-        to ? { $lte: new Date(to) } : null,
+        from ? { $gte: new Date(from) } : {},
+        to ? { $lte: new Date(to) } : {},
       );
     }
 
     const covs = await TaskCoverage.find(q)
-      .sort({ date: 1, uploadedAt: 1 })
+      .sort({ date: 1, createdAt: 1 })
       .lean();
+
     const task = await Task.findById(id).lean();
 
     const kml = covsToKML((task && task.title) || "task_" + id, covs);
@@ -706,14 +742,15 @@ router.get("/:id/coverage/export.csv", requireAuth, async (req, res) => {
     if (from || to) {
       q.date = Object.assign(
         {},
-        from ? { $gte: new Date(from) } : null,
-        to ? { $lte: new Date(to) } : null,
+        from ? { $gte: new Date(from) } : {},
+        to ? { $lte: new Date(to) } : {},
       );
     }
 
     const covs = await TaskCoverage.find(q)
-      .sort({ date: 1, uploadedAt: 1 })
+      .sort({ date: 1, createdAt: 1 })
       .lean();
+
     const csv = covsToCSV(covs);
 
     const name = "task_" + id + "_coverage.csv";
