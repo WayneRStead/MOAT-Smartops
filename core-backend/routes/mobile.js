@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-02-26-01"; // bump so you can confirm deploy
+const ROUTER_VERSION = "mobile-router-v2026-03-03-01"; // bump so you can confirm deploy
 
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
@@ -216,6 +216,73 @@ function parseDateSafe(v, fallback = new Date()) {
 }
 
 /**
+ * ✅ Extract lat/lng from mobile payload / offline-event doc / attachments.
+ * IMPORTANT: this only influences LEGACY Task.actualDurationLog so older UI and exports work.
+ * (We do not force coords into canonical ActivityLog because strict schemas may reject.)
+ */
+function extractLatLng({ payload, offlineEventDoc, attachments }) {
+  const p = payload || {};
+  const d = offlineEventDoc || {};
+  const dp = d.payload || {};
+
+  // Some apps put geo on the first attachment
+  const attGeo =
+    Array.isArray(attachments) && attachments.length
+      ? attachments[0]?.geo || attachments[0]?.location || null
+      : null;
+
+  const latRaw =
+    p.lat ??
+    p.latitude ??
+    p.geo?.lat ??
+    p.geo?.latitude ??
+    p.location?.lat ??
+    p.location?.latitude ??
+    p.position?.lat ??
+    p.position?.latitude ??
+    p.coords?.latitude ??
+    dp.lat ??
+    dp.latitude ??
+    dp.geo?.lat ??
+    dp.geo?.latitude ??
+    dp.location?.lat ??
+    dp.location?.latitude ??
+    dp.position?.lat ??
+    dp.position?.latitude ??
+    dp.coords?.latitude ??
+    attGeo?.lat ??
+    attGeo?.latitude;
+
+  const lngRaw =
+    p.lng ??
+    p.longitude ??
+    p.geo?.lng ??
+    p.geo?.longitude ??
+    p.location?.lng ??
+    p.location?.longitude ??
+    p.position?.lng ??
+    p.position?.longitude ??
+    p.coords?.longitude ??
+    dp.lng ??
+    dp.longitude ??
+    dp.geo?.lng ??
+    dp.geo?.longitude ??
+    dp.location?.lng ??
+    dp.location?.longitude ??
+    dp.position?.lng ??
+    dp.position?.longitude ??
+    dp.coords?.longitude ??
+    attGeo?.lng ??
+    attGeo?.longitude;
+
+  const nLat = Number(latRaw);
+  const nLng = Number(lngRaw);
+  const hasCoords = Number.isFinite(nLat) && Number.isFinite(nLng);
+
+  return { hasCoords, nLat, nLng };
+}
+
+/**
  * ✅ “Single source of truth” activity log adapter
  * We try to write into a canonical ActivityLog-style model (if present),
  * so TaskDetail/CSV/KMZ all consume the same log entries as web-created activities.
@@ -305,8 +372,6 @@ async function upsertCanonicalActivityLog({
       ? new mongoose.Types.ObjectId(String(req.user._id))
       : undefined;
 
-  // We keep the document shape flexible; different projects name fields differently.
-  // The goal is: TaskDetail/exports see the same collection they already query.
   const setOnInsert = {
     orgId,
     taskId,
@@ -337,8 +402,6 @@ async function upsertCanonicalActivityLog({
     sourceOfflineEventId: offlineEventId,
   };
 
-  // Some schemas might not have this field; still safe to include in update payload.
-  // If Mongo strict schema rejects unknown fields, this will throw — and we’ll fall back.
   const updated = await ActivityLogModel.findOneAndUpdate(
     query,
     { $setOnInsert: setOnInsert, $set: set },
@@ -896,6 +959,7 @@ router.post(
 
       // ✅ APPLY TASK UPDATES (Task.status + ManagerNote + TaskMilestone.status)
       if (eventType === "task-update") {
+        // (unchanged from your pasted version)
         try {
           const Task = require("../models/Task");
           const TaskMilestone = require("../models/TaskMilestone");
@@ -1209,6 +1273,13 @@ router.post(
                   ? new mongoose.Types.ObjectId(String(taskDoc.projectId))
                   : toObjectIdOrNull(payload?.projectId) || undefined;
 
+              // ✅ coords for LEGACY log only (prevents breaking strict canonical schemas)
+              const { hasCoords, nLat, nLng } = extractLatLng({
+                payload,
+                offlineEventDoc: doc,
+                attachments,
+              });
+
               // ✅ 1) CANONICAL: write to ActivityLog-style collection (single source of truth)
               let canonicalOk = false;
               try {
@@ -1238,71 +1309,61 @@ router.post(
                 );
               }
 
-              if (!alreadyHasLog) {
-                const actorId =
-                  req.user?._id &&
-                  mongoose.isValidObjectId(String(req.user._id))
-                    ? new mongoose.Types.ObjectId(String(req.user._id))
-                    : undefined;
+              // ✅ 2) LEGACY FALLBACK: keep Task.actualDurationLog + Task.attachments updated
+              // Idempotent using sourceOfflineEventId.
+              try {
+                taskDoc.attachments = Array.isArray(taskDoc.attachments)
+                  ? taskDoc.attachments
+                  : [];
+                taskDoc.actualDurationLog = Array.isArray(
+                  taskDoc.actualDurationLog,
+                )
+                  ? taskDoc.actualDurationLog
+                  : [];
 
-                // ✅ Pull coordinates from payload OR offline event doc (OfflineEvents) OR attachment geo
-                const attGeo =
-                  Array.isArray(attachments) && attachments.length
-                    ? attachments[0]?.geo
-                    : null;
+                const alreadyHasAttachments = taskDoc.attachments.some(
+                  (a) =>
+                    String(a?.sourceOfflineEventId || "") === String(doc._id),
+                );
+                const alreadyHasLog = taskDoc.actualDurationLog.some(
+                  (l) =>
+                    String(l?.sourceOfflineEventId || "") === String(doc._id),
+                );
 
-                const latRaw =
-                  payload?.lat ??
-                  payload?.latitude ??
-                  payload?.geo?.lat ??
-                  payload?.geo?.latitude ??
-                  doc?.lat ??
-                  doc?.latitude ??
-                  doc?.geo?.lat ??
-                  doc?.geo?.latitude ??
-                  payload?.location?.lat ??
-                  payload?.location?.latitude ??
-                  doc?.location?.lat ??
-                  doc?.location?.latitude ??
-                  attGeo?.lat;
+                if (!alreadyHasAttachments && attachments.length) {
+                  for (const a of attachments) taskDoc.attachments.push(a);
+                }
 
-                const lngRaw =
-                  payload?.lng ??
-                  payload?.longitude ??
-                  payload?.geo?.lng ??
-                  payload?.geo?.longitude ??
-                  doc?.lng ??
-                  doc?.longitude ??
-                  doc?.geo?.lng ??
-                  doc?.geo?.longitude ??
-                  payload?.location?.lng ??
-                  payload?.location?.longitude ??
-                  doc?.location?.lng ??
-                  doc?.location?.longitude ??
-                  attGeo?.lng;
+                if (!alreadyHasLog) {
+                  const actorId =
+                    req.user?._id &&
+                    mongoose.isValidObjectId(String(req.user._id))
+                      ? new mongoose.Types.ObjectId(String(req.user._id))
+                      : undefined;
 
-                const nLat = Number(latRaw);
-                const nLng = Number(lngRaw);
-                const hasCoords =
-                  Number.isFinite(nLat) && Number.isFinite(nLng);
-
-                taskDoc.actualDurationLog.push({
-                  action: String(action || payload?.action || "photo"),
-                  at: at ? new Date(at) : new Date(),
-                  userId: actorId,
-                  actorName: req.user?.name,
-                  actorEmail: req.user?.email,
-                  actorSub: req.user?.sub || req.user?.id,
-                  note: noteText || "",
-                  ...(milestoneObjectId
-                    ? { milestoneId: milestoneObjectId }
-                    : {}),
-                  ...(hasCoords ? { lat: nLat, lng: nLng } : {}),
-                  sourceOfflineEventId: doc?._id,
-                });
+                  taskDoc.actualDurationLog.push({
+                    action,
+                    at,
+                    userId: actorId,
+                    actorName: req.user?.name,
+                    actorEmail: req.user?.email,
+                    actorSub: req.user?.sub || req.user?.id,
+                    note: noteText || "",
+                    ...(milestoneObjectId
+                      ? { milestoneId: milestoneObjectId }
+                      : {}),
+                    ...(hasCoords ? { lat: nLat, lng: nLng } : {}),
+                    sourceOfflineEventId: doc._id,
+                  });
+                }
+              } catch (eLegacy) {
+                console.error(
+                  "[activity-log] legacy task log fallback failed",
+                  eLegacy,
+                );
               }
 
-              // ✅ APPLY ACTIVITY FENCE -> TaskCoverage (from payload.fenceJson)
+              // ✅ APPLY ACTIVITY FENCE -> TaskCoverage (from payload.fenceJson) (unchanged)
               try {
                 const fenceRaw = payload?.fenceJson;
 
@@ -1434,6 +1495,7 @@ router.post(
                 attachments: attachments.length,
                 noteLen: noteText.length,
                 milestoneId: milestoneIdStr || null,
+                hasCoords,
               });
             }
           }
