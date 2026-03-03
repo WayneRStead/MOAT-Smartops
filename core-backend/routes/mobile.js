@@ -1238,58 +1238,68 @@ router.post(
                 );
               }
 
-              // ✅ 2) LEGACY FALLBACK: keep Task.actualDurationLog + Task.attachments updated
-              // This is ONLY to avoid breaking older UI paths while you transition fully to canonical logs.
-              // It is idempotent using sourceOfflineEventId.
-              try {
-                taskDoc.attachments = Array.isArray(taskDoc.attachments)
-                  ? taskDoc.attachments
-                  : [];
-                taskDoc.actualDurationLog = Array.isArray(
-                  taskDoc.actualDurationLog,
-                )
-                  ? taskDoc.actualDurationLog
-                  : [];
+              if (!alreadyHasLog) {
+                const actorId =
+                  req.user?._id &&
+                  mongoose.isValidObjectId(String(req.user._id))
+                    ? new mongoose.Types.ObjectId(String(req.user._id))
+                    : undefined;
 
-                const alreadyHasAttachments = taskDoc.attachments.some(
-                  (a) =>
-                    String(a?.sourceOfflineEventId || "") === String(doc._id),
-                );
-                const alreadyHasLog = taskDoc.actualDurationLog.some(
-                  (l) =>
-                    String(l?.sourceOfflineEventId || "") === String(doc._id),
-                );
+                // ✅ Pull coordinates from payload OR offline event doc (OfflineEvents) OR attachment geo
+                const attGeo =
+                  Array.isArray(attachments) && attachments.length
+                    ? attachments[0]?.geo
+                    : null;
 
-                if (!alreadyHasAttachments && attachments.length) {
-                  for (const a of attachments) taskDoc.attachments.push(a);
-                }
+                const latRaw =
+                  payload?.lat ??
+                  payload?.latitude ??
+                  payload?.geo?.lat ??
+                  payload?.geo?.latitude ??
+                  doc?.lat ??
+                  doc?.latitude ??
+                  doc?.geo?.lat ??
+                  doc?.geo?.latitude ??
+                  payload?.location?.lat ??
+                  payload?.location?.latitude ??
+                  doc?.location?.lat ??
+                  doc?.location?.latitude ??
+                  attGeo?.lat;
 
-                if (!alreadyHasLog) {
-                  const actorId =
-                    req.user?._id &&
-                    mongoose.isValidObjectId(String(req.user._id))
-                      ? new mongoose.Types.ObjectId(String(req.user._id))
-                      : undefined;
+                const lngRaw =
+                  payload?.lng ??
+                  payload?.longitude ??
+                  payload?.geo?.lng ??
+                  payload?.geo?.longitude ??
+                  doc?.lng ??
+                  doc?.longitude ??
+                  doc?.geo?.lng ??
+                  doc?.geo?.longitude ??
+                  payload?.location?.lng ??
+                  payload?.location?.longitude ??
+                  doc?.location?.lng ??
+                  doc?.location?.longitude ??
+                  attGeo?.lng;
 
-                  taskDoc.actualDurationLog.push({
-                    action,
-                    at,
-                    userId: actorId,
-                    actorName: req.user?.name,
-                    actorEmail: req.user?.email,
-                    actorSub: req.user?.sub || req.user?.id,
-                    note: noteText || "",
-                    ...(milestoneObjectId
-                      ? { milestoneId: milestoneObjectId }
-                      : {}),
-                    sourceOfflineEventId: doc._id,
-                  });
-                }
-              } catch (eLegacy) {
-                console.error(
-                  "[activity-log] legacy task log fallback failed",
-                  eLegacy,
-                );
+                const nLat = Number(latRaw);
+                const nLng = Number(lngRaw);
+                const hasCoords =
+                  Number.isFinite(nLat) && Number.isFinite(nLng);
+
+                taskDoc.actualDurationLog.push({
+                  action: String(action || payload?.action || "photo"),
+                  at: at ? new Date(at) : new Date(),
+                  userId: actorId,
+                  actorName: req.user?.name,
+                  actorEmail: req.user?.email,
+                  actorSub: req.user?.sub || req.user?.id,
+                  note: noteText || "",
+                  ...(milestoneObjectId
+                    ? { milestoneId: milestoneObjectId }
+                    : {}),
+                  ...(hasCoords ? { lat: nLat, lng: nLng } : {}),
+                  sourceOfflineEventId: doc?._id,
+                });
               }
 
               // ✅ APPLY ACTIVITY FENCE -> TaskCoverage (from payload.fenceJson)
