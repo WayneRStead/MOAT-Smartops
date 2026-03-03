@@ -1,9 +1,9 @@
 // core-backend/routes/task-coverage.js
 // ✅ DROP-IN replacement
-// Fixes:
-// 1) Export KMZ/CSV now supports geometry.type: Polygon, MultiPolygon, LineString, MultiLineString
-// 2) Adds Cache-Control: no-store headers (prevents 304 caching issues in browser)
-// 3) Keeps orgId mixed matching logic (string OR ObjectId)
+// Fixes exports so they include:
+// 1) Coverage geometry from TaskCoverage
+// 2) Activity points (including offline-synced) from Task.actualDurationLog (lat/lng)
+// Also disables caching to avoid 304/stale results in browser.
 
 const express = require("express");
 const path = require("path");
@@ -30,6 +30,16 @@ const isAdminRole = (role) =>
   ["admin", "superadmin"].includes(String(role).toLowerCase());
 const isAdmin = (req) => isAdminRole(getRole(req));
 
+function setNoStore(res) {
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
+
 function hasPath(model, p) {
   return !!(model && model.schema && model.schema.path && model.schema.path(p));
 }
@@ -43,22 +53,36 @@ function orgFieldType(model) {
 
 /**
  * ✅ Org scope that tolerates mixed storage (string OR ObjectId)
- * - For admin: allow ?orgId= override
- * - For non-admin: always use token org
- * - Always matches BOTH forms via $or when possible (handles legacy rows)
+ * NOTE: we also look at req.orgObjectId (many of your routes use it),
+ * and X-Org-Id header (tenant header) as fallback.
  */
 function orgScope(model, req) {
   if (!hasPath(model, "orgId")) return {};
 
+  // Prefer explicit orgId query param for admin (your UI sends it)
   let raw = "";
   if (isAdmin(req) && req.query && req.query.orgId) {
     raw = String(req.query.orgId || "").trim();
   }
+
+  // Prefer middleware-provided orgObjectId if present
+  if (!raw && req.orgObjectId && isId(req.orgObjectId)) {
+    raw = String(req.orgObjectId);
+  }
+
+  // Tenant header fallback
+  if (!raw) {
+    const hdr =
+      req.get &&
+      (req.get("X-Org-Id") || req.get("x-org-id") || req.get("X-ORG-ID"));
+    if (hdr) raw = String(hdr).trim();
+  }
+
+  // Token org
   if (!raw) raw = String((req.user && req.user.orgId) || "").trim();
   if (!raw) return {};
 
   const t = orgFieldType(model);
-
   const asString = raw;
   const asObjectId = isId(raw) ? OID(raw) : null;
 
@@ -68,7 +92,7 @@ function orgScope(model, req) {
 
   if (!ors.length) return {};
 
-  // even if schema is ObjectId, we still want to match legacy string rows
+  // Even if schema is ObjectId, keep $or to match legacy string rows if they exist
   if (t === "ObjectId" || t === "String" || t === "Mixed" || !t) {
     return ors.length === 1 ? ors[0] : { $or: ors };
   }
@@ -79,7 +103,6 @@ function orgScope(model, req) {
 /** Visibility filter consistent with /routes/tasks.js */
 function buildVisibilityFilter(req) {
   if (isAdmin(req)) return {};
-
   const me =
     OID(req.user && req.user._id) ||
     OID(req.user && req.user.id) ||
@@ -94,7 +117,7 @@ function buildVisibilityFilter(req) {
       { visibilityMode: "org" },
       { visibilityMode: "assignees", assignedUserIds: me },
       { visibilityMode: "assignees+groups", assignedUserIds: me },
-      { visibilityMode: "assignees", assignedTo: me },
+      { visibilityMode: "assignees", assignedTo: me }, // legacy
       { visibilityMode: "assignees+groups", assignedTo: me },
       ...(myGroups.length
         ? [
@@ -103,7 +126,7 @@ function buildVisibilityFilter(req) {
               visibilityMode: "assignees+groups",
               assignedGroupIds: { $in: myGroups },
             },
-            { visibilityMode: "groups", groupId: { $in: myGroups } },
+            { visibilityMode: "groups", groupId: { $in: myGroups } }, // legacy single group
             { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
           ]
         : []),
@@ -121,17 +144,6 @@ async function assertCanSeeTaskOrAdmin(req, taskId) {
   );
   const exists = await Task.exists(filter);
   return !!exists;
-}
-
-function setNoStore(res) {
-  // Prevent browser/proxy caching (fixes 304 issues in devtools exports/listing)
-  res.setHeader(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, proxy-revalidate",
-  );
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("Surrogate-Control", "no-store");
 }
 
 /* -------------------------- Upload plumbing -------------------------- */
@@ -281,7 +293,7 @@ function parseKMZToLinesPolys(buf) {
   return parseKMLToLinesPolys(kmlText);
 }
 
-/* -------------------------- KMZ/CSV export helpers -------------------------- */
+/* -------------------------- Export helpers -------------------------- */
 function escapeXml(s) {
   return String(s || "")
     .replace(/&/g, "&amp;")
@@ -290,18 +302,6 @@ function escapeXml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function covName(c, idx) {
-  const base = (c.note || c.label || "").trim();
-  if (base) return base;
-  const d = c.date ? " — " + new Date(c.date).toLocaleDateString() : "";
-  return "Coverage " + (idx + 1) + d;
-}
-
-/**
- * ✅ Normalize ALL supported types into:
- *   polys: array of rings (each ring: [[lng,lat], ...])
- *   lines: array of lines (each line: [[lng,lat], ...])
- */
 function normalizeGeomToPolysLines(geometry) {
   const out = { polys: [], lines: [] };
   if (!geometry || !geometry.type || !Array.isArray(geometry.coordinates))
@@ -329,11 +329,16 @@ function normalizeGeomToPolysLines(geometry) {
   return out;
 }
 
-function covsToKML(docName, covs) {
+function covsToKML(docName, covs, activityPoints) {
   let placemarks = "";
 
+  // Coverage shapes
   covs.forEach((c, idx) => {
-    const nm = covName(c, idx);
+    const labelBase = String(c.note || c.label || "").trim();
+    const nm =
+      labelBase ||
+      `Coverage ${idx + 1}${c.date ? " — " + new Date(c.date).toLocaleDateString() : ""}`;
+
     const { polys, lines } = normalizeGeomToPolysLines(c.geometry);
 
     polys.forEach((outer, j) => {
@@ -355,14 +360,35 @@ function covsToKML(docName, covs) {
     });
   });
 
+  // Activity points (Task.actualDurationLog with lat/lng)
+  (activityPoints || []).forEach((p, idx) => {
+    const nm =
+      `${p.action || "activity"} — ${p.at ? new Date(p.at).toLocaleString() : ""}` ||
+      `Activity ${idx + 1}`;
+    const descParts = [];
+    if (p.note) descParts.push(`Note: ${p.note}`);
+    if (p.actorName) descParts.push(`By: ${p.actorName}`);
+    if (p.actorEmail) descParts.push(`Email: ${p.actorEmail}`);
+    const desc = descParts.join(" | ");
+
+    placemarks += `
+<Placemark>
+  <name>${escapeXml(nm)}</name>
+  ${desc ? `<description>${escapeXml(desc)}</description>` : ""}
+  <Point><coordinates>${p.lng},${p.lat},0</coordinates></Point>
+</Placemark>`;
+  });
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
-  <Document><name>${escapeXml(docName || "Coverage")}</name>${placemarks}
+  <Document><name>${escapeXml(docName || "Task Export")}</name>${placemarks}
   </Document>
 </kml>`;
 }
 
-function covsToCSV(covs) {
+function exportToCSV(covs, activityPoints) {
+  // Keep existing header (coverage vertices) BUT also allow point rows for activities.
+  // Activity rows: type=activity-point, featureIndex/vertexIndex blank.
   const rows = [
     [
       "coverageId",
@@ -372,23 +398,21 @@ function covsToCSV(covs) {
       "vertexIndex",
       "lng",
       "lat",
-      "note",
+      "label",
     ].join(","),
   ];
 
-  covs.forEach((c, idx) => {
+  // Coverage vertices
+  covs.forEach((c) => {
     const dateStr = c.date ? new Date(c.date).toISOString() : "";
-    const note = String(c.note || c.label || covName(c, idx)).replace(
-      /"/g,
-      '""',
-    );
+    const label = String(c.note || c.label || "").replace(/"/g, '""');
 
     const { polys, lines } = normalizeGeomToPolysLines(c.geometry);
 
     polys.forEach((outer, fi) => {
       (outer || []).forEach((p, vi) => {
         rows.push(
-          [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${note}"`].join(
+          [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${label}"`].join(
             ",",
           ),
         );
@@ -398,13 +422,37 @@ function covsToCSV(covs) {
     lines.forEach((line, fi) => {
       (line || []).forEach((p, vi) => {
         rows.push(
-          [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${note}"`].join(","),
+          [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${label}"`].join(","),
         );
       });
     });
   });
 
+  // Activity points
+  (activityPoints || []).forEach((p) => {
+    const dateStr = p.at ? new Date(p.at).toISOString() : "";
+    const label = String(p.note || "").replace(/"/g, '""');
+    rows.push(
+      [
+        `log:${p._id || ""}`,
+        dateStr,
+        `activity:${p.action || "event"}`,
+        "",
+        "",
+        p.lng,
+        p.lat,
+        `"${label}"`,
+      ].join(","),
+    );
+  });
+
   return rows.join("\n");
+}
+
+function parseDate(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 /* -------------------------- GET list -------------------------- */
@@ -432,7 +480,6 @@ router.get("/:id/coverage", requireAuth, async (req, res) => {
     }
 
     const lim = Math.min(parseInt(limit || "200", 10) || 200, 1000);
-
     const rows = await TaskCoverage.find(q)
       .sort({ date: -1, createdAt: -1 })
       .limit(lim)
@@ -502,17 +549,14 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
     ).lean();
     if (!t) return res.status(404).json({ error: "task missing" });
 
+    // Write org in best form
     let rawOrg = "";
     if (isAdmin(req) && req.query && req.query.orgId)
       rawOrg = String(req.query.orgId || "").trim();
+    if (!rawOrg && req.orgObjectId) rawOrg = String(req.orgObjectId);
     if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
-    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
 
-    const actorUserId =
-      OID(
-        req.user &&
-          (req.user._id || req.user.id || req.user.sub || req.user.userId),
-      ) || undefined;
+    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
 
     const doc = await TaskCoverage.create({
       orgId: writeOrgId,
@@ -525,12 +569,6 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
       date: body.date ? new Date(body.date) : undefined,
       source: "api",
       note: String(body.note || body.label || "").trim(),
-      fileRef: body.fileRef || body.sourceFile || undefined,
-      uploadedBy: {
-        userId: actorUserId,
-        name: req.user && req.user.name,
-        email: req.user && req.user.email,
-      },
     });
 
     return res.status(201).json(doc.toObject());
@@ -569,13 +607,6 @@ router.post(
         "/files/" +
         path.relative(uploadsRoot, req.file.path).replace(/\\/g, "/");
 
-      const fileRef = {
-        url: relUrl,
-        name: req.file.originalname,
-        size: req.file.size,
-        mime: req.file.mimetype,
-      };
-
       const lower = String(req.file.originalname || "").toLowerCase();
       const ext = path.extname(lower);
 
@@ -611,17 +642,21 @@ router.post(
         return res.status(400).json({ error: "No usable shapes found" });
       }
 
+      // Write org in best form
       let rawOrg = "";
       if (isAdmin(req) && req.query && req.query.orgId)
         rawOrg = String(req.query.orgId || "").trim();
+      if (!rawOrg && req.orgObjectId) rawOrg = String(req.orgObjectId);
       if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
+
       const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
 
-      const actorUserId =
-        OID(
-          req.user &&
-            (req.user._id || req.user.id || req.user.sub || req.user.userId),
-        ) || undefined;
+      const fileRef = {
+        url: relUrl,
+        name: req.file.originalname,
+        size: req.file.size,
+        mime: req.file.mimetype,
+      };
 
       const docs = [];
 
@@ -638,11 +673,6 @@ router.post(
           source: "file-upload",
           note: label || "coverage area",
           fileRef,
-          uploadedBy: {
-            userId: actorUserId,
-            name: req.user && req.user.name,
-            email: req.user && req.user.email,
-          },
         });
       }
 
@@ -656,11 +686,6 @@ router.post(
           source: "file-upload",
           note: label || "coverage path",
           fileRef,
-          uploadedBy: {
-            userId: actorUserId,
-            name: req.user && req.user.name,
-            email: req.user && req.user.email,
-          },
         });
       }
 
@@ -703,7 +728,7 @@ router.delete("/:id/coverage/:covId", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------- EXPORT: KMZ -------------------------- */
+/* -------------------------- EXPORT: KMZ (coverage + activity points) -------------------------- */
 router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
   try {
     setNoStore(res);
@@ -714,33 +739,62 @@ router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const from = req.query.from;
-    const to = req.query.to;
+    const from = parseDate(req.query.from);
+    const to = parseDate(req.query.to);
 
     const q = Object.assign({ taskId: OID(id) }, orgScope(TaskCoverage, req));
     if (from || to) {
       q.date = Object.assign(
         {},
-        from ? { $gte: new Date(from) } : {},
-        to ? { $lte: new Date(to) } : {},
+        from ? { $gte: from } : {},
+        to ? { $lte: to } : {},
       );
     }
 
+    // 1) Coverage docs
     const covs = await TaskCoverage.find(q)
       .sort({ date: 1, createdAt: 1 })
       .lean();
 
-    const task = await Task.findById(id).lean();
+    // 2) Task activity points (offline events live here)
+    const task = await Task.findOne(
+      Object.assign({ _id: OID(id) }, orgScope(Task, req)),
+    ).lean();
 
-    const kml = covsToKML((task && task.title) || "task_" + id, covs);
+    const activityPoints = [];
+    const logs = Array.isArray(task?.actualDurationLog)
+      ? task.actualDurationLog
+      : [];
+
+    logs.forEach((e) => {
+      const lat = Number(e?.lat);
+      const lng = Number(e?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      // optional date filter
+      const at = e?.at ? new Date(e.at) : null;
+      if (from && at && at < from) return;
+      if (to && at && at > to) return;
+
+      activityPoints.push({
+        _id: e?._id ? String(e._id) : "",
+        at: at || null,
+        action: e?.action || "",
+        lat,
+        lng,
+        note: e?.note || "",
+        actorName: e?.actorName || "",
+        actorEmail: e?.actorEmail || "",
+      });
+    });
+
+    const kml = covsToKML(task?.title || "task_" + id, covs, activityPoints);
+
     const zip = new AdmZip();
     zip.addFile("doc.kml", Buffer.from(kml, "utf8"));
 
-    const safeTitle = String((task && task.title) || id).replace(
-      /[^\w\-]+/g,
-      "_",
-    );
-    const name = "task_" + safeTitle + "_coverage.kmz";
+    const safeTitle = String(task?.title || id).replace(/[^\w\-]+/g, "_");
+    const name = "task_" + safeTitle + "_coverage_and_activity.kmz";
 
     const buf = zip.toBuffer();
     res.setHeader("Content-Type", "application/vnd.google-earth.kmz");
@@ -752,7 +806,7 @@ router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
   }
 });
 
-/* -------------------------- EXPORT: CSV -------------------------- */
+/* -------------------------- EXPORT: CSV (coverage vertices + activity points) -------------------------- */
 router.get("/:id/coverage/export.csv", requireAuth, async (req, res) => {
   try {
     setNoStore(res);
@@ -763,25 +817,55 @@ router.get("/:id/coverage/export.csv", requireAuth, async (req, res) => {
     const canSee = await assertCanSeeTaskOrAdmin(req, id);
     if (!canSee) return res.status(403).json({ error: "Forbidden" });
 
-    const from = req.query.from;
-    const to = req.query.to;
+    const from = parseDate(req.query.from);
+    const to = parseDate(req.query.to);
 
     const q = Object.assign({ taskId: OID(id) }, orgScope(TaskCoverage, req));
     if (from || to) {
       q.date = Object.assign(
         {},
-        from ? { $gte: new Date(from) } : {},
-        to ? { $lte: new Date(to) } : {},
+        from ? { $gte: from } : {},
+        to ? { $lte: to } : {},
       );
     }
 
+    // 1) Coverage docs
     const covs = await TaskCoverage.find(q)
       .sort({ date: 1, createdAt: 1 })
       .lean();
 
-    const csv = covsToCSV(covs);
+    // 2) Task activity points
+    const task = await Task.findOne(
+      Object.assign({ _id: OID(id) }, orgScope(Task, req)),
+    ).lean();
 
-    const name = "task_" + id + "_coverage.csv";
+    const activityPoints = [];
+    const logs = Array.isArray(task?.actualDurationLog)
+      ? task.actualDurationLog
+      : [];
+
+    logs.forEach((e) => {
+      const lat = Number(e?.lat);
+      const lng = Number(e?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      const at = e?.at ? new Date(e.at) : null;
+      if (from && at && at < from) return;
+      if (to && at && at > to) return;
+
+      activityPoints.push({
+        _id: e?._id ? String(e._id) : "",
+        at: at || null,
+        action: e?.action || "",
+        lat,
+        lng,
+        note: e?.note || "",
+      });
+    });
+
+    const csv = exportToCSV(covs, activityPoints);
+
+    const name = "task_" + id + "_coverage_and_activity.csv";
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
     return res.end(csv);
