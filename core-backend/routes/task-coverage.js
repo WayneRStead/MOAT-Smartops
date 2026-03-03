@@ -1,10 +1,9 @@
 // core-backend/routes/task-coverage.js
 // ✅ DROP-IN replacement
 // Fixes:
-// 1) ✅ orgScope now matches legacy TaskCoverage rows where orgId may be stored as STRING OR ObjectId
-// 2) ✅ Writes TaskCoverage using fields that actually exist in models/TaskCoverage.js (fileRef, note, uploadedBy.userId)
-// 3) ✅ Exports (CSV/KMZ) read note/label safely (note preferred)
-// 4) ✅ Sort uses createdAt (TaskCoverage has timestamps) instead of uploadedAt (not in model)
+// 1) Export KMZ/CSV now supports geometry.type: Polygon, MultiPolygon, LineString, MultiLineString
+// 2) Adds Cache-Control: no-store headers (prevents 304 caching issues in browser)
+// 3) Keeps orgId mixed matching logic (string OR ObjectId)
 
 const express = require("express");
 const path = require("path");
@@ -39,20 +38,14 @@ function orgFieldType(model) {
   if (!model || !model.schema || !model.schema.path) return null;
   const p = model.schema.path("orgId");
   if (!p) return null;
-  return p.instance; // "ObjectId" | "String" | "Mixed" | etc
+  return p.instance;
 }
 
 /**
  * ✅ Org scope that tolerates mixed storage (string OR ObjectId)
- * IMPORTANT BEHAVIOR:
- * - Non-admin: ALWAYS uses token orgId
- * - Admin: may use ?orgId= override (your UI sends it)
- * - Regardless of schema type, we match BOTH forms using $or when possible.
- *
- * Why:
- * - Older TaskCoverage rows may have orgId stored as string from earlier schema versions
- * - New schema uses ObjectId
- * - Without $or you get "missing mobile/fence exports"
+ * - For admin: allow ?orgId= override
+ * - For non-admin: always use token org
+ * - Always matches BOTH forms via $or when possible (handles legacy rows)
  */
 function orgScope(model, req) {
   if (!hasPath(model, "orgId")) return {};
@@ -69,19 +62,17 @@ function orgScope(model, req) {
   const asString = raw;
   const asObjectId = isId(raw) ? OID(raw) : null;
 
-  // If we can't form either, return empty
   const ors = [];
   if (asObjectId) ors.push({ orgId: asObjectId });
   if (asString) ors.push({ orgId: asString });
 
   if (!ors.length) return {};
 
-  // If schema is strictly ObjectId, still match both (legacy string rows exist)
+  // even if schema is ObjectId, we still want to match legacy string rows
   if (t === "ObjectId" || t === "String" || t === "Mixed" || !t) {
     return ors.length === 1 ? ors[0] : { $or: ors };
   }
 
-  // Fallback
   return ors.length === 1 ? ors[0] : { $or: ors };
 }
 
@@ -103,7 +94,7 @@ function buildVisibilityFilter(req) {
       { visibilityMode: "org" },
       { visibilityMode: "assignees", assignedUserIds: me },
       { visibilityMode: "assignees+groups", assignedUserIds: me },
-      { visibilityMode: "assignees", assignedTo: me }, // legacy
+      { visibilityMode: "assignees", assignedTo: me },
       { visibilityMode: "assignees+groups", assignedTo: me },
       ...(myGroups.length
         ? [
@@ -112,7 +103,7 @@ function buildVisibilityFilter(req) {
               visibilityMode: "assignees+groups",
               assignedGroupIds: { $in: myGroups },
             },
-            { visibilityMode: "groups", groupId: { $in: myGroups } }, // legacy single group
+            { visibilityMode: "groups", groupId: { $in: myGroups } },
             { visibilityMode: "assignees+groups", groupId: { $in: myGroups } },
           ]
         : []),
@@ -132,10 +123,15 @@ async function assertCanSeeTaskOrAdmin(req, taskId) {
   return !!exists;
 }
 
-function parseDate(v) {
-  if (!v) return undefined;
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? undefined : d;
+function setNoStore(res) {
+  // Prevent browser/proxy caching (fixes 304 issues in devtools exports/listing)
+  res.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, proxy-revalidate",
+  );
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
 }
 
 /* -------------------------- Upload plumbing -------------------------- */
@@ -294,39 +290,69 @@ function escapeXml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function covLabel(c, idx) {
-  // model has note; some older docs might have label
-  const base = c.note || c.label || "";
+function covName(c, idx) {
+  const base = (c.note || c.label || "").trim();
   if (base) return base;
   const d = c.date ? " — " + new Date(c.date).toLocaleDateString() : "";
   return "Coverage " + (idx + 1) + d;
 }
 
+/**
+ * ✅ Normalize ALL supported types into:
+ *   polys: array of rings (each ring: [[lng,lat], ...])
+ *   lines: array of lines (each line: [[lng,lat], ...])
+ */
+function normalizeGeomToPolysLines(geometry) {
+  const out = { polys: [], lines: [] };
+  if (!geometry || !geometry.type || !Array.isArray(geometry.coordinates))
+    return out;
+
+  const t = geometry.type;
+
+  if (t === "Polygon") {
+    const outer = geometry.coordinates[0];
+    if (Array.isArray(outer) && outer.length >= 3) out.polys.push(outer);
+  } else if (t === "MultiPolygon") {
+    (geometry.coordinates || []).forEach((poly) => {
+      const outer = Array.isArray(poly && poly[0]) ? poly[0] : null;
+      if (Array.isArray(outer) && outer.length >= 3) out.polys.push(outer);
+    });
+  } else if (t === "LineString") {
+    const line = geometry.coordinates;
+    if (Array.isArray(line) && line.length >= 2) out.lines.push(line);
+  } else if (t === "MultiLineString") {
+    (geometry.coordinates || []).forEach((line) => {
+      if (Array.isArray(line) && line.length >= 2) out.lines.push(line);
+    });
+  }
+
+  return out;
+}
+
 function covsToKML(docName, covs) {
   let placemarks = "";
-  covs.forEach((c, idx) => {
-    const nm = covLabel(c, idx);
 
-    if (c.geometry && c.geometry.type === "MultiPolygon") {
-      (c.geometry.coordinates || []).forEach((poly, j) => {
-        const outer = Array.isArray(poly && poly[0]) ? poly[0] : poly;
-        const coords = (outer || []).map((p) => `${p[0]},${p[1]},0`).join(" ");
-        placemarks += `
+  covs.forEach((c, idx) => {
+    const nm = covName(c, idx);
+    const { polys, lines } = normalizeGeomToPolysLines(c.geometry);
+
+    polys.forEach((outer, j) => {
+      const coords = (outer || []).map((p) => `${p[0]},${p[1]},0`).join(" ");
+      placemarks += `
 <Placemark>
   <name>${escapeXml(nm)} (poly ${j + 1})</name>
   <Polygon><outerBoundaryIs><LinearRing><coordinates>${coords}</coordinates></LinearRing></outerBoundaryIs></Polygon>
 </Placemark>`;
-      });
-    } else if (c.geometry && c.geometry.type === "MultiLineString") {
-      (c.geometry.coordinates || []).forEach((line, j) => {
-        const coords = (line || []).map((p) => `${p[0]},${p[1]},0`).join(" ");
-        placemarks += `
+    });
+
+    lines.forEach((line, j) => {
+      const coords = (line || []).map((p) => `${p[0]},${p[1]},0`).join(" ");
+      placemarks += `
 <Placemark>
   <name>${escapeXml(nm)} (path ${j + 1})</name>
   <LineString><coordinates>${coords}</coordinates></LineString>
 </Placemark>`;
-      });
-    }
+    });
   });
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -352,31 +378,30 @@ function covsToCSV(covs) {
 
   covs.forEach((c, idx) => {
     const dateStr = c.date ? new Date(c.date).toISOString() : "";
-    const note = String(c.note || c.label || covLabel(c, idx)).replace(
+    const note = String(c.note || c.label || covName(c, idx)).replace(
       /"/g,
       '""',
     );
 
-    if (c.geometry && c.geometry.type === "MultiPolygon") {
-      (c.geometry.coordinates || []).forEach((poly, fi) => {
-        const outer = Array.isArray(poly && poly[0]) ? poly[0] : poly;
-        (outer || []).forEach((p, vi) => {
-          rows.push(
-            [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${note}"`].join(
-              ",",
-            ),
-          );
-        });
+    const { polys, lines } = normalizeGeomToPolysLines(c.geometry);
+
+    polys.forEach((outer, fi) => {
+      (outer || []).forEach((p, vi) => {
+        rows.push(
+          [c._id, dateStr, "polygon", fi, vi, p[0], p[1], `"${note}"`].join(
+            ",",
+          ),
+        );
       });
-    } else if (c.geometry && c.geometry.type === "MultiLineString") {
-      (c.geometry.coordinates || []).forEach((line, fi) => {
-        (line || []).forEach((p, vi) => {
-          rows.push(
-            [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${note}"`].join(","),
-          );
-        });
+    });
+
+    lines.forEach((line, fi) => {
+      (line || []).forEach((p, vi) => {
+        rows.push(
+          [c._id, dateStr, "line", fi, vi, p[0], p[1], `"${note}"`].join(","),
+        );
       });
-    }
+    });
   });
 
   return rows.join("\n");
@@ -385,6 +410,8 @@ function covsToCSV(covs) {
 /* -------------------------- GET list -------------------------- */
 router.get("/:id/coverage", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     if (!isId(id)) return res.status(400).json({ error: "bad id" });
 
@@ -421,6 +448,8 @@ router.get("/:id/coverage", requireAuth, async (req, res) => {
 /* -------------------------- GET single -------------------------- */
 router.get("/:id/coverage/:covId", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     const covId = req.params.covId;
     if (!isId(id) || !isId(covId))
@@ -447,6 +476,8 @@ router.get("/:id/coverage/:covId", requireAuth, async (req, res) => {
 /* -------------------------- POST (JSON body) -------------------------- */
 router.post("/:id/coverage", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     if (!isId(id)) return res.status(400).json({ error: "bad id" });
 
@@ -471,12 +502,11 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
     ).lean();
     if (!t) return res.status(404).json({ error: "task missing" });
 
-    // ✅ write orgId in consistent best-form (ObjectId if valid)
     let rawOrg = "";
     if (isAdmin(req) && req.query && req.query.orgId)
       rawOrg = String(req.query.orgId || "").trim();
     if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
-    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg; // legacy tolerated
+    const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
 
     const actorUserId =
       OID(
@@ -484,23 +514,14 @@ router.post("/:id/coverage", requireAuth, async (req, res) => {
           (req.user._id || req.user.id || req.user.sub || req.user.userId),
       ) || undefined;
 
-    const geomType =
-      body.geometry.type === "Polygon"
-        ? "MultiPolygon"
-        : body.geometry.type === "LineString"
-          ? "MultiLineString"
-          : body.geometry.type;
-
-    const geomCoords =
-      body.geometry.type === "Polygon"
-        ? [body.geometry.coordinates]
-        : body.geometry.coordinates;
-
     const doc = await TaskCoverage.create({
       orgId: writeOrgId,
       taskId: OID(id),
       projectId: t.projectId || undefined,
-      geometry: { type: geomType, coordinates: geomCoords },
+      geometry: {
+        type: String(body.geometry.type),
+        coordinates: body.geometry.coordinates,
+      },
       date: body.date ? new Date(body.date) : undefined,
       source: "api",
       note: String(body.note || body.label || "").trim(),
@@ -526,6 +547,8 @@ router.post(
   uploadDisk.single("file"),
   async (req, res) => {
     try {
+      setNoStore(res);
+
       const id = req.params.id;
       if (!isId(id)) return res.status(400).json({ error: "bad id" });
 
@@ -546,7 +569,6 @@ router.post(
         "/files/" +
         path.relative(uploadsRoot, req.file.path).replace(/\\/g, "/");
 
-      // ✅ model expects fileRef (not sourceFile)
       const fileRef = {
         url: relUrl,
         name: req.file.originalname,
@@ -593,7 +615,7 @@ router.post(
       if (isAdmin(req) && req.query && req.query.orgId)
         rawOrg = String(req.query.orgId || "").trim();
       if (!rawOrg) rawOrg = String((req.user && req.user.orgId) || "").trim();
-      const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg; // legacy tolerated
+      const writeOrgId = isId(rawOrg) ? OID(rawOrg) : rawOrg;
 
       const actorUserId =
         OID(
@@ -654,6 +676,8 @@ router.post(
 /* -------------------------- DELETE -------------------------- */
 router.delete("/:id/coverage/:covId", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     const covId = req.params.covId;
     if (!isId(id) || !isId(covId))
@@ -682,6 +706,8 @@ router.delete("/:id/coverage/:covId", requireAuth, async (req, res) => {
 /* -------------------------- EXPORT: KMZ -------------------------- */
 router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     if (!isId(id)) return res.status(400).json({ error: "bad id" });
 
@@ -729,6 +755,8 @@ router.get("/:id/coverage/export.kmz", requireAuth, async (req, res) => {
 /* -------------------------- EXPORT: CSV -------------------------- */
 router.get("/:id/coverage/export.csv", requireAuth, async (req, res) => {
   try {
+    setNoStore(res);
+
     const id = req.params.id;
     if (!isId(id)) return res.status(400).json({ error: "bad id" });
 
