@@ -500,7 +500,12 @@ export async function saveAssetLog(log) {
 /**
  * Save a clocking batch (header + people) into offline_events outbox.
  *
- * batch: { orgId, projectId?, taskId?, groupId, clockType, note, createdAt, updatedAt, capturedByUserId? }
+ * batch: {
+ *   orgId, projectId?, taskId?, groupId, clockType, note,
+ *   createdAt, updatedAt,
+ *   capturedByUserId?,
+ *   location?: { lat, lng, acc? }  // ✅ NEW (optional)
+ * }
  * people: [{ userId, name, method, status, note, manualPhotoUri? }]
  */
 export async function saveClockBatch(batch, people) {
@@ -512,6 +517,19 @@ export async function saveClockBatch(batch, people) {
     if (p?.manualPhotoUri) fileUris.push(p.manualPhotoUri);
   }
 
+  // ✅ NEW: normalize optional location
+  const loc =
+    safeBatch?.location && typeof safeBatch.location === "object"
+      ? safeBatch.location
+      : null;
+
+  const nLat = loc?.lat ?? loc?.latitude ?? null;
+  const nLng = loc?.lng ?? loc?.longitude ?? null;
+  const nAcc = loc?.acc ?? loc?.accuracy ?? null;
+
+  const hasCoords =
+    Number.isFinite(Number(nLat)) && Number.isFinite(Number(nLng));
+
   const payload = {
     batch: {
       orgId: safeBatch.orgId ?? null,
@@ -522,6 +540,17 @@ export async function saveClockBatch(batch, people) {
       note: safeBatch.note ?? "",
       createdAt: safeBatch.createdAt ?? nowIso(),
       updatedAt: safeBatch.updatedAt ?? nowIso(),
+
+      // ✅ NEW: only include location if valid coords exist
+      ...(hasCoords
+        ? {
+            location: {
+              lat: Number(nLat),
+              lng: Number(nLng),
+              ...(Number.isFinite(Number(nAcc)) ? { acc: Number(nAcc) } : {}),
+            },
+          }
+        : {}),
     },
     people: safePeople.map((p) => ({
       userId: p?.userId ?? null,

@@ -276,8 +276,12 @@ function extractLatLng({ payload, offlineEventDoc, attachments }) {
 
   const nLat = Number(latRaw);
   const nLng = Number(lngRaw);
-  const hasCoords = Number.isFinite(nLat) && Number.isFinite(nLng);
+  const hasNumeric = Number.isFinite(nLat) && Number.isFinite(nLng);
 
+  // Treat (0,0) as "missing" (GPS not captured / default)
+  const isZeroZero = Math.abs(nLat) < 0.000001 && Math.abs(nLng) < 0.000001;
+
+  const hasCoords = hasNumeric && !isZeroZero;
   return { hasCoords, nLat, nLng };
 }
 

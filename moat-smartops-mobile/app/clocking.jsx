@@ -37,6 +37,7 @@ import {
   View,
 } from "react-native";
 
+import * as Location from "expo-location";
 import { saveClockBatch } from "../database";
 
 const THEME_COLOR = "#22a6b3";
@@ -385,6 +386,45 @@ function joinUrl(base, path) {
 async function getApiBaseUrl() {
   const v = await AsyncStorage.getItem(API_BASE_URL_KEY);
   return String(v || "").trim();
+}
+
+function asStringOrNull(v) {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
+function normClockType(v) {
+  return String(v ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+async function getDeviceLocationSafe() {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") return null;
+
+    const pos = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+
+    const lat = Number(pos?.coords?.latitude);
+    const lng = Number(pos?.coords?.longitude);
+    const acc = Number(pos?.coords?.accuracy);
+
+    // Treat 0,0 as invalid (common default when GPS not ready)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001) return null;
+
+    return {
+      lat,
+      lng,
+      acc: Number.isFinite(acc) ? acc : null,
+      capturedAt: new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /* -----------------------------
@@ -1059,29 +1099,38 @@ export default function ClockingScreen() {
 
     const timestamp = new Date().toISOString();
 
+    const deviceLocation = await getDeviceLocationSafe();
+
+    const safeClockType = normClockType(clockType);
+
     const batch = {
-      orgId: orgId || null,
-      projectId: projectId || null,
-      taskId: taskId || null,
-      groupId: groupId || null,
-      clockType,
+      orgId: asStringOrNull(orgId),
+      projectId: asStringOrNull(projectId),
+      taskId: asStringOrNull(taskId),
+      groupId: asStringOrNull(groupId),
+      clockType: safeClockType,
       // batch note applies to everyone EXCEPT manual people (manual overrides per-person)
-      note: batchNote || "",
+      note: String(batchNote || ""),
       createdAt: timestamp,
       updatedAt: timestamp,
-      syncStatus: "pending",
+      location: deviceLocation || null,
     };
 
-    const people = selectedPeople.map((p) => ({
-      userId: p.userId,
-      name: p.name,
-      method: p.method || "list",
-      status: p.status || "present",
-      // if manual: override note, else batch note is enough
-      note: String(p.method) === "manual" ? p.note || "" : batchNote || "",
-      // manual proof photo stored per-person
-      manualPhotoUri: p.manualPhotoUri || null,
-    }));
+    const people = selectedPeople
+      .map((p) => {
+        const isManual = String(p.method) === "manual";
+        return {
+          userId: asStringOrNull(p.userId),
+          name: String(p.name || ""),
+          method: String(p.method || "list"),
+          status: String(p.status || "present"),
+          // if manual: override note, else batch note is enough
+          note: isManual ? String(p.note || "") : String(batchNote || ""),
+          // manual proof photo stored per-person
+          manualPhotoUri: isManual ? p.manualPhotoUri || null : null,
+        };
+      })
+      .filter((p) => !!p.userId); // drop broken rows safely
 
     try {
       await saveClockBatch(batch, people);
