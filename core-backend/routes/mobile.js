@@ -18,8 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-03-03-01"; // bump so you can confirm deploy
-
+const ROUTER_VERSION = "mobile-router-v2026-03-03-02"; // ✅ bump
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
@@ -280,6 +279,63 @@ function extractLatLng({ payload, offlineEventDoc, attachments }) {
   const hasCoords = Number.isFinite(nLat) && Number.isFinite(nLng);
 
   return { hasCoords, nLat, nLng };
+}
+
+/**
+ * ✅ Extract coords for CLOCK BATCH payloads (your clocking payload nests under payload.batch)
+ * Supports:
+ *   payload.batch.location.{lat,lng,acc}
+ *   payload.batch.{lat,lng,acc}
+ *   payload.{lat,lng,acc}
+ */
+function extractLatLngClockBatch(payload) {
+  const p = payload || {};
+  const b = p.batch || {};
+  const loc = b.location || b.geo || b.coords || null;
+
+  const latRaw =
+    loc?.lat ??
+    loc?.latitude ??
+    b.lat ??
+    b.latitude ??
+    p.lat ??
+    p.latitude ??
+    p.location?.lat ??
+    p.geo?.lat ??
+    null;
+
+  const lngRaw =
+    loc?.lng ??
+    loc?.longitude ??
+    b.lng ??
+    b.longitude ??
+    p.lng ??
+    p.longitude ??
+    p.location?.lng ??
+    p.geo?.lng ??
+    null;
+
+  const accRaw =
+    loc?.acc ??
+    loc?.accuracy ??
+    b.acc ??
+    b.accuracy ??
+    p.acc ??
+    p.accuracy ??
+    null;
+
+  const nLat = Number(latRaw);
+  const nLng = Number(lngRaw);
+  const nAcc = Number(accRaw);
+
+  const hasCoords = Number.isFinite(nLat) && Number.isFinite(nLng);
+
+  return {
+    hasCoords,
+    nLat,
+    nLng,
+    nAcc: Number.isFinite(nAcc) ? nAcc : undefined,
+  };
 }
 
 /**
@@ -954,6 +1010,125 @@ router.post(
           }
         } catch (e4) {
           console.error("[user-document] failed to apply vault document", e4);
+        }
+      }
+
+      // ✅ APPLY CLOCKING BATCH (Clocking collection)  ✅✅ NEW
+      if (
+        eventType === "clock-batch-v2" ||
+        eventType === "clock-batch" ||
+        eventType === "clocking-batch"
+      ) {
+        try {
+          const Clocking = require("../models/Clocking");
+
+          const batch = payload?.batch || {};
+          const people = Array.isArray(payload?.people) ? payload.people : [];
+
+          // Clocking model uses orgId as STRING in your schema
+          const orgIdRaw = req.orgObjectId || req.user?.orgId || null;
+          const orgIdStr = orgIdRaw != null ? String(orgIdRaw).trim() : "";
+
+          const projectIdStr = String(
+            batch?.projectId || payload?.projectId || "",
+          ).trim();
+          const clockTypeRaw = String(
+            batch?.clockType || payload?.clockType || "present",
+          )
+            .trim()
+            .toLowerCase();
+
+          const batchNote = String(batch?.note || payload?.note || "").trim();
+
+          const at = (() => {
+            const raw =
+              batch?.createdAt ||
+              batch?.at ||
+              payload?.createdAt ||
+              createdAtClient ||
+              new Date().toISOString();
+            return parseDateSafe(raw, new Date());
+          })();
+
+          const pid = mongoose.isValidObjectId(projectIdStr)
+            ? new mongoose.Types.ObjectId(projectIdStr)
+            : undefined;
+
+          const { hasCoords, nLat, nLng, nAcc } =
+            extractLatLngClockBatch(payload);
+
+          let upserts = 0;
+          let created = 0;
+
+          for (const person of people) {
+            const uidStr = String(person?.userId || "").trim();
+            if (!mongoose.isValidObjectId(uidStr)) continue;
+
+            const userIdObj = new mongoose.Types.ObjectId(uidStr);
+            const personNote = String(person?.note || "").trim() || batchNote;
+
+            // ✅ Best-effort de-dupe WITHOUT schema changes:
+            // treat same person, same project, same type, same timestamp as identical.
+            const query = {
+              orgId: orgIdStr || undefined,
+              userId: userIdObj,
+              ...(pid ? { projectId: pid } : {}),
+              type: clockTypeRaw || "present",
+              at,
+            };
+
+            const setOnInsert = {
+              orgId: orgIdStr || undefined,
+              userId: userIdObj,
+              ...(pid ? { projectId: pid } : {}),
+              type: clockTypeRaw || "present",
+              at,
+              notes: personNote,
+              createdBy:
+                req.user?.sub ||
+                req.user?.email ||
+                String(req.user?._id || "system"),
+            };
+
+            if (hasCoords) {
+              setOnInsert.location = {
+                lat: nLat,
+                lng: nLng,
+                ...(nAcc != null ? { acc: nAcc } : {}),
+              };
+            }
+
+            const existing = await Clocking.findOne(query)
+              .select({ _id: 1 })
+              .lean();
+
+            if (existing?._id) {
+              // optional: you could update notes/location, but safest is leave as-is
+              upserts += 1;
+              continue;
+            }
+
+            await Clocking.create(setOnInsert);
+            created += 1;
+            upserts += 1;
+          }
+
+          appliedTo.clocking = true;
+          appliedTo.clockingCount = upserts;
+          appliedTo.clockingCreated = created;
+          appliedTo.clockType = clockTypeRaw;
+          appliedTo.projectId = pid ? String(pid) : null;
+          appliedTo.hasCoords = !!hasCoords;
+
+          console.log("[clock-batch] applied", {
+            upserts,
+            created,
+            clockType: clockTypeRaw,
+            projectId: pid ? String(pid) : null,
+            hasCoords: !!hasCoords,
+          });
+        } catch (eClock) {
+          console.error("[clock-batch] failed to apply", eClock);
         }
       }
 
