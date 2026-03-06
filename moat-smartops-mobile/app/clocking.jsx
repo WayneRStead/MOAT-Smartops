@@ -1,6 +1,4 @@
 // app/clocking.jsx
-// FULL DROP-IN REPLACEMENT
-//
 // What this version does (plain English):
 // ✅ Project/Task optional (dropdowns from cache)
 // ✅ Group required (dropdown from cache)
@@ -12,6 +10,8 @@
 // ✅ Scan Face calls backend identify (ONLINE ONLY)
 // ✅ Manual clocking is ONLY allowed AFTER a confirmed biometric "NO MATCH" (NOT just offline)
 // ✅ Manual requires: NEW NOTE + PHOTO for that person (overrides batch note for that person)
+// ✅ Captures device GPS (best effort) and stores on batch.location {lat,lng,acc,capturedAt}
+// ✅ Done button shows "Saving…" and is disabled while saving (prevents duplicate submissions)
 // ✅ Saves everything offline-first into SQLite offline_events via saveClockBatch(batch, people)
 //
 // IMPORTANT:
@@ -21,6 +21,7 @@
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
+import * as Location from "expo-location";
 import { useRouter } from "expo-router";
 import * as SQLite from "expo-sqlite";
 import { useEffect, useMemo, useState } from "react";
@@ -37,7 +38,6 @@ import {
   View,
 } from "react-native";
 
-import * as Location from "expo-location";
 import { saveClockBatch } from "../database";
 
 const THEME_COLOR = "#22a6b3";
@@ -280,7 +280,6 @@ function groupMatchesContext(group, projectId, taskId) {
   const pid = projectId ? String(projectId) : "";
   const tid = taskId ? String(taskId) : "";
 
-  // Most reliable: group has explicit arrays
   const projectIdsArr = Array.isArray(group.projectIds)
     ? group.projectIds
         .map((x) => String(x?._id || x?.id || x || ""))
@@ -293,7 +292,6 @@ function groupMatchesContext(group, projectId, taskId) {
         .filter(Boolean)
     : [];
 
-  // Also accept single fields
   const groupProject =
     group.projectId?._id ||
     group.projectId?.id ||
@@ -305,14 +303,56 @@ function groupMatchesContext(group, projectId, taskId) {
     group.taskId?._id || group.taskId?.id || group.taskId || group.task || "";
 
   const projectOk =
-    !pid ||
-    String(groupProject) === pid ||
-    projectIdsArr.includes(pid) ||
-    false;
-
+    !pid || String(groupProject) === pid || projectIdsArr.includes(pid);
   const taskOk = !tid || String(groupTask) === tid || taskIdsArr.includes(tid);
 
   return projectOk && taskOk;
+}
+
+/* -----------------------------
+   String safety + clock type normalize
+------------------------------*/
+function asStringOrNull(v) {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
+function normClockType(v) {
+  return String(v ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+/* -----------------------------
+   GPS (best effort) - returns null if unavailable/invalid
+------------------------------*/
+async function getDeviceLocationSafe() {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") return null;
+
+    const pos = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+
+    const lat = Number(pos?.coords?.latitude);
+    const lng = Number(pos?.coords?.longitude);
+    const acc = Number(pos?.coords?.accuracy);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    // Treat 0,0 as invalid (common default when GPS not ready)
+    if (Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001) return null;
+
+    return {
+      lat,
+      lng,
+      acc: Number.isFinite(acc) ? acc : null,
+      capturedAt: new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /* -----------------------------
@@ -346,6 +386,7 @@ async function computeCurrentlyInUserIds({ orgId = null } = {}) {
     for (const r of rows || []) {
       const { batch, people } = extractClockBatchFromRow(r);
 
+      // NOTE: many older batches have orgId null; we only filter if batch.orgId is present
       if (orgId && batch?.orgId && String(batch.orgId) !== String(orgId))
         continue;
 
@@ -386,45 +427,6 @@ function joinUrl(base, path) {
 async function getApiBaseUrl() {
   const v = await AsyncStorage.getItem(API_BASE_URL_KEY);
   return String(v || "").trim();
-}
-
-function asStringOrNull(v) {
-  const s = String(v ?? "").trim();
-  return s ? s : null;
-}
-
-function normClockType(v) {
-  return String(v ?? "")
-    .trim()
-    .toLowerCase();
-}
-
-async function getDeviceLocationSafe() {
-  try {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== "granted") return null;
-
-    const pos = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Balanced,
-    });
-
-    const lat = Number(pos?.coords?.latitude);
-    const lng = Number(pos?.coords?.longitude);
-    const acc = Number(pos?.coords?.accuracy);
-
-    // Treat 0,0 as invalid (common default when GPS not ready)
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    if (Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001) return null;
-
-    return {
-      lat,
-      lng,
-      acc: Number.isFinite(acc) ? acc : null,
-      capturedAt: new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
 }
 
 /* -----------------------------
@@ -649,6 +651,9 @@ export default function ClockingScreen() {
   const [personSearch, setPersonSearch] = useState("");
   const [selectedPeople, setSelectedPeople] = useState([]); // [{ userId, name, method, status, note, manualPhotoUri }]
 
+  // ✅ prevent duplicate saves
+  const [isSavingBatch, setIsSavingBatch] = useState(false);
+
   // ✅ Manual gating (manual only after a REAL biometric "no match", not just offline)
   const [biometricAttempted, setBiometricAttempted] = useState(false);
   const [biometricFailedNoMatch, setBiometricFailedNoMatch] = useState(false);
@@ -743,7 +748,6 @@ export default function ClockingScreen() {
     });
   }, [tasks, projectId]);
 
-  // ✅ IMPORTANT FIX:
   // If project/task selected, we filter groups by:
   //   1) group.projectIds / group.taskIds (if present)
   //   2) task.assignedGroupIds (if task selected)
@@ -762,7 +766,6 @@ export default function ClockingScreen() {
       return String(g.orgId) === String(orgId);
     });
 
-    // if no project/task selected -> show all base groups
     if (!projectId && !taskId) return base;
 
     const pid = String(projectId || "");
@@ -771,18 +774,14 @@ export default function ClockingScreen() {
     return base.filter((g) => {
       const gid = String(pickId(g));
 
-      // 1) direct group linkage fields (if you ever add them)
       const directOk = groupMatchesContext(g, pid || null, tid || null);
       if (directOk) return true;
 
-      // 2) if task selected and task has assignedGroupIds, allow those groups
       if (tid && taskAssignedGroupIds.length) {
         if (taskAssignedGroupIds.includes(gid)) return true;
       }
 
-      // 3) otherwise do not block
-      // (Key: groups currently may not carry projectIds/taskIds)
-      return true;
+      return true; // do not block otherwise
     });
   }, [groups, orgId, projectId, taskId, taskAssignedGroupIds]);
 
@@ -881,10 +880,8 @@ export default function ClockingScreen() {
 
   const closePeopleModal = () => setScanModalVisible(false);
 
-  // ✅ Scan Face:
-  // - Tries ONLINE identify
+  // Scan Face (ONLINE):
   // - Manual is unlocked ONLY if server confirms "no match"
-  // - Offline / errors do NOT unlock manual
   const handleScanFace = async () => {
     try {
       setBiometricAttempted(true);
@@ -895,14 +892,14 @@ export default function ClockingScreen() {
         return;
       }
 
-      // 1) Camera permission
+      // Camera permission
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== "granted") {
         Alert.alert("Camera permission", "Camera access is required.");
         return;
       }
 
-      // 2) Capture face photo
+      // Capture face photo
       const result = await ImagePicker.launchCameraAsync({
         quality: 0.7,
         allowsEditing: false,
@@ -916,7 +913,7 @@ export default function ClockingScreen() {
         return;
       }
 
-      // 3) Resolve API base URL
+      // Resolve API base URL
       const BASE_URL = await getApiBaseUrl();
       if (!BASE_URL) {
         Alert.alert(
@@ -926,7 +923,7 @@ export default function ClockingScreen() {
         return;
       }
 
-      // 4) Call backend identify (ONLINE)
+      // Call backend identify (ONLINE)
       const token = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
       const oid = orgId || (await AsyncStorage.getItem(ORG_KEY)) || "";
 
@@ -946,16 +943,12 @@ export default function ClockingScreen() {
 
       const res = await fetch(url, {
         method: "POST",
-        headers: {
-          Authorization: token ? `Bearer ${token}` : "",
-          // DO NOT set Content-Type manually for FormData in RN fetch
-        },
+        headers: { Authorization: token ? `Bearer ${token}` : "" },
         body: form,
       });
 
       const data = await res.json().catch(() => null);
 
-      // Non-OK = error/offline/etc => manual stays locked
       if (!res.ok) {
         const msg =
           data?.error || data?.message || `Identify failed (${res.status})`;
@@ -969,7 +962,6 @@ export default function ClockingScreen() {
       const matchedUserId = data?.matchedUserId || "";
       const score = data?.score;
 
-      // Interpret confirmed "no match"
       const explicitNoMatch =
         data?.match === false ||
         data?.matched === false ||
@@ -982,7 +974,7 @@ export default function ClockingScreen() {
           setBiometricFailedNoMatch(true);
           Alert.alert(
             "No match",
-            "Face scan completed but no match was found. Manual is now enabled for this clocking.",
+            "Face scan completed but no match was found. Manual is now enabled.",
           );
         } else {
           Alert.alert(
@@ -993,7 +985,6 @@ export default function ClockingScreen() {
         return;
       }
 
-      // 5) Find user in this group's cached list
       const matchUser =
         groupMemberUsers.find(
           (u) => String(pickId(u)) === String(matchedUserId),
@@ -1007,20 +998,16 @@ export default function ClockingScreen() {
         return;
       }
 
-      // 6) Auto-select them (method: face)
       if (!isSelected(matchedUserId)) {
         togglePerson(matchUser, "face");
       }
 
       Alert.alert(
         "Matched",
-        `${matchUser?.name || matchUser?.email || matchedUserId}${
-          score != null ? `\nScore: ${score}` : ""
-        }`,
+        `${matchUser?.name || matchUser?.email || matchedUserId}${score != null ? `\nScore: ${score}` : ""}`,
       );
     } catch (e) {
       console.error("Scan face failed", e);
-      // Errors do NOT unlock manual
       Alert.alert(
         "Cannot scan",
         "Biometric scan could not run (offline/network error). Manual is only allowed after a confirmed 'no match'.",
@@ -1041,7 +1028,6 @@ export default function ClockingScreen() {
     const uid = String(pickId(userObj));
     if (!uid) return;
 
-    // ensure person is selected before manual proof is applied
     if (!isSelected(uid)) {
       togglePerson(userObj, "manual");
     }
@@ -1057,7 +1043,6 @@ export default function ClockingScreen() {
         return {
           ...p,
           method: "manual",
-          // override note for this person (replaces batch note for this person)
           note,
           manualPhotoUri: photoUri,
         };
@@ -1071,7 +1056,11 @@ export default function ClockingScreen() {
     );
   };
 
+  // ✅ Correct, duplicate-safe save
   const handleSaveBatch = async () => {
+    if (isSavingBatch) return;
+
+    // validate BEFORE locking
     if (!groupId || !clockType) {
       Alert.alert("Missing info", "Please select group and clocking type.");
       return;
@@ -1081,7 +1070,6 @@ export default function ClockingScreen() {
       return;
     }
 
-    // enforce manual rule: anyone marked manual MUST have note + photo
     const missingManual = selectedPeople.find(
       (p) =>
         String(p.method) === "manual" &&
@@ -1090,49 +1078,44 @@ export default function ClockingScreen() {
     if (missingManual) {
       Alert.alert(
         "Manual requires note + photo",
-        `Manual clocking is missing a note/photo for: ${
-          missingManual.name || missingManual.userId
-        }`,
+        `Manual clocking is missing a note/photo for: ${missingManual.name || missingManual.userId}`,
       );
       return;
     }
 
-    const timestamp = new Date().toISOString();
-
-    const deviceLocation = await getDeviceLocationSafe();
-
-    const safeClockType = normClockType(clockType);
-
-    const batch = {
-      orgId: asStringOrNull(orgId),
-      projectId: asStringOrNull(projectId),
-      taskId: asStringOrNull(taskId),
-      groupId: asStringOrNull(groupId),
-      clockType: safeClockType,
-      // batch note applies to everyone EXCEPT manual people (manual overrides per-person)
-      note: String(batchNote || ""),
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      location: deviceLocation || null,
-    };
-
-    const people = selectedPeople
-      .map((p) => {
-        const isManual = String(p.method) === "manual";
-        return {
-          userId: asStringOrNull(p.userId),
-          name: String(p.name || ""),
-          method: String(p.method || "list"),
-          status: String(p.status || "present"),
-          // if manual: override note, else batch note is enough
-          note: isManual ? String(p.note || "") : String(batchNote || ""),
-          // manual proof photo stored per-person
-          manualPhotoUri: isManual ? p.manualPhotoUri || null : null,
-        };
-      })
-      .filter((p) => !!p.userId); // drop broken rows safely
+    setIsSavingBatch(true);
 
     try {
+      const timestamp = new Date().toISOString();
+      const deviceLocation = await getDeviceLocationSafe();
+      const safeClockType = normClockType(clockType);
+
+      const batch = {
+        orgId: asStringOrNull(orgId),
+        projectId: asStringOrNull(projectId),
+        taskId: asStringOrNull(taskId),
+        groupId: asStringOrNull(groupId),
+        clockType: safeClockType,
+        note: String(batchNote || ""),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        location: deviceLocation || null,
+      };
+
+      const people = selectedPeople
+        .map((p) => {
+          const isManual = String(p.method) === "manual";
+          return {
+            userId: asStringOrNull(p.userId),
+            name: String(p.name || ""),
+            method: String(p.method || "list"),
+            status: String(p.status || "present"),
+            note: isManual ? String(p.note || "") : String(batchNote || ""),
+            manualPhotoUri: isManual ? p.manualPhotoUri || null : null,
+          };
+        })
+        .filter((p) => !!p.userId);
+
       await saveClockBatch(batch, people);
       Alert.alert("Saved", "Clocking batch captured (offline-first).");
 
@@ -1156,6 +1139,8 @@ export default function ClockingScreen() {
         "Save failed",
         e?.message || "Could not save this clocking batch.",
       );
+    } finally {
+      setIsSavingBatch(false);
     }
   };
 
@@ -1199,13 +1184,14 @@ export default function ClockingScreen() {
             label="Project (optional)"
             valueText={selectedProject ? pickName(selectedProject) : ""}
             onPress={() => setProjectPickerOpen(true)}
+            disabled={isSavingBatch}
           />
 
           <SelectField
             label="Task (optional)"
             valueText={selectedTask ? pickName(selectedTask) : ""}
             onPress={() => setTaskPickerOpen(true)}
-            disabled={!projectId && tasks.length === 0}
+            disabled={isSavingBatch || (!projectId && tasks.length === 0)}
           />
 
           <SelectField
@@ -1214,11 +1200,13 @@ export default function ClockingScreen() {
             }
             valueText={selectedGroup ? pickName(selectedGroup) : ""}
             onPress={() => setGroupPickerOpen(true)}
+            disabled={isSavingBatch}
           />
 
           <TouchableOpacity
-            style={styles.selectInput}
+            style={[styles.selectInput, isSavingBatch && { opacity: 0.5 }]}
             onPress={() => setClockTypePickerVisible(true)}
+            disabled={isSavingBatch}
           >
             <Text
               style={
@@ -1247,11 +1235,13 @@ export default function ClockingScreen() {
             value={batchNote}
             onChangeText={setBatchNote}
             multiline
+            editable={!isSavingBatch}
           />
 
           <TouchableOpacity
-            style={styles.primaryButton}
+            style={[styles.primaryButton, isSavingBatch && { opacity: 0.6 }]}
             onPress={openPeopleModal}
+            disabled={isSavingBatch}
           >
             <Image
               source={require("../assets/scan.png")}
@@ -1262,8 +1252,13 @@ export default function ClockingScreen() {
 
           {isManager ? (
             <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 10 }]}
+              style={[
+                styles.secondaryButton,
+                { marginTop: 10 },
+                isSavingBatch && { opacity: 0.6 },
+              ]}
               onPress={goToBiometricOnboarding}
+              disabled={isSavingBatch}
             >
               <Text style={styles.secondaryButtonText}>Onboard biometrics</Text>
             </TouchableOpacity>
@@ -1285,6 +1280,7 @@ export default function ClockingScreen() {
                 key={p.userId}
                 style={styles.personRow}
                 onPress={() => cycleStatus(p.userId)}
+                disabled={isSavingBatch}
               >
                 <View style={styles.personInfo}>
                   <Text style={styles.personName}>{p.name}</Text>
@@ -1316,13 +1312,15 @@ export default function ClockingScreen() {
           <TouchableOpacity
             style={[
               styles.primaryButton,
-              selectedPeople.length === 0 && { opacity: 0.4 },
+              (selectedPeople.length === 0 || isSavingBatch) && {
+                opacity: 0.5,
+              },
             ]}
             onPress={handleSaveBatch}
-            disabled={selectedPeople.length === 0}
+            disabled={selectedPeople.length === 0 || isSavingBatch}
           >
             <Text style={[styles.primaryButtonText, { marginLeft: 0 }]}>
-              Done
+              {isSavingBatch ? "Saving…" : "Done"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -1338,13 +1336,11 @@ export default function ClockingScreen() {
           const id = pickId(p);
           setProjectId(id);
 
-          // clear task if it no longer matches
           if (taskId) {
             const still = tasksForProject.find((t) => pickId(t) === taskId);
             if (!still) setTaskId("");
           }
 
-          // clear group + selected people when context changes
           setGroupId("");
           setSelectedPeople([]);
           setPersonSearch("");
@@ -1365,7 +1361,6 @@ export default function ClockingScreen() {
         onSelect={(t) => {
           setTaskId(pickId(t));
 
-          // clear group + selected people when context changes
           setGroupId("");
           setSelectedPeople([]);
           setPersonSearch("");
@@ -1421,6 +1416,7 @@ export default function ClockingScreen() {
                   setBiometricFailedNoMatch(false);
                   setClockTypePickerVisible(false);
                 }}
+                disabled={isSavingBatch}
               >
                 <Text
                   style={[
@@ -1433,8 +1429,13 @@ export default function ClockingScreen() {
               </TouchableOpacity>
             ))}
             <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 8 }]}
+              style={[
+                styles.secondaryButton,
+                { marginTop: 8 },
+                isSavingBatch && { opacity: 0.6 },
+              ]}
               onPress={() => setClockTypePickerVisible(false)}
+              disabled={isSavingBatch}
             >
               <Text style={styles.secondaryButtonText}>Cancel</Text>
             </TouchableOpacity>
@@ -1462,8 +1463,13 @@ export default function ClockingScreen() {
 
             <View style={styles.scanButtonsRow}>
               <TouchableOpacity
-                style={[styles.primaryButton, styles.scanButton]}
+                style={[
+                  styles.primaryButton,
+                  styles.scanButton,
+                  isSavingBatch && { opacity: 0.6 },
+                ]}
                 onPress={handleScanFace}
+                disabled={isSavingBatch}
               >
                 <Image
                   source={require("../assets/scan.png")}
@@ -1487,6 +1493,7 @@ export default function ClockingScreen() {
               placeholderTextColor="#aaa"
               value={personSearch}
               onChangeText={setPersonSearch}
+              editable={!isSavingBatch}
             />
 
             {!groupId ? (
@@ -1512,8 +1519,10 @@ export default function ClockingScreen() {
                         style={[
                           styles.userMain,
                           selected && styles.userMainSelected,
+                          isSavingBatch && { opacity: 0.7 },
                         ]}
                         onPress={() => togglePerson(item, "list")}
+                        disabled={isSavingBatch}
                       >
                         <View style={{ flex: 1 }}>
                           <Text style={styles.userRowName}>
@@ -1536,8 +1545,12 @@ export default function ClockingScreen() {
 
                       {biometricFailedNoMatch ? (
                         <TouchableOpacity
-                          style={styles.manualMiniBtn}
+                          style={[
+                            styles.manualMiniBtn,
+                            isSavingBatch && { opacity: 0.6 },
+                          ]}
                           onPress={() => startManualForUser(item)}
+                          disabled={isSavingBatch}
                         >
                           <Text style={styles.manualMiniText}>Manual</Text>
                         </TouchableOpacity>
@@ -1550,8 +1563,13 @@ export default function ClockingScreen() {
 
             <View style={styles.scanFooterButtons}>
               <TouchableOpacity
-                style={[styles.secondaryButton, styles.scanFooterButton]}
+                style={[
+                  styles.secondaryButton,
+                  styles.scanFooterButton,
+                  isSavingBatch && { opacity: 0.6 },
+                ]}
                 onPress={closePeopleModal}
+                disabled={isSavingBatch}
               >
                 <Text style={styles.secondaryButtonText}>Close</Text>
               </TouchableOpacity>
@@ -1560,13 +1578,15 @@ export default function ClockingScreen() {
                 style={[
                   styles.primaryButton,
                   styles.scanFooterButton,
-                  selectedPeople.length === 0 && { opacity: 0.5 },
+                  (selectedPeople.length === 0 || isSavingBatch) && {
+                    opacity: 0.5,
+                  },
                 ]}
                 onPress={closePeopleModal}
-                disabled={selectedPeople.length === 0}
+                disabled={selectedPeople.length === 0 || isSavingBatch}
               >
                 <Text style={[styles.primaryButtonText, { marginLeft: 0 }]}>
-                  Done
+                  {isSavingBatch ? "Saving…" : "Done"}
                 </Text>
               </TouchableOpacity>
             </View>

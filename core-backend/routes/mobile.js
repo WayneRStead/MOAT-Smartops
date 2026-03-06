@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-03-03-02"; // ✅ bump
+const ROUTER_VERSION = "mobile-router-v2026-03-06-vehicle-trip-01";
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
@@ -212,6 +212,104 @@ function parseDateSafe(v, fallback = new Date()) {
   const d = new Date(v);
   // eslint-disable-next-line no-restricted-globals
   return isNaN(+d) ? fallback : d;
+}
+
+function normReg(v) {
+  return String(v || "")
+    .trim()
+    .toUpperCase();
+}
+
+function toFiniteNumberOrNull(v) {
+  if (v === "" || v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseDateTimeLoose(v, fallback = new Date()) {
+  if (!v) return fallback;
+
+  if (
+    typeof v === "string" &&
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(v.trim())
+  ) {
+    const d = new Date(v.replace(" ", "T") + ":00");
+    // eslint-disable-next-line no-restricted-globals
+    return isNaN(+d) ? fallback : d;
+  }
+
+  const d = new Date(v);
+  // eslint-disable-next-line no-restricted-globals
+  return isNaN(+d) ? fallback : d;
+}
+
+function mapUsageToPurpose(v) {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+  return s === "private" ? "Private" : "Business";
+}
+
+function toGeoFromLocation(loc) {
+  if (!loc || typeof loc !== "object") return undefined;
+
+  const lat = toFiniteNumberOrNull(loc.lat);
+  const lng = toFiniteNumberOrNull(loc.lng);
+  const acc = toFiniteNumberOrNull(loc.acc);
+
+  if (lat == null || lng == null) return undefined;
+
+  return {
+    lat,
+    lng,
+    ...(acc != null ? { acc } : {}),
+  };
+}
+
+async function ensureVehicleFromPayload({ orgId, payload }) {
+  const Vehicle = require("../models/Vehicle");
+
+  const reg = normReg(payload?.regNumber || payload?.vehicleMeta?.regNumber);
+  if (!reg) return null;
+
+  let vehicle = await Vehicle.findOne({ orgId, reg });
+  if (vehicle) return vehicle;
+
+  const vm = payload?.vehicleMeta || {};
+  const yearNum = toFiniteNumberOrNull(vm?.year);
+
+  vehicle = await Vehicle.create({
+    orgId,
+    reg,
+    vin: vm?.vin || null,
+    vehicleType: vm?.vehicleType || "",
+    year: yearNum != null ? yearNum : undefined,
+    make: vm?.make || payload?.vehicleLabel || "",
+    model: vm?.model || "",
+    status: "active",
+  });
+
+  return vehicle;
+}
+
+function buildVehicleOfflineAttachment(uploaded, noteText = "") {
+  const fid = String(uploaded?.fileId || "").trim();
+  if (!mongoose.isValidObjectId(fid)) return null;
+
+  const k = String(uploaded?.downloadKey || "").trim();
+  const url = k
+    ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
+    : `/api/mobile/offline-files/${fid}`;
+
+  return {
+    fileId: fid,
+    filename: uploaded?.filename || "offline_upload",
+    url,
+    mime: uploaded?.contentType || "",
+    size: typeof uploaded?.size === "number" ? uploaded.size : undefined,
+    note: noteText || "",
+    uploadedAt: new Date(),
+  };
 }
 
 /**
@@ -1133,6 +1231,245 @@ router.post(
           });
         } catch (eClock) {
           console.error("[clock-batch] failed to apply", eClock);
+        }
+      }
+
+      // ✅ APPLY VEHICLE TRIPS
+      if (eventType === "vehicle-trip") {
+        try {
+          const VehicleTrip = require("../models/VehicleTrip");
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const payloadKind = String(payload?.kind || "")
+            .trim()
+            .toLowerCase();
+
+          const vehicle = await ensureVehicleFromPayload({
+            orgId: orgId2,
+            payload,
+          });
+
+          if (!vehicle?._id) {
+            console.warn("[vehicle-trip] vehicle not found / not created", {
+              regNumber: payload?.regNumber,
+            });
+          } else {
+            const uploaded = Array.isArray(doc?.uploadedFiles)
+              ? doc.uploadedFiles
+              : [];
+
+            const firstAttachment = uploaded.length
+              ? buildVehicleOfflineAttachment(uploaded[0], "Odometer photo")
+              : null;
+
+            const projectId = mongoose.isValidObjectId(
+              String(payload?.projectId || ""),
+            )
+              ? new mongoose.Types.ObjectId(String(payload.projectId))
+              : undefined;
+
+            const taskId = mongoose.isValidObjectId(
+              String(payload?.taskId || ""),
+            )
+              ? new mongoose.Types.ObjectId(String(payload.taskId))
+              : undefined;
+
+            const driverUserId =
+              req.user?._id && mongoose.isValidObjectId(String(req.user._id))
+                ? new mongoose.Types.ObjectId(String(req.user._id))
+                : undefined;
+
+            const startGeo = toGeoFromLocation(payload?.locationStart);
+            const endGeo = toGeoFromLocation(payload?.locationEnd);
+
+            const odoStart = toFiniteNumberOrNull(payload?.odometerStart);
+            const odoEnd = toFiniteNumberOrNull(payload?.odometerEnd);
+
+            if (!driverUserId) {
+              console.warn("[vehicle-trip] missing req.user._id for driver", {
+                offlineEventId: String(doc?._id || ""),
+              });
+            } else if (payloadKind === "trip-start") {
+              let existingOpen = await VehicleTrip.findOne({
+                orgId: orgId2,
+                vehicleId: vehicle._id,
+                status: "open",
+                isDeleted: { $ne: true },
+              }).sort({ startedAt: -1, createdAt: -1 });
+
+              if (existingOpen?._id) {
+                let changed = false;
+
+                if (!existingOpen.startPhoto && firstAttachment) {
+                  existingOpen.startPhoto = firstAttachment;
+                  changed = true;
+                }
+
+                if (!existingOpen.startGeo && startGeo) {
+                  existingOpen.startGeo = startGeo;
+                  changed = true;
+                }
+
+                if (projectId && !existingOpen.projectId) {
+                  existingOpen.projectId = projectId;
+                  changed = true;
+                }
+
+                if (taskId && !existingOpen.taskId) {
+                  existingOpen.taskId = taskId;
+                  changed = true;
+                }
+
+                if (changed) {
+                  existingOpen.updatedBy =
+                    req.user?.email || req.user?.name || "mobile-offline";
+                  await existingOpen.save();
+                }
+
+                appliedTo.vehicleTripId = String(existingOpen._id);
+                appliedTo.vehicleTripStatus = "already-open";
+              } else {
+                if (odoStart == null) {
+                  console.warn(
+                    "[vehicle-trip] trip-start missing odometerStart",
+                    {
+                      offlineEventId: String(doc?._id || ""),
+                    },
+                  );
+                } else {
+                  const trip = await VehicleTrip.create({
+                    orgId: orgId2,
+                    vehicleId: vehicle._id,
+                    driverUserId,
+                    status: "open",
+                    startedAt: parseDateTimeLoose(
+                      payload?.startedAt ||
+                        payload?.createdAt ||
+                        createdAtClient,
+                      new Date(),
+                    ),
+                    odoStart,
+                    projectId,
+                    taskId,
+                    purpose: mapUsageToPurpose(payload?.usage),
+                    startGeo,
+                    ...(firstAttachment ? { startPhoto: firstAttachment } : {}),
+                    notes: String(payload?.notes || "").trim(),
+                    createdBy:
+                      req.user?.email || req.user?.name || "mobile-offline",
+                    updatedBy:
+                      req.user?.email || req.user?.name || "mobile-offline",
+                  });
+
+                  appliedTo.vehicleTripId = String(trip._id);
+                  appliedTo.vehicleTripStatus = "created-open";
+                }
+              }
+            } else if (payloadKind === "trip-end") {
+              let trip = await VehicleTrip.findOne({
+                orgId: orgId2,
+                vehicleId: vehicle._id,
+                status: "open",
+                isDeleted: { $ne: true },
+              }).sort({ startedAt: -1, createdAt: -1 });
+
+              if (!trip) {
+                if (odoStart == null) {
+                  console.warn(
+                    "[vehicle-trip] trip-end cannot create closed trip without odometerStart",
+                    {
+                      offlineEventId: String(doc?._id || ""),
+                    },
+                  );
+                } else {
+                  trip = new VehicleTrip({
+                    orgId: orgId2,
+                    vehicleId: vehicle._id,
+                    driverUserId,
+                    status: "closed",
+                    startedAt: parseDateTimeLoose(
+                      payload?.startedAt ||
+                        payload?.createdAt ||
+                        createdAtClient,
+                      new Date(),
+                    ),
+                    endedAt: parseDateTimeLoose(
+                      payload?.endedAt ||
+                        payload?.updatedAt ||
+                        payload?.createdAt ||
+                        createdAtClient,
+                      new Date(),
+                    ),
+                    odoStart,
+                    ...(odoEnd != null ? { odoEnd } : {}),
+                    ...(projectId ? { projectId } : {}),
+                    ...(taskId ? { taskId } : {}),
+                    purpose: mapUsageToPurpose(payload?.usage),
+                    ...(startGeo ? { startGeo } : {}),
+                    ...(endGeo ? { endGeo } : {}),
+                    ...(firstAttachment ? { endPhoto: firstAttachment } : {}),
+                    notes: String(payload?.notes || "").trim(),
+                    createdBy:
+                      req.user?.email || req.user?.name || "mobile-offline",
+                    updatedBy:
+                      req.user?.email || req.user?.name || "mobile-offline",
+                  });
+
+                  if (trip.odoStart != null && trip.odoEnd != null) {
+                    trip.distance = Math.max(
+                      0,
+                      Number(trip.odoEnd) - Number(trip.odoStart),
+                    );
+                  }
+
+                  await trip.save();
+
+                  appliedTo.vehicleTripId = String(trip._id);
+                  appliedTo.vehicleTripStatus = "created-closed-from-end";
+                }
+              } else {
+                if (projectId) trip.projectId = projectId;
+                if (taskId) trip.taskId = taskId;
+                if (endGeo) trip.endGeo = endGeo;
+                if (firstAttachment) trip.endPhoto = firstAttachment;
+                if (odoEnd != null) trip.odoEnd = odoEnd;
+
+                trip.endedAt = parseDateTimeLoose(
+                  payload?.endedAt ||
+                    payload?.updatedAt ||
+                    payload?.createdAt ||
+                    createdAtClient,
+                  new Date(),
+                );
+                trip.status = "closed";
+                trip.purpose = mapUsageToPurpose(payload?.usage);
+                trip.updatedBy =
+                  req.user?.email || req.user?.name || "mobile-offline";
+
+                if (trip.odoStart != null && trip.odoEnd != null) {
+                  trip.distance = Math.max(
+                    0,
+                    Number(trip.odoEnd) - Number(trip.odoStart),
+                  );
+                }
+
+                await trip.save();
+
+                appliedTo.vehicleTripId = String(trip._id);
+                appliedTo.vehicleTripStatus = "closed-existing-open";
+              }
+            } else {
+              console.warn("[vehicle-trip] unhandled payload.kind", {
+                kind: payload?.kind,
+                offlineEventId: String(doc?._id || ""),
+              });
+            }
+
+            appliedTo.vehicleId = String(vehicle._id);
+            appliedTo.reg = String(vehicle.reg || "");
+          }
+        } catch (eTrip) {
+          console.error("[vehicle-trip] failed to apply", eTrip);
         }
       }
 
