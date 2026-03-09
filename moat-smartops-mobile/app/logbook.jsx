@@ -523,30 +523,36 @@ function sortByLabel(a, b) {
    Backend fetch: Types + Reminders
 ------------------------------*/
 async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
-  // 1) try cached definitions first
+  // 1) First use cached offline definitions
   try {
     const raw = await AsyncStorage.getItem("@moat:cache:definitions");
-    const defs = raw ? JSON.parse(raw) : {};
-    const arr = Array.isArray(defs?.vehicleEntryTypes)
-      ? defs.vehicleEntryTypes
-      : [];
+    const defs = raw ? JSON.parse(raw) : null;
 
-    const cachedTypes = arr
-      .map((x) => {
-        if (!x) return null;
-        if (typeof x === "string") return { id: x, label: x };
-        const id = String(x.id || x._id || x.key || x.code || x.value || "");
-        const label = String(x.label || x.name || x.title || id);
-        if (!label) return null;
-        return { id: id || label, label };
-      })
-      .filter(Boolean)
-      .sort(sortByLabel);
+    const arr =
+      defs?.vehicleEntryTypes ||
+      defs?.types ||
+      defs?.logTypes ||
+      defs?.purchaseTypes ||
+      [];
 
-    if (cachedTypes.length) return cachedTypes;
+    if (Array.isArray(arr) && arr.length) {
+      const types = arr
+        .map((x) => {
+          if (!x) return null;
+          if (typeof x === "string") return { id: x, label: x };
+          const id = String(x.id || x._id || x.key || x.code || x.value || "");
+          const label = String(x.label || x.name || x.title || id);
+          if (!label) return null;
+          return { id: id || label, label };
+        })
+        .filter(Boolean)
+        .sort(sortByLabel);
+
+      if (types.length) return types;
+    }
   } catch {}
 
-  // 2) fallback to explicit endpoints if you add them later
+  // 2) Fallback to backend endpoints
   const candidates = [
     "/api/mobile/vehicle-entry-types",
     "/api/mobile/vehicles/entry-types",
@@ -806,6 +812,36 @@ export default function VehicleLogScreen() {
       setVehiclesList(vehicleItems);
     })();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+
+      (async () => {
+        setTypesLoading(true);
+        try {
+          const vs = await loadVendors();
+          const vehicleItems = await refreshVehiclesList();
+          const types = await fetchVehicleEntryTypesSafe({
+            baseUrl: apiBaseUrl,
+            token,
+          });
+
+          if (!alive) return;
+
+          setVendors(vs.sort(sortByLabel));
+          setVehiclesList(vehicleItems);
+          setEntryTypes(Array.isArray(types) ? types : []);
+        } finally {
+          if (alive) setTypesLoading(false);
+        }
+      })();
+
+      return () => {
+        alive = false;
+      };
+    }, [apiBaseUrl, token]),
+  );
 
   // Fetch types from backend (if base URL exists)
   useEffect(() => {

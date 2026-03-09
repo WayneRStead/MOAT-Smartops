@@ -771,19 +771,19 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const projects = Project?.find
       ? await Project.find({ orgId, isDeleted: { $ne: true } })
-          .select({ _id: 1, name: 1 })
+          .select({ _id: 1, name: 1, status: 1 })
           .lean()
       : [];
 
     const tasks = Task?.find
       ? await Task.find({ orgId, isDeleted: { $ne: true } })
-          .select({ _id: 1, title: 1, status: 1 })
+          .select({ _id: 1, title: 1, status: 1, projectId: 1 })
           .lean()
       : [];
 
     const milestones = Milestone?.find
       ? await Milestone.find({ orgId, isDeleted: { $ne: true } })
-          .select({ _id: 1, name: 1 })
+          .select({ _id: 1, name: 1, taskId: 1, status: 1 })
           .lean()
       : [];
 
@@ -847,11 +847,11 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const definitions = {
       vehicleEntryTypes: [
+        { id: "fuel", label: "Fuel" },
         { id: "service", label: "Service" },
         { id: "repair", label: "Repair" },
-        { id: "tyres", label: "Tyres" },
         { id: "parts", label: "Parts" },
-        { id: "fuel", label: "Fuel" },
+        { id: "tyres", label: "Tyres" },
         { id: "toll", label: "Toll" },
         { id: "registration", label: "Registration" },
         { id: "other", label: "Other" },
@@ -860,6 +860,7 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     return res.json({
       ok: true,
+      definitions,
       projects,
       tasks,
       milestones,
@@ -870,7 +871,6 @@ router.get("/lists", requireOrg, async (req, res) => {
       groups,
       vendors,
       inspections,
-      definitions,
     });
   } catch (e) {
     console.error("[mobile/lists] error", e);

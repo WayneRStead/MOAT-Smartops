@@ -17,7 +17,7 @@ import { syncOutbox } from "../syncOutbox";
 const THEME_COLOR = "#22a6b3";
 
 /**
- * Offline cache keys (simple + reliable).
+ * Offline cache keys
  */
 const CACHE_KEYS = {
   definitions: "@moat:cache:definitions",
@@ -30,6 +30,7 @@ const CACHE_KEYS = {
   documents: "@moat:cache:documents",
   groups: "@moat:cache:groups",
   users: "@moat:cache:users",
+  vendors: "@moat:cache:vehicleVendors",
 };
 
 async function safeCacheSet(key, value) {
@@ -79,6 +80,7 @@ export default function OfflineScreen() {
     documents: 0,
     groups: 0,
     users: 0,
+    vendors: 0,
   });
 
   async function loadCounts() {
@@ -93,6 +95,7 @@ export default function OfflineScreen() {
       documents,
       groups,
       users,
+      vendors,
     ] = await Promise.all([
       safeCacheGetObject(CACHE_KEYS.definitions),
       safeCacheGet(CACHE_KEYS.projects),
@@ -104,10 +107,13 @@ export default function OfflineScreen() {
       safeCacheGet(CACHE_KEYS.documents),
       safeCacheGet(CACHE_KEYS.groups),
       safeCacheGet(CACHE_KEYS.users),
+      safeCacheGet(CACHE_KEYS.vendors),
     ]);
 
     setCounts({
-      definitions: definitions?.version ? 1 : 0,
+      definitions: Array.isArray(definitions?.vehicleEntryTypes)
+        ? definitions.vehicleEntryTypes.length
+        : 0,
       projects: projects.length,
       tasks: tasks.length,
       milestonesTasks: Object.keys(milestonesByTask || {}).length,
@@ -117,6 +123,7 @@ export default function OfflineScreen() {
       documents: documents.length,
       groups: groups.length,
       users: users.length,
+      vendors: vendors.length,
     });
   }
 
@@ -127,7 +134,8 @@ export default function OfflineScreen() {
   }, []);
 
   /**
-   * Refresh lists by calling REAL module endpoints.
+   * Refresh offline lists from ONE backend source:
+   * GET /api/mobile/lists
    */
   const refreshLists = async () => {
     setLoading(true);
@@ -138,7 +146,6 @@ export default function OfflineScreen() {
         return;
       }
 
-      // Sanity check: confirm backend sees you + org
       await apiGet("/api/mobile/whoami");
 
       const results = {};
@@ -155,75 +162,120 @@ export default function OfflineScreen() {
                 : [];
           results[name] = items;
           await safeCacheSet(cacheKey, items);
+          return items;
         } catch (e) {
           if (e?.status === 404) {
             results[name] = "__NOT_FOUND__";
-            return;
+            return [];
           }
           throw e;
         }
       }
 
-      async function fetchMaybeDefinitions() {
-        // Try a few common shapes so you don’t get stuck if mount differs
-        const tries = [
-          "/api/mobile/definitions",
-          "/mobile/definitions",
-          "/api/definitions",
-          "/definitions",
-        ];
-        for (const p of tries) {
-          try {
-            const data = await apiGet(p);
-            // expected: { ok:true, definitions:{...} } OR just {definitions:{...}}
-            const defs = data?.definitions || data;
-            if (defs && typeof defs === "object") {
-              await safeCacheSetObject(CACHE_KEYS.definitions, defs);
-              results.definitions = "OK";
-              return;
-            }
-          } catch (e) {
-            if (e?.status === 404) continue;
-            // If auth/network issue, bubble it up (better feedback)
-            throw e;
-          }
+      let mobileLists = null;
+      try {
+        mobileLists = await apiGet("/api/mobile/lists");
+        results.mobileLists = "OK";
+      } catch (e) {
+        if (e?.status === 404) {
+          results.mobileLists = "__NOT_FOUND__";
+        } else {
+          throw e;
         }
-        results.definitions = "__NOT_FOUND__";
       }
 
-      await Promise.all([
-        fetchMaybeDefinitions(),
-        fetchMaybeArray("projects", "/api/projects", CACHE_KEYS.projects),
-        fetchMaybeArray("tasks", "/api/tasks", CACHE_KEYS.tasks),
-        fetchMaybeArray("assets", "/api/assets", CACHE_KEYS.assets),
-        fetchMaybeArray("vehicles", "/api/vehicles", CACHE_KEYS.vehicles),
-        fetchMaybeArray(
-          "inspections",
-          "/api/inspection/forms",
-          CACHE_KEYS.inspections,
-        ),
-        fetchMaybeArray("documents", "/api/documents", CACHE_KEYS.documents),
-        fetchMaybeArray("groups", "/api/groups", CACHE_KEYS.groups),
+      const definitions =
+        mobileLists?.definitions && typeof mobileLists.definitions === "object"
+          ? mobileLists.definitions
+          : {};
 
-        // Optional users list for future biometrics/clocking modules
-        // If this endpoint doesn’t exist yet, it’s fine.
-        fetchMaybeArray("users", "/api/users", CACHE_KEYS.users),
+      await safeCacheSetObject(CACHE_KEYS.definitions, definitions);
+
+      const projects = Array.isArray(mobileLists?.projects)
+        ? mobileLists.projects
+        : await fetchMaybeArray(
+            "projects",
+            "/api/projects",
+            CACHE_KEYS.projects,
+          );
+
+      const tasks = Array.isArray(mobileLists?.tasks)
+        ? mobileLists.tasks
+        : await fetchMaybeArray("tasks", "/api/tasks", CACHE_KEYS.tasks);
+
+      const milestones = Array.isArray(mobileLists?.milestones)
+        ? mobileLists.milestones
+        : [];
+
+      const milestonesByTask = {};
+      for (const m of milestones) {
+        const taskId = String(m?.taskId?._id || m?.taskId || "").trim();
+        if (!taskId) continue;
+        if (!Array.isArray(milestonesByTask[taskId])) {
+          milestonesByTask[taskId] = [];
+        }
+        milestonesByTask[taskId].push(m);
+      }
+
+      const assets = Array.isArray(mobileLists?.assets)
+        ? mobileLists.assets
+        : await fetchMaybeArray("assets", "/api/assets", CACHE_KEYS.assets);
+
+      const vehicles = Array.isArray(mobileLists?.vehicles)
+        ? mobileLists.vehicles
+        : await fetchMaybeArray(
+            "vehicles",
+            "/api/vehicles",
+            CACHE_KEYS.vehicles,
+          );
+
+      const inspections = Array.isArray(mobileLists?.inspections)
+        ? mobileLists.inspections
+        : await fetchMaybeArray(
+            "inspections",
+            "/api/inspection/forms",
+            CACHE_KEYS.inspections,
+          );
+
+      const documents = Array.isArray(mobileLists?.documents)
+        ? mobileLists.documents
+        : await fetchMaybeArray(
+            "documents",
+            "/api/documents",
+            CACHE_KEYS.documents,
+          );
+
+      const groups = Array.isArray(mobileLists?.groups)
+        ? mobileLists.groups
+        : await fetchMaybeArray("groups", "/api/groups", CACHE_KEYS.groups);
+
+      const users = Array.isArray(mobileLists?.users)
+        ? mobileLists.users
+        : await fetchMaybeArray("users", "/api/users", CACHE_KEYS.users);
+
+      const vendors = Array.isArray(mobileLists?.vendors)
+        ? mobileLists.vendors
+        : await fetchMaybeArray("vendors", "/api/vendors", CACHE_KEYS.vendors);
+
+      await Promise.all([
+        safeCacheSet(CACHE_KEYS.projects, projects),
+        safeCacheSet(CACHE_KEYS.tasks, tasks),
+        safeCacheSetObject(CACHE_KEYS.milestonesByTask, milestonesByTask),
+        safeCacheSet(CACHE_KEYS.assets, assets),
+        safeCacheSet(CACHE_KEYS.vehicles, vehicles),
+        safeCacheSet(CACHE_KEYS.inspections, inspections),
+        safeCacheSet(CACHE_KEYS.documents, documents),
+        safeCacheSet(CACHE_KEYS.groups, groups),
+        safeCacheSet(CACHE_KEYS.users, users),
+        safeCacheSet(CACHE_KEYS.vendors, vendors),
       ]);
 
       await loadCounts();
 
-      const notFound = Object.entries(results)
-        .filter(([, v]) => v === "__NOT_FOUND__")
-        .map(([k]) => k);
-
-      if (notFound.length) {
-        Alert.alert(
-          "Lists refreshed (partial)",
-          `These endpoints are not available yet:\n${notFound.join(", ")}`,
-        );
-      } else {
-        Alert.alert("Success", "Lists refreshed and stored for offline use.");
-      }
+      Alert.alert(
+        "Success",
+        `Lists refreshed.\nProjects: ${projects.length}\nTasks: ${tasks.length}\nVehicles: ${vehicles.length}\nVendors: ${vendors.length}`,
+      );
     } catch (e) {
       Alert.alert("Could not refresh", e?.message || "Unknown error");
     } finally {
@@ -239,6 +291,7 @@ export default function OfflineScreen() {
         Alert.alert("Missing Org", "No orgId found on this device yet.");
         return;
       }
+
       const res = await syncOutbox({ limit: 25 });
       Alert.alert(
         "Sync complete",
@@ -301,7 +354,10 @@ export default function OfflineScreen() {
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Cached on device</Text>
 
-        <Row label="Definitions (dropdown rules)" value={counts.definitions} />
+        <Row
+          label="Definitions (vehicle entry types)"
+          value={counts.definitions}
+        />
         <Row label="Projects" value={counts.projects} />
         <Row label="Tasks" value={counts.tasks} />
         <Row
@@ -314,11 +370,12 @@ export default function OfflineScreen() {
         <Row label="Documents" value={counts.documents} />
         <Row label="Groups" value={counts.groups} />
         <Row label="Users (optional)" value={counts.users} />
+        <Row label="Vendors" value={counts.vendors} />
 
         <Text style={styles.hint}>
-          If “Definitions” is 0 after refresh, your backend definitions route
-          isn’t mounted yet. Production dropdowns will fallback, but will be
-          correct once definitions are cached.
+          This screen now refreshes all offline dropdown data from
+          /api/mobile/lists. If Vendors or Definitions stay at 0, the backend is
+          not returning them yet.
         </Text>
       </View>
     </ScrollView>
