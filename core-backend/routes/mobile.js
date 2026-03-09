@@ -769,27 +769,65 @@ router.get("/lists", requireOrg, async (req, res) => {
       Vendor = require("../models/Vendor");
     } catch {}
 
+    const orgIdStr = String(orgId || "").trim();
+    const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+      ? new mongoose.Types.ObjectId(orgIdStr)
+      : null;
+
+    const makeOrgFilter = () => {
+      if (orgIdObj) {
+        return { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] };
+      }
+      if (orgIdStr) {
+        return { orgId: orgIdStr };
+      }
+      return {};
+    };
+
     const projects = Project?.find
-      ? await Project.find({ orgId, isDeleted: { $ne: true } })
+      ? await Project.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, status: 1 })
           .lean()
       : [];
 
+    const orgIdStr = String(orgId || "").trim();
+    const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+      ? new mongoose.Types.ObjectId(orgIdStr)
+      : null;
+
+    const taskOrgFilter = orgIdObj
+      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+      : orgIdStr
+        ? { orgId: orgIdStr }
+        : {};
+
     const tasks = Task?.find
-      ? await Task.find({ orgId, isDeleted: { $ne: true } })
+      ? await Task.find({
+          ...taskOrgFilter,
+          isDeleted: { $ne: true },
+        })
           .select({ _id: 1, title: 1, status: 1, projectId: 1 })
           .lean()
       : [];
 
+    const milestoneOrgFilter = orgIdObj
+      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+      : orgIdStr
+        ? { orgId: orgIdStr }
+        : {};
+
     const milestones = Milestone?.find
-      ? await Milestone.find({ orgId, isDeleted: { $ne: true } })
+      ? await Milestone.find({
+          ...milestoneOrgFilter,
+          isDeleted: { $ne: true },
+        })
           .select({ _id: 1, name: 1, taskId: 1, status: 1 })
           .lean()
       : [];
 
     const users = User?.find
       ? await User.find({
-          orgId,
+          ...makeOrgFilter(),
           isDeleted: { $ne: true },
           active: { $ne: false },
         })

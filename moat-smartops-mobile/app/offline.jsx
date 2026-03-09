@@ -65,6 +65,54 @@ async function safeCacheGetObject(key) {
   }
 }
 
+function countDefinitions(definitions) {
+  if (!definitions || typeof definitions !== "object") return 0;
+
+  if (Array.isArray(definitions.vehicleEntryTypes)) {
+    return definitions.vehicleEntryTypes.length;
+  }
+  if (Array.isArray(definitions.logTypes)) {
+    return definitions.logTypes.length;
+  }
+  if (Array.isArray(definitions.purchaseTypes)) {
+    return definitions.purchaseTypes.length;
+  }
+
+  return Object.keys(definitions).length;
+}
+
+function buildMilestonesByTask(milestones) {
+  const out = {};
+  for (const m of Array.isArray(milestones) ? milestones : []) {
+    const taskId = String(
+      m?.taskId?._id || m?.taskId || m?.parentTaskId || "",
+    ).trim();
+    if (!taskId) continue;
+    if (!Array.isArray(out[taskId])) out[taskId] = [];
+    out[taskId].push(m);
+  }
+  return out;
+}
+
+function normalizeVendors(vendors) {
+  return (Array.isArray(vendors) ? vendors : [])
+    .map((v) => {
+      if (!v) return null;
+      if (typeof v === "string") {
+        return { id: v, label: v };
+      }
+      const id = String(v._id || v.id || v.name || "").trim();
+      const label = String(v.name || v.label || id).trim();
+      if (!label) return null;
+      return {
+        ...v,
+        id: id || label,
+        label,
+      };
+    })
+    .filter(Boolean);
+}
+
 export default function OfflineScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -111,9 +159,7 @@ export default function OfflineScreen() {
     ]);
 
     setCounts({
-      definitions: Array.isArray(definitions?.vehicleEntryTypes)
-        ? definitions.vehicleEntryTypes.length
-        : 0,
+      definitions: countDefinitions(definitions),
       projects: projects.length,
       tasks: tasks.length,
       milestonesTasks: Object.keys(milestonesByTask || {}).length,
@@ -133,10 +179,6 @@ export default function OfflineScreen() {
     })();
   }, []);
 
-  /**
-   * Refresh offline lists from ONE backend source:
-   * GET /api/mobile/lists
-   */
   const refreshLists = async () => {
     setLoading(true);
     try {
@@ -146,116 +188,96 @@ export default function OfflineScreen() {
         return;
       }
 
+      // sanity check
       await apiGet("/api/mobile/whoami");
-
-      const results = {};
-
-      async function fetchMaybeArray(name, path, cacheKey) {
-        try {
-          const data = await apiGet(path);
-          const items = Array.isArray(data)
-            ? data
-            : Array.isArray(data?.items)
-              ? data.items
-              : Array.isArray(data?.data)
-                ? data.data
-                : [];
-          results[name] = items;
-          await safeCacheSet(cacheKey, items);
-          return items;
-        } catch (e) {
-          if (e?.status === 404) {
-            results[name] = "__NOT_FOUND__";
-            return [];
-          }
-          throw e;
-        }
-      }
 
       let mobileLists = null;
       try {
         mobileLists = await apiGet("/api/mobile/lists");
-        results.mobileLists = "OK";
       } catch (e) {
-        if (e?.status === 404) {
-          results.mobileLists = "__NOT_FOUND__";
-        } else {
+        if (e?.status !== 404) throw e;
+      }
+
+      async function fetchMaybeArray(path) {
+        try {
+          const data = await apiGet(path);
+          if (Array.isArray(data)) return data;
+          if (Array.isArray(data?.items)) return data.items;
+          if (Array.isArray(data?.data)) return data.data;
+          return [];
+        } catch (e) {
+          if (e?.status === 404) return [];
           throw e;
         }
       }
 
-      const definitions =
-        mobileLists?.definitions && typeof mobileLists.definitions === "object"
-          ? mobileLists.definitions
-          : {};
+      async function fetchMaybeObject(path) {
+        try {
+          const data = await apiGet(path);
+          if (data?.definitions && typeof data.definitions === "object") {
+            return data.definitions;
+          }
+          return data && typeof data === "object" && !Array.isArray(data)
+            ? data
+            : {};
+        } catch (e) {
+          if (e?.status === 404) return {};
+          throw e;
+        }
+      }
 
-      await safeCacheSetObject(CACHE_KEYS.definitions, definitions);
-
+      // PRIMARY: use /api/mobile/lists
+      // FALLBACK: use old endpoints only if missing
       const projects = Array.isArray(mobileLists?.projects)
         ? mobileLists.projects
-        : await fetchMaybeArray(
-            "projects",
-            "/api/projects",
-            CACHE_KEYS.projects,
-          );
+        : await fetchMaybeArray("/api/projects");
 
       const tasks = Array.isArray(mobileLists?.tasks)
         ? mobileLists.tasks
-        : await fetchMaybeArray("tasks", "/api/tasks", CACHE_KEYS.tasks);
+        : await fetchMaybeArray("/api/tasks");
 
       const milestones = Array.isArray(mobileLists?.milestones)
         ? mobileLists.milestones
-        : [];
-
-      const milestonesByTask = {};
-      for (const m of milestones) {
-        const taskId = String(m?.taskId?._id || m?.taskId || "").trim();
-        if (!taskId) continue;
-        if (!Array.isArray(milestonesByTask[taskId])) {
-          milestonesByTask[taskId] = [];
-        }
-        milestonesByTask[taskId].push(m);
-      }
+        : Array.isArray(mobileLists?.taskMilestones)
+          ? mobileLists.taskMilestones
+          : [];
 
       const assets = Array.isArray(mobileLists?.assets)
         ? mobileLists.assets
-        : await fetchMaybeArray("assets", "/api/assets", CACHE_KEYS.assets);
+        : await fetchMaybeArray("/api/assets");
 
       const vehicles = Array.isArray(mobileLists?.vehicles)
         ? mobileLists.vehicles
-        : await fetchMaybeArray(
-            "vehicles",
-            "/api/vehicles",
-            CACHE_KEYS.vehicles,
-          );
+        : await fetchMaybeArray("/api/vehicles");
 
       const inspections = Array.isArray(mobileLists?.inspections)
         ? mobileLists.inspections
-        : await fetchMaybeArray(
-            "inspections",
-            "/api/inspection/forms",
-            CACHE_KEYS.inspections,
-          );
+        : await fetchMaybeArray("/api/inspection/forms");
 
       const documents = Array.isArray(mobileLists?.documents)
         ? mobileLists.documents
-        : await fetchMaybeArray(
-            "documents",
-            "/api/documents",
-            CACHE_KEYS.documents,
-          );
+        : await fetchMaybeArray("/api/documents");
 
       const groups = Array.isArray(mobileLists?.groups)
         ? mobileLists.groups
-        : await fetchMaybeArray("groups", "/api/groups", CACHE_KEYS.groups);
+        : await fetchMaybeArray("/api/groups");
 
       const users = Array.isArray(mobileLists?.users)
         ? mobileLists.users
-        : await fetchMaybeArray("users", "/api/users", CACHE_KEYS.users);
+        : await fetchMaybeArray("/api/users");
 
-      const vendors = Array.isArray(mobileLists?.vendors)
+      const vendorsRaw = Array.isArray(mobileLists?.vendors)
         ? mobileLists.vendors
-        : await fetchMaybeArray("vendors", "/api/vendors", CACHE_KEYS.vendors);
+        : await fetchMaybeArray("/api/vendors");
+
+      const vendors = normalizeVendors(vendorsRaw);
+
+      const definitions =
+        mobileLists?.definitions && typeof mobileLists.definitions === "object"
+          ? mobileLists.definitions
+          : await fetchMaybeObject("/api/mobile/definitions");
+
+      const milestonesByTask = buildMilestonesByTask(milestones);
 
       await Promise.all([
         safeCacheSet(CACHE_KEYS.projects, projects),
@@ -268,13 +290,14 @@ export default function OfflineScreen() {
         safeCacheSet(CACHE_KEYS.groups, groups),
         safeCacheSet(CACHE_KEYS.users, users),
         safeCacheSet(CACHE_KEYS.vendors, vendors),
+        safeCacheSetObject(CACHE_KEYS.definitions, definitions),
       ]);
 
       await loadCounts();
 
       Alert.alert(
         "Success",
-        `Lists refreshed.\nProjects: ${projects.length}\nTasks: ${tasks.length}\nVehicles: ${vehicles.length}\nVendors: ${vendors.length}`,
+        `Lists refreshed.\nProjects: ${projects.length}\nTasks: ${tasks.length}\nMilestones: ${milestones.length}\nVehicles: ${vehicles.length}\nVendors: ${vendors.length}`,
       );
     } catch (e) {
       Alert.alert("Could not refresh", e?.message || "Unknown error");
@@ -366,16 +389,16 @@ export default function OfflineScreen() {
         />
         <Row label="Assets" value={counts.assets} />
         <Row label="Vehicles" value={counts.vehicles} />
+        <Row label="Vendors" value={counts.vendors} />
         <Row label="Inspections (forms)" value={counts.inspections} />
         <Row label="Documents" value={counts.documents} />
         <Row label="Groups" value={counts.groups} />
         <Row label="Users (optional)" value={counts.users} />
-        <Row label="Vendors" value={counts.vendors} />
 
         <Text style={styles.hint}>
-          This screen now refreshes all offline dropdown data from
-          /api/mobile/lists. If Vendors or Definitions stay at 0, the backend is
-          not returning them yet.
+          This screen refreshes offline dropdown data primarily from
+          /api/mobile/lists. If Tasks stays at 0, the backend is not returning
+          tasks for your org.
         </Text>
       </View>
     </ScrollView>
