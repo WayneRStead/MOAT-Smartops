@@ -845,7 +845,18 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
-    const definitions = [];
+    const definitions = {
+      vehicleEntryTypes: [
+        { id: "service", label: "Service" },
+        { id: "repair", label: "Repair" },
+        { id: "tyres", label: "Tyres" },
+        { id: "parts", label: "Parts" },
+        { id: "fuel", label: "Fuel" },
+        { id: "toll", label: "Toll" },
+        { id: "registration", label: "Registration" },
+        { id: "other", label: "Other" },
+      ],
+    };
 
     return res.json({
       ok: true,

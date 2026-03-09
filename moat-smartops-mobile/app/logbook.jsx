@@ -480,17 +480,28 @@ function SelectField({ label, valueText, onPress, disabled }) {
 async function loadVendors() {
   const list = await loadCache(VENDORS_KEY, []);
   if (!Array.isArray(list)) return [];
-  // normalize to {id,label}
+
   return list
     .map((x) => {
       if (!x) return null;
-      if (typeof x === "string") return { id: x, label: x };
-      const id = String(x.id || x._id || x.label || x.name || "");
-      const label = String(x.label || x.name || id);
+
+      if (typeof x === "string") {
+        return { id: x, label: x };
+      }
+
+      const id = String(x._id || x.id || x.name || x.label || "");
+      const label = String(x.name || x.label || x.id || x._id || "").trim();
+
       if (!label) return null;
-      return { id: id || label, label };
+
+      return {
+        id: id || label,
+        label,
+        raw: x,
+      };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort(sortByLabel);
 }
 
 async function saveVendors(list) {
@@ -512,8 +523,30 @@ function sortByLabel(a, b) {
    Backend fetch: Types + Reminders
 ------------------------------*/
 async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
-  // TODO: BACKEND ENDPOINT — adjust if needed.
-  // We try multiple endpoints so you only need to fix one that matches your backend.
+  // 1) try cached definitions first
+  try {
+    const raw = await AsyncStorage.getItem("@moat:cache:definitions");
+    const defs = raw ? JSON.parse(raw) : {};
+    const arr = Array.isArray(defs?.vehicleEntryTypes)
+      ? defs.vehicleEntryTypes
+      : [];
+
+    const cachedTypes = arr
+      .map((x) => {
+        if (!x) return null;
+        if (typeof x === "string") return { id: x, label: x };
+        const id = String(x.id || x._id || x.key || x.code || x.value || "");
+        const label = String(x.label || x.name || x.title || id);
+        if (!label) return null;
+        return { id: id || label, label };
+      })
+      .filter(Boolean)
+      .sort(sortByLabel);
+
+    if (cachedTypes.length) return cachedTypes;
+  } catch {}
+
+  // 2) fallback to explicit endpoints if you add them later
   const candidates = [
     "/api/mobile/vehicle-entry-types",
     "/api/mobile/vehicles/entry-types",
@@ -534,7 +567,6 @@ async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
       const arr = data?.types || data?.items || data || [];
       if (!Array.isArray(arr) || arr.length === 0) continue;
 
-      // normalize to {id,label}
       const types = arr
         .map((x) => {
           if (!x) return null;
@@ -548,9 +580,7 @@ async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
         .sort(sortByLabel);
 
       if (types.length) return types;
-    } catch {
-      // try next
-    }
+    } catch {}
   }
 
   return [];

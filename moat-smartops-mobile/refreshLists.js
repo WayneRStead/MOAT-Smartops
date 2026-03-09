@@ -9,12 +9,17 @@ export const CACHE_VEHICLES = "@moat:cache:vehicles";
 export const CACHE_ASSETS = "@moat:cache:assets";
 export const CACHE_DOCUMENTS = "@moat:cache:documents";
 export const CACHE_GROUPS = "@moat:cache:groups";
-export const CACHE_VENDORS = "@moat:cache:vendors";
+export const CACHE_INSPECTIONS = "@moat:cache:inspections";
+export const CACHE_VENDORS = "@moat:cache:vehicleVendors";
 export const CACHE_DEFINITIONS = "@moat:cache:definitions";
 export const CACHE_LAST_REFRESH = "@moat:cache:lastRefresh";
 
 function safeArray(v) {
   return Array.isArray(v) ? v : [];
+}
+
+function safeObject(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
 }
 
 /**
@@ -30,7 +35,8 @@ function safeArray(v) {
  *   documents: [...],
  *   groups: [...],
  *   vendors: [...],
- *   definitions: [...]
+ *   inspections: [...],
+ *   definitions: { vehicleEntryTypes: [...] }
  * }
  */
 export async function refreshListsFromServer() {
@@ -44,8 +50,9 @@ export async function refreshListsFromServer() {
   const assets = safeArray(data?.assets);
   const documents = safeArray(data?.documents);
   const groups = safeArray(data?.groups);
+  const inspections = safeArray(data?.inspections);
   const vendors = safeArray(data?.vendors);
-  const definitions = safeArray(data?.definitions || data?.dropdownRules);
+  const definitions = safeObject(data?.definitions);
 
   await AsyncStorage.multiSet([
     [CACHE_PROJECTS, JSON.stringify(projects)],
@@ -56,6 +63,7 @@ export async function refreshListsFromServer() {
     [CACHE_ASSETS, JSON.stringify(assets)],
     [CACHE_DOCUMENTS, JSON.stringify(documents)],
     [CACHE_GROUPS, JSON.stringify(groups)],
+    [CACHE_INSPECTIONS, JSON.stringify(inspections)],
     [CACHE_VENDORS, JSON.stringify(vendors)],
     [CACHE_DEFINITIONS, JSON.stringify(definitions)],
     [CACHE_LAST_REFRESH, new Date().toISOString()],
@@ -70,8 +78,11 @@ export async function refreshListsFromServer() {
     assetsCount: assets.length,
     documentsCount: documents.length,
     groupsCount: groups.length,
+    inspectionsCount: inspections.length,
     vendorsCount: vendors.length,
-    definitionsCount: definitions.length,
+    vehicleEntryTypesCount: Array.isArray(definitions?.vehicleEntryTypes)
+      ? definitions.vehicleEntryTypes.length
+      : 0,
   };
 }
 
@@ -85,6 +96,7 @@ export async function loadCachedLists() {
     CACHE_ASSETS,
     CACHE_DOCUMENTS,
     CACHE_GROUPS,
+    CACHE_INSPECTIONS,
     CACHE_VENDORS,
     CACHE_DEFINITIONS,
     CACHE_LAST_REFRESH,
@@ -109,8 +121,9 @@ export async function loadCachedLists() {
     assets: parse(map[CACHE_ASSETS], []),
     documents: parse(map[CACHE_DOCUMENTS], []),
     groups: parse(map[CACHE_GROUPS], []),
+    inspections: parse(map[CACHE_INSPECTIONS], []),
     vendors: parse(map[CACHE_VENDORS], []),
-    definitions: parse(map[CACHE_DEFINITIONS], []),
+    definitions: parse(map[CACHE_DEFINITIONS], {}),
     lastRefresh: map[CACHE_LAST_REFRESH] || null,
   };
 }
