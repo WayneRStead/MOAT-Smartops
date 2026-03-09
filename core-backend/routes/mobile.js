@@ -727,7 +727,7 @@ router.get("/lists", requireOrg, async (req, res) => {
   try {
     const orgId = req.orgObjectId || req.user?.orgId;
 
-        let Project = null;
+    let Project = null;
     let Task = null;
     let Milestone = null;
     let User = null;
@@ -753,7 +753,7 @@ router.get("/lists", requireOrg, async (req, res) => {
     try {
       Inspection = require("../models/InspectionForm");
     } catch {}
-        try {
+    try {
       Vehicle = require("../models/Vehicle");
     } catch {}
     try {
@@ -797,7 +797,7 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
-        const inspections = Inspection?.find
+    const inspections = Inspection?.find
       ? await Inspection.find({ orgId, isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, status: 1 })
           .lean()
@@ -861,6 +861,11 @@ router.get("/lists", requireOrg, async (req, res) => {
       inspections,
       definitions,
     });
+  } catch (e) {
+    console.error("[mobile/lists] error", e);
+    return res.status(500).json({ error: "Failed to load lists" });
+  }
+});
 
 /* -----------------------------
    OFFLINE EVENTS INGESTION (ORG REQUIRED)
