@@ -790,37 +790,14 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
-    const orgIdStr = String(orgId || "").trim();
-    const orgIdObj = mongoose.isValidObjectId(orgIdStr)
-      ? new mongoose.Types.ObjectId(orgIdStr)
-      : null;
-
-    const taskOrgFilter = orgIdObj
-      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
-      : orgIdStr
-        ? { orgId: orgIdStr }
-        : {};
-
     const tasks = Task?.find
-      ? await Task.find({
-          ...taskOrgFilter,
-          isDeleted: { $ne: true },
-        })
+      ? await Task.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, title: 1, status: 1, projectId: 1 })
           .lean()
       : [];
 
-    const milestoneOrgFilter = orgIdObj
-      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
-      : orgIdStr
-        ? { orgId: orgIdStr }
-        : {};
-
     const milestones = Milestone?.find
-      ? await Milestone.find({
-          ...milestoneOrgFilter,
-          isDeleted: { $ne: true },
-        })
+      ? await Milestone.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, taskId: 1, status: 1 })
           .lean()
       : [];
@@ -836,13 +813,13 @@ router.get("/lists", requireOrg, async (req, res) => {
       : [];
 
     const inspections = Inspection?.find
-      ? await Inspection.find({ orgId, isDeleted: { $ne: true } })
+      ? await Inspection.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, status: 1 })
           .lean()
       : [];
 
     const vehicles = Vehicle?.find
-      ? await Vehicle.find({ orgId })
+      ? await Vehicle.find(makeOrgFilter())
           .select({
             _id: 1,
             reg: 1,
@@ -859,25 +836,25 @@ router.get("/lists", requireOrg, async (req, res) => {
       : [];
 
     const assets = Asset?.find
-      ? await Asset.find({ orgId, isDeleted: { $ne: true } })
+      ? await Asset.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, assetCode: 1, status: 1 })
           .lean()
       : [];
 
     const documents = Document?.find
-      ? await Document.find({ orgId })
+      ? await Document.find(makeOrgFilter())
           .select({ _id: 1, title: 1, tags: 1, updatedAt: 1 })
           .lean()
       : [];
 
     const groups = Group?.find
-      ? await Group.find({ orgId, isDeleted: { $ne: true } })
+      ? await Group.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, memberUserIds: 1 })
           .lean()
       : [];
 
     const vendors = Vendor?.find
-      ? await Vendor.find({ orgId: String(orgId) })
+      ? await Vendor.find(makeOrgFilter())
           .select({ _id: 1, name: 1, contact: 1, email: 1, phone: 1 })
           .sort({ name: 1 })
           .lean()
