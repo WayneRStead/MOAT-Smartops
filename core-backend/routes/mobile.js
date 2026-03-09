@@ -1,4 +1,4 @@
-// core-backend/routes/mobile.js
+// core-backend/routes/mobile.js (updateing offline lists 9-3-2026)
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
@@ -727,11 +727,16 @@ router.get("/lists", requireOrg, async (req, res) => {
   try {
     const orgId = req.orgObjectId || req.user?.orgId;
 
-    let Project = null;
+        let Project = null;
     let Task = null;
     let Milestone = null;
     let User = null;
     let Inspection = null;
+    let Vehicle = null;
+    let Asset = null;
+    let Document = null;
+    let Group = null;
+    let Vendor = null;
 
     try {
       Project = require("../models/Project");
@@ -747,6 +752,21 @@ router.get("/lists", requireOrg, async (req, res) => {
     } catch {}
     try {
       Inspection = require("../models/InspectionForm");
+    } catch {}
+        try {
+      Vehicle = require("../models/Vehicle");
+    } catch {}
+    try {
+      Asset = require("../models/Asset");
+    } catch {}
+    try {
+      Document = require("../models/Document");
+    } catch {}
+    try {
+      Group = require("../models/Group");
+    } catch {}
+    try {
+      Vendor = require("../models/Vendor");
     } catch {}
 
     const projects = Project?.find
@@ -777,11 +797,55 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
-    const inspections = Inspection?.find
+        const inspections = Inspection?.find
       ? await Inspection.find({ orgId, isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, status: 1 })
           .lean()
       : [];
+
+    const vehicles = Vehicle?.find
+      ? await Vehicle.find({ orgId })
+          .select({
+            _id: 1,
+            reg: 1,
+            make: 1,
+            model: 1,
+            year: 1,
+            vehicleType: 1,
+            status: 1,
+            driverId: 1,
+            projectId: 1,
+            taskId: 1,
+          })
+          .lean()
+      : [];
+
+    const assets = Asset?.find
+      ? await Asset.find({ orgId, isDeleted: { $ne: true } })
+          .select({ _id: 1, name: 1, assetCode: 1, status: 1 })
+          .lean()
+      : [];
+
+    const documents = Document?.find
+      ? await Document.find({ orgId })
+          .select({ _id: 1, title: 1, tags: 1, updatedAt: 1 })
+          .lean()
+      : [];
+
+    const groups = Group?.find
+      ? await Group.find({ orgId, isDeleted: { $ne: true } })
+          .select({ _id: 1, name: 1, memberUserIds: 1 })
+          .lean()
+      : [];
+
+    const vendors = Vendor?.find
+      ? await Vendor.find({ orgId: String(orgId) })
+          .select({ _id: 1, name: 1, contact: 1, email: 1, phone: 1 })
+          .sort({ name: 1 })
+          .lean()
+      : [];
+
+    const definitions = [];
 
     return res.json({
       ok: true,
@@ -789,16 +853,14 @@ router.get("/lists", requireOrg, async (req, res) => {
       tasks,
       milestones,
       users,
-      assets: [],
-      vehicles: [],
+      vehicles,
+      assets,
+      documents,
+      groups,
+      vendors,
       inspections,
-      documents: [],
+      definitions,
     });
-  } catch (e) {
-    console.error("[mobile/lists] error", e);
-    return res.status(500).json({ error: "Failed to load lists" });
-  }
-});
 
 /* -----------------------------
    OFFLINE EVENTS INGESTION (ORG REQUIRED)

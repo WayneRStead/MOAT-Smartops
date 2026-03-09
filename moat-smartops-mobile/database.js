@@ -413,8 +413,16 @@ export async function saveVehicleCreate(vehicle) {
 
 export async function saveVehicleTrip(trip) {
   const fileUris = [];
-  if (trip?.photoUri) fileUris.push(trip.photoUri);
+
+  // ✅ New logbook.jsx fields
+  if (trip?.odometerStartPhotoUri) fileUris.push(trip.odometerStartPhotoUri);
+  if (trip?.odometerEndPhotoUri) fileUris.push(trip.odometerEndPhotoUri);
+
+  // ✅ Backward compatibility with any older callers
   if (trip?.odometerPhotoUri) fileUris.push(trip.odometerPhotoUri);
+  if (trip?.photoUri) fileUris.push(trip.photoUri);
+
+  const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
 
   const rowId = await insertOfflineEvent({
     eventType: "vehicle-trip",
@@ -422,7 +430,7 @@ export async function saveVehicleTrip(trip) {
     userId: trip?.userId,
     entityRef: trip?.regNumber || null,
     payload: trip,
-    fileUris,
+    fileUris: dedupedFileUris,
   });
 
   console.log("[DB] vehicle-trip saved locally with rowId:", rowId);
@@ -431,7 +439,15 @@ export async function saveVehicleTrip(trip) {
 
 export async function saveVehiclePurchase(purchase) {
   const fileUris = [];
+
+  // ✅ New purchase screen field
+  if (purchase?.slipPhotoUri) fileUris.push(purchase.slipPhotoUri);
+
+  // ✅ Backward compatibility
   if (purchase?.odometerPhotoUri) fileUris.push(purchase.odometerPhotoUri);
+  if (purchase?.photoUri) fileUris.push(purchase.photoUri);
+
+  const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
 
   const rowId = await insertOfflineEvent({
     eventType: "vehicle-purchase",
@@ -439,7 +455,7 @@ export async function saveVehiclePurchase(purchase) {
     userId: purchase?.userId,
     entityRef: purchase?.regNumber || null,
     payload: purchase,
-    fileUris,
+    fileUris: dedupedFileUris,
   });
 
   console.log("[DB] vehicle-purchase saved locally with rowId:", rowId);
@@ -448,7 +464,10 @@ export async function saveVehiclePurchase(purchase) {
 
 export async function saveVehicleLog(log) {
   const fileUris = [];
+
   if (log?.photoUri) fileUris.push(log.photoUri);
+
+  const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
 
   const rowId = await insertOfflineEvent({
     eventType: "vehicle-log",
@@ -456,7 +475,7 @@ export async function saveVehicleLog(log) {
     userId: log?.userId,
     entityRef: log?.regNumber || null,
     payload: log,
-    fileUris,
+    fileUris: dedupedFileUris,
   });
 
   console.log("[DB] vehicle-log saved locally with rowId:", rowId);

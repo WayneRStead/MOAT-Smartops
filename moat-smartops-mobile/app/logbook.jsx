@@ -55,6 +55,7 @@ const VEHICLES_KEY = "@moat:vehicles";
 
 const CACHE_PROJECTS_KEY = "@moat:cache:projects";
 const CACHE_TASKS_KEY = "@moat:cache:tasks";
+const CACHE_VEHICLES_KEY = "@moat:cache:vehicles";
 const ORG_KEY = "@moat:cache:orgid";
 const TOKEN_KEY = "@moat:cache:token";
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
@@ -62,7 +63,7 @@ const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
 const API_BASE_URL_KEY = "@moat:api";
 
 // Local vendor cache (simple UX list; later can be synced)
-const VENDORS_KEY = "@moat:cache:vehicleVendors";
+const VENDORS_KEY = "@moat:cache:vendors";
 
 // Optional local reminder cache
 // shape: { [REG]: [ { id, title, dueAt, ... } ] }
@@ -220,6 +221,82 @@ async function loadVehiclesMap() {
 
 async function saveVehiclesMap(mapObj) {
   await AsyncStorage.setItem(VEHICLES_KEY, JSON.stringify(mapObj || {}));
+}
+
+function normalizeVehicleOption(input, fallbackReg = "") {
+  if (!input || typeof input !== "object") return null;
+
+  const reg = normReg(
+    input.regNumber ||
+      input.reg ||
+      input.registration ||
+      input.registrationNumber ||
+      input.plate ||
+      fallbackReg,
+  );
+
+  if (!reg) return null;
+
+  const make = String(input.make || input.vehicleMake || "").trim();
+  const model = String(input.model || input.vehicleModel || "").trim();
+  const vehicleType = String(input.vehicleType || input.type || "").trim();
+  const vin = String(input.vin || "").trim();
+  const year =
+    input.year != null && String(input.year).trim()
+      ? String(input.year).trim()
+      : "";
+
+  const parts = [make, model || vehicleType].filter(Boolean);
+  const subtitle = parts.join(" ");
+
+  return {
+    id: reg,
+    regNumber: reg,
+    make,
+    model,
+    vehicleType,
+    vin,
+    year,
+    label: subtitle ? `${reg} — ${subtitle}` : reg,
+    raw: input,
+  };
+}
+
+function buildVehicleListFromSources(localMap, cachedVehicles) {
+  const merged = new Map();
+
+  // 1) start with cached/offline-list vehicles
+  for (const item of Array.isArray(cachedVehicles) ? cachedVehicles : []) {
+    const normalized = normalizeVehicleOption(item);
+    if (!normalized) continue;
+    merged.set(normalized.regNumber, normalized);
+  }
+
+  // 2) overlay local created/scanned vehicles (these are usually richer/newer)
+  for (const [regKey, meta] of Object.entries(localMap || {})) {
+    const normalized = normalizeVehicleOption(meta || {}, regKey);
+    if (!normalized) continue;
+
+    const existing = merged.get(normalized.regNumber);
+    merged.set(normalized.regNumber, {
+      ...(existing || {}),
+      ...normalized,
+      raw: { ...(existing?.raw || {}), ...(meta || {}) },
+    });
+  }
+
+  return Array.from(merged.values()).sort((a, b) =>
+    String(a.label).localeCompare(String(b.label)),
+  );
+}
+
+async function refreshVehiclesList() {
+  const [localMap, cachedVehicles] = await Promise.all([
+    loadVehiclesMap(),
+    loadCache(CACHE_VEHICLES_KEY, []),
+  ]);
+
+  return buildVehicleListFromSources(localMap, cachedVehicles);
 }
 
 /**
@@ -573,6 +650,10 @@ export default function VehicleLogScreen() {
   const [vehicle, setVehicle] = useState("");
   const [regNumber, setRegNumber] = useState("");
 
+  // Local vehicle picker
+  const [vehiclesList, setVehiclesList] = useState([]);
+  const [vehiclePickerOpen, setVehiclePickerOpen] = useState(false);
+
   // Main project/task (optional)
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
@@ -662,6 +743,10 @@ export default function VehicleLogScreen() {
 
   const effectiveReg = regNumber?.trim();
 
+  const selectedVehicleOption =
+    vehiclesList.find((v) => normReg(v.regNumber) === normReg(regNumber)) ||
+    null;
+
   // Load cached projects/tasks + identity + vendors once
   useEffect(() => {
     (async () => {
@@ -686,6 +771,9 @@ export default function VehicleLogScreen() {
 
       const vs = await loadVendors();
       setVendors(vs.sort(sortByLabel));
+
+      const vehicleItems = await refreshVehiclesList();
+      setVehiclesList(vehicleItems);
     })();
   }, []);
 
@@ -864,6 +952,12 @@ export default function VehicleLogScreen() {
     return map[key] || null;
   }, []);
 
+  const applySelectedVehicle = useCallback((item) => {
+    if (!item) return;
+    setRegNumber(normReg(item.regNumber || item.id || ""));
+    setVehicle(String(item.make || item.raw?.make || "").trim());
+  }, []);
+
   const ensureVehicleKnownOrPrompt = useCallback(
     async (parsed) => {
       const parsedReg = String(parsed?.regNumber || "").trim();
@@ -872,16 +966,57 @@ export default function VehicleLogScreen() {
         return;
       }
 
-      const regKey = parsedReg.toUpperCase();
-      setRegNumber(parsedReg);
+      const regKey = normReg(parsedReg);
+      setRegNumber(regKey);
 
-      if (parsed?.make) setVehicle(parsed.make);
+      const localMap = await loadVehiclesMap();
+      const cachedVehicles = await loadCache(CACHE_VEHICLES_KEY, []);
+      const mergedVehicles = buildVehicleListFromSources(
+        localMap,
+        cachedVehicles,
+      );
+      setVehiclesList(mergedVehicles);
 
-      const map = await loadVehiclesMap();
-      const existing = map[regKey];
+      const existingMerged = mergedVehicles.find(
+        (v) => normReg(v.regNumber) === regKey,
+      );
 
-      if (existing) {
-        setVehicle(existing.make || parsed.make || vehicle || "");
+      if (existingMerged) {
+        setVehicle(
+          existingMerged.make ||
+            parsed?.make ||
+            existingMerged.raw?.make ||
+            vehicle ||
+            "",
+        );
+
+        // Optional: enrich local map with disc details if vehicle already exists in cache
+        const existingLocal = localMap[regKey] || {};
+        localMap[regKey] = {
+          ...existingLocal,
+          regNumber: regKey,
+          vin: parsed?.vin || existingLocal?.vin || null,
+          vehicleType:
+            parsed?.vehicleType || existingLocal?.vehicleType || null,
+          year: parsed?.year || existingLocal?.year || null,
+          make:
+            parsed?.make || existingLocal?.make || existingMerged.make || null,
+          model:
+            parsed?.model ||
+            existingLocal?.model ||
+            existingMerged.model ||
+            null,
+          createdAt: existingLocal?.createdAt || nowIso(),
+          source: existingLocal?.source || "disc-scan",
+          discRaw: parsed?.raw || existingLocal?.discRaw || null,
+        };
+        await saveVehiclesMap(localMap);
+
+        const refreshedMerged = buildVehicleListFromSources(
+          localMap,
+          cachedVehicles,
+        );
+        setVehiclesList(refreshedMerged);
         return;
       }
 
@@ -997,6 +1132,10 @@ export default function VehicleLogScreen() {
       const map = await loadVehiclesMap();
       map[reg.toUpperCase()] = meta;
       await saveVehiclesMap(map);
+
+      const cachedVehicles = await loadCache(CACHE_VEHICLES_KEY, []);
+      const nextVehicles = buildVehicleListFromSources(map, cachedVehicles);
+      setVehiclesList(nextVehicles);
 
       try {
         const rowId = await saveVehicleCreate({
@@ -1503,28 +1642,29 @@ export default function VehicleLogScreen() {
 
             <TouchableOpacity
               style={[styles.scanDiscButton, { marginLeft: 8 }]}
-              onPress={() => openCreateVehicleModal({ regNumber })}
+              onPress={() =>
+                openCreateVehicleModal({
+                  regNumber: normReg(regNumber),
+                  make: vehicle,
+                })
+              }
             >
               <Text style={styles.scanDiscText}>+ Vehicle</Text>
             </TouchableOpacity>
           </View>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Vehicle label (make)"
-            placeholderTextColor="#aaa"
-            value={vehicle}
-            onChangeText={setVehicle}
+          <SelectField
+            label="Vehicle"
+            valueText={selectedVehicleOption ? selectedVehicleOption.label : ""}
+            onPress={() => setVehiclePickerOpen(true)}
           />
 
-          <TextInput
-            style={styles.input}
-            placeholder="Registration no."
-            placeholderTextColor="#aaa"
-            value={regNumber}
-            onChangeText={setRegNumber}
-            autoCapitalize="characters"
-          />
+          {canProceedWithVehicle ? (
+            <Text style={styles.cardSubtitle}>
+              Selected: {normReg(regNumber)}
+              {vehicle ? ` • ${vehicle}` : ""}
+            </Text>
+          ) : null}
 
           {/* Main project/task dropdowns */}
           <SelectField
@@ -1599,6 +1739,22 @@ export default function VehicleLogScreen() {
           ) : null}
         </View>
       </ScrollView>
+
+      {/* VEHICLE PICKER */}
+      <SelectModal
+        visible={vehiclePickerOpen}
+        title="Select vehicle"
+        items={vehiclesList}
+        selectedId={normReg(regNumber)}
+        getId={(v) => v.regNumber}
+        getLabel={(v) => v.label}
+        onSelect={(v) => {
+          applySelectedVehicle(v);
+          setVehiclePickerOpen(false);
+        }}
+        onClose={() => setVehiclePickerOpen(false)}
+        emptyText="No local vehicles yet. Scan a disc or create a vehicle first."
+      />
 
       {/* MAIN PROJECT PICKER */}
       <SelectModal
