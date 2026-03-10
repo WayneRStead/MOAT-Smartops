@@ -935,15 +935,17 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const definitions = {
       vehicleEntryTypes: [
-        { id: "fuel", label: "Fuel" },
-        { id: "service", label: "Service" },
-        { id: "repair", label: "Repair" },
-        { id: "parts", label: "Parts" },
-        { id: "tyres", label: "Tyres" },
-        { id: "toll", label: "Toll" },
-        { id: "registration", label: "Registration" },
-        { id: "other", label: "Other" },
-      ],
+  { id: "fuel", label: "Fuel" },
+  { id: "service", label: "Service" },
+  { id: "repair", label: "Repair" },
+  { id: "parts", label: "Parts" },
+  { id: "tyres", label: "Tyres" },
+  { id: "toll", label: "Toll" },
+  { id: "registration", label: "Registration" },
+  { id: "inspection", label: "Inspection" },
+  { id: "incident", label: "Incident" },
+  { id: "other", label: "Other" },
+];
     };
 
     return res.json({
@@ -1711,7 +1713,18 @@ router.post(
                     vehicleForReminder?.reminders?.id(reminderId);
 
                   if (reminder) {
+                    const completedDate = dateValue
+                      ? new Date(dateValue).toISOString().slice(0, 10)
+                      : new Date().toISOString().slice(0, 10);
+
+                    const currentNotes = String(reminder.notes || "")
+                      .replace(/\(\s*Completed:\s*[^)]+?\)\s*/i, "")
+                      .trim();
+
                     reminder.active = false;
+                    reminder.notes =
+                      `${currentNotes} (Completed: ${completedDate})`.trim();
+
                     await vehicleForReminder.save();
                     appliedTo.completedReminderId = reminderId;
                   } else {

@@ -153,6 +153,103 @@ async function createLog(req, res) {
   res.status(201).json(row);
 }
 
+async function updateLog(req, res) {
+  const entryId = req.params.id || req.params.entryId;
+  if (!asObjectId(entryId)) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  const row = await VehicleLog.findOne({
+    _id: asObjectId(entryId),
+    ...buildOrgFilter(req),
+  });
+
+  if (!row) return res.status(404).json({ error: "Not found" });
+
+  const body = req.body || {};
+
+  if (body.title != null) row.title = String(body.title).trim();
+  if (body.type != null)
+    row.type = String(body.type || "other")
+      .trim()
+      .toLowerCase();
+  if (body.vendor != null) row.vendor = String(body.vendor || "").trim();
+  if (body.notes != null) row.notes = String(body.notes || "");
+  if (body.tags != null) row.tags = cleanTags(body.tags);
+
+  if (body.cost !== undefined) {
+    row.cost =
+      body.cost != null &&
+      body.cost !== "" &&
+      Number.isFinite(Number(body.cost))
+        ? Number(body.cost)
+        : undefined;
+  }
+
+  if (body.ts != null) {
+    row.ts = body.ts ? new Date(body.ts) : row.ts;
+  }
+
+  if (body.odometer !== undefined) {
+    row.odometer =
+      body.odometer != null &&
+      body.odometer !== "" &&
+      Number.isFinite(Number(body.odometer))
+        ? Number(body.odometer)
+        : undefined;
+  }
+
+  if (body.odometerStart !== undefined) {
+    row.odometerStart =
+      body.odometerStart != null &&
+      body.odometerStart !== "" &&
+      Number.isFinite(Number(body.odometerStart))
+        ? Number(body.odometerStart)
+        : undefined;
+  }
+
+  if (body.odometerEnd !== undefined) {
+    row.odometerEnd =
+      body.odometerEnd != null &&
+      body.odometerEnd !== "" &&
+      Number.isFinite(Number(body.odometerEnd))
+        ? Number(body.odometerEnd)
+        : undefined;
+  }
+
+  if (body.odometer !== undefined) {
+    if (row.odometer != null) {
+      row.odometerStart = row.odometer;
+      row.odometerEnd = row.odometer;
+    }
+  }
+
+  row.distance = computeDistance(row.odometerStart, row.odometerEnd);
+
+  if (Array.isArray(body.attachments)) {
+    row.attachments = body.attachments;
+  }
+
+  await row.save();
+  res.json(row);
+}
+
+async function deleteLog(req, res) {
+  const entryId = req.params.id || req.params.entryId;
+  if (!asObjectId(entryId)) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  const deleted = await VehicleLog.findOneAndDelete({
+    _id: asObjectId(entryId),
+    ...buildOrgFilter(req),
+  });
+
+  if (!deleted) return res.status(404).json({ error: "Not found" });
+
+  return res.sendStatus(204);
+}
+
 /* ----------------------------- ROUTES ------------------------------ */
 /**
  * IMPORTANT:
@@ -185,6 +282,33 @@ router.post("/vehicles/:vehicleId/logbook", (req, res, next) =>
 );
 router.post("/vehicles/:vehicleId/logbook-entries", (req, res, next) =>
   createLog(req, res).catch(next),
+);
+
+// UPDATE aliases
+router.put("/logbook/:id", (req, res, next) => updateLog(req, res).catch(next));
+router.put("/logbooks/:id", (req, res, next) =>
+  updateLog(req, res).catch(next),
+);
+router.put("/vehicles/:vehicleId/logbook/:entryId", (req, res, next) =>
+  updateLog(req, res).catch(next),
+);
+router.put("/vehicles/:vehicleId/logbook-entries/:entryId", (req, res, next) =>
+  updateLog(req, res).catch(next),
+);
+
+// DELETE aliases
+router.delete("/logbook/:id", (req, res, next) =>
+  deleteLog(req, res).catch(next),
+);
+router.delete("/logbooks/:id", (req, res, next) =>
+  deleteLog(req, res).catch(next),
+);
+router.delete("/vehicles/:vehicleId/logbook/:entryId", (req, res, next) =>
+  deleteLog(req, res).catch(next),
+);
+router.delete(
+  "/vehicles/:vehicleId/logbook-entries/:entryId",
+  (req, res, next) => deleteLog(req, res).catch(next),
 );
 
 module.exports = router;
