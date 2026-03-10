@@ -919,6 +919,20 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    const vehiclesForMobile = (Array.isArray(vehicles) ? vehicles : []).map(
+      (v) => {
+        const reminders = (Array.isArray(v?.reminders) ? v.reminders : [])
+          .map(normalizeReminderForMobile)
+          .filter(Boolean);
+
+        return {
+          ...v,
+          reminders,
+          nextDue: computeNextDue(reminders),
+        };
+      },
+    );
+
     const definitions = {
       vehicleEntryTypes: [
         { id: "fuel", label: "Fuel" },
@@ -939,7 +953,7 @@ router.get("/lists", requireOrg, async (req, res) => {
       tasks,
       milestones,
       users,
-      vehicles,
+      vehicles: vehiclesForMobile,
       assets,
       documents,
       groups,
