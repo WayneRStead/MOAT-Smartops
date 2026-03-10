@@ -627,56 +627,69 @@ async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
 }
 
 async function fetchVehicleRemindersSafe({ baseUrl, token, regNumber }) {
-  // TODO: BACKEND ENDPOINT — adjust if needed.
-  // expected response: { reminders: [...] } or [...]
   const reg = normReg(regNumber);
-  if (!reg) return [];
+  if (!reg) return { reminders: [], nextReminder: null };
 
-  const candidates = [
+  const url = joinUrl(
+    baseUrl,
     `/api/mobile/vehicles/${encodeURIComponent(reg)}/reminders`,
-    `/api/mobile/vehicles/${encodeURIComponent(reg)}/reminders/next`,
-    `/api/mobile/reminders/vehicle/${encodeURIComponent(reg)}`,
-    `/api/reminders/vehicle/${encodeURIComponent(reg)}`,
-  ];
+  );
 
-  for (const path of candidates) {
-    try {
-      const url = joinUrl(baseUrl, path);
-      const res = await fetch(url, {
-        headers: { Authorization: token ? `Bearer ${token}` : "" },
-      });
-      if (!res.ok) continue;
-      const data = await res.json().catch(() => null);
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: token ? `Bearer ${token}` : "" },
+    });
 
-      let arr = data?.reminders || data?.items || data || [];
-      if (!Array.isArray(arr)) arr = [];
-
-      const normalized = arr
-        .map((x) => {
-          if (!x) return null;
-          const id = String(x.id || x._id || x.reminderId || "");
-          const title = String(
-            x.title || x.name || x.label || x.type || "Reminder",
-          );
-          const dueAt = x.dueAt || x.dueDate || x.nextAt || x.when || null;
-          return { id: id || title, title, dueAt };
-        })
-        .filter(Boolean);
-
-      return normalized;
-    } catch {
-      // try next
+    if (!res.ok) {
+      return { reminders: [], nextReminder: null };
     }
-  }
 
-  return [];
+    const data = await res.json().catch(() => null);
+
+    const reminders = Array.isArray(data?.reminders)
+      ? data.reminders
+          .map(normalizeReminderItem)
+          .filter((r) => r && r.active !== false)
+      : [];
+
+    const nextReminder =
+      pickBestNextReminder(data?.nextDue) ||
+      reminders.find((r) => r.kind === "date" && r.dueAt) ||
+      reminders.find((r) => r.kind === "odometer" && r.dueOdometer != null) ||
+      reminders[0] ||
+      null;
+
+    return { reminders, nextReminder };
+  } catch {
+    return { reminders: [], nextReminder: null };
+  }
 }
 
 function sortRemindersByDue(reminders) {
   return (reminders || []).slice().sort((a, b) => {
-    const da = a?.dueAt ? Date.parse(a.dueAt) : Number.POSITIVE_INFINITY;
-    const db = b?.dueAt ? Date.parse(b.dueAt) : Number.POSITIVE_INFINITY;
-    return da - db;
+    const aDate =
+      a?.kind === "date" && a?.dueAt
+        ? Date.parse(a.dueAt)
+        : Number.POSITIVE_INFINITY;
+
+    const bDate =
+      b?.kind === "date" && b?.dueAt
+        ? Date.parse(b.dueAt)
+        : Number.POSITIVE_INFINITY;
+
+    if (aDate !== bDate) return aDate - bDate;
+
+    const aOdo =
+      a?.kind === "odometer" && a?.dueOdometer != null
+        ? Number(a.dueOdometer)
+        : Number.POSITIVE_INFINITY;
+
+    const bOdo =
+      b?.kind === "odometer" && b?.dueOdometer != null
+        ? Number(b.dueOdometer)
+        : Number.POSITIVE_INFINITY;
+
+    return aOdo - bOdo;
   });
 }
 
@@ -701,6 +714,83 @@ function fmtDue(dueAt) {
   } catch {
     return String(dueAt || "");
   }
+}
+
+function normalizeReminderItem(x) {
+  if (!x) return null;
+
+  const id = String(x.id || x._id || x.reminderId || "").trim();
+  const kind = String(x.kind || "")
+    .trim()
+    .toLowerCase();
+  const title = String(
+    x.title || x.name || x.label || x.notes || x.type || "Reminder",
+  ).trim();
+
+  const dueAt = x.dueAt || x.dueDate || x.nextAt || x.when || null;
+  const dueOdometer =
+    x.dueOdometer != null && !Number.isNaN(Number(x.dueOdometer))
+      ? Number(x.dueOdometer)
+      : null;
+
+  return {
+    id: id || title,
+    _id: id || title,
+    kind,
+    title,
+    label: title,
+    notes: String(x.notes || "").trim(),
+    dueAt,
+    dueDate: x.dueDate || dueAt || null,
+    dueOdometer,
+    active: x.active !== false,
+    createdAt: x.createdAt || null,
+    lastNotifiedAt: x.lastNotifiedAt || null,
+  };
+}
+
+function pickBestNextReminder(nextDue) {
+  if (!nextDue || typeof nextDue !== "object") return null;
+
+  const dateDue = normalizeReminderItem(nextDue.dateDue);
+  const odoDue = normalizeReminderItem(nextDue.odoDue);
+
+  if (dateDue && odoDue) {
+    const d1 = dateDue.dueAt
+      ? Date.parse(dateDue.dueAt)
+      : Number.POSITIVE_INFINITY;
+    const d2 = odoDue.dueAt
+      ? Date.parse(odoDue.dueAt)
+      : Number.POSITIVE_INFINITY;
+
+    if (Number.isFinite(d1) && Number.isFinite(d2)) {
+      return d1 <= d2 ? dateDue : odoDue;
+    }
+
+    return dateDue || odoDue;
+  }
+
+  return dateDue || odoDue || null;
+}
+
+function reminderDueText(reminder) {
+  if (!reminder) return "No due date set";
+
+  if (reminder.kind === "odometer" && reminder.dueOdometer != null) {
+    return `Due at ${reminder.dueOdometer} km`;
+  }
+
+  if (reminder.dueAt) {
+    return `Due: ${fmtDue(reminder.dueAt)}`;
+  }
+
+  return "No due date set";
+}
+
+function normalizeReminderList(list) {
+  return (Array.isArray(list) ? list : [])
+    .map(normalizeReminderItem)
+    .filter((r) => r && r.active !== false);
 }
 
 export default function VehicleLogScreen() {
@@ -737,10 +827,15 @@ export default function VehicleLogScreen() {
 
   // Reminder panel
   const [vehicleReminders, setVehicleReminders] = useState([]);
+  const [vehicleNextReminder, setVehicleNextReminder] = useState(null);
+
   const nextReminder = useMemo(() => {
-    const sorted = sortRemindersByDue(vehicleReminders);
-    return sorted.length ? sorted[0] : null;
-  }, [vehicleReminders]);
+    if (vehicleNextReminder) return vehicleNextReminder;
+
+    const active = normalizeReminderList(vehicleReminders);
+    const sorted = sortRemindersByDue(active);
+    return sorted[0] || null;
+  }, [vehicleReminders, vehicleNextReminder]);
 
   // Types (shared for purchase + log)
   const [entryTypes, setEntryTypes] = useState([]); // [{id,label}]
@@ -936,49 +1031,52 @@ export default function VehicleLogScreen() {
     })();
   }, [regNumber]);
 
-  // Load reminders when reg changes (cache first, then backend)
+  // Load reminders when reg changes (vehicle cache first, then reminder cache, then backend)
   useEffect(() => {
     (async () => {
       const reg = normReg(regNumber);
       if (!reg) {
         setVehicleReminders([]);
+        setVehicleNextReminder(null);
         return;
       }
 
-      // 0) try selected vehicle cached reminders first
-      const cachedVehicle =
+      let seeded = false;
+
+      // 1) FIRST choice: reminders already on selected vehicle from offline lists
+      const vehicleFromList =
         vehiclesList.find((v) => normReg(v?.regNumber) === reg) || null;
 
-      const cachedVehicleReminders = Array.isArray(
-        cachedVehicle?.raw?.reminders,
-      )
-        ? cachedVehicle.raw.reminders.map((r) => ({
-            id: String(r?._id || r?.id || ""),
-            title:
-              r?.title ||
-              r?.notes ||
-              (r?.kind === "odometer" ? "Odometer reminder" : "Date reminder"),
-            dueAt: r?.dueDate || null,
-            dueOdometer: r?.dueOdometer != null ? Number(r.dueOdometer) : null,
-            kind: r?.kind || "",
-            notes: r?.notes || "",
-            active: r?.active !== false,
-          }))
-        : [];
+      const vehicleListReminders = normalizeReminderList(
+        vehicleFromList?.raw?.reminders,
+      );
 
-      if (cachedVehicleReminders.length) {
-        setVehicleReminders(cachedVehicleReminders);
+      if (vehicleListReminders.length) {
+        setVehicleReminders(vehicleListReminders);
+        setVehicleNextReminder(
+          sortRemindersByDue(vehicleListReminders)[0] || null,
+        );
+        seeded = true;
       }
 
-      // 1) local reminder cache
+      // 2) SECOND choice: local reminder cache
       const raw = await AsyncStorage.getItem(VEHICLE_REMINDERS_KEY);
       const map = raw ? safeJsonParse(raw) : null;
       const fromCache = map && typeof map === "object" ? map[reg] : null;
-      if (Array.isArray(fromCache) && fromCache.length) {
-        setVehicleReminders(fromCache);
+      const cachedReminders = normalizeReminderList(fromCache);
+
+      if (!seeded && cachedReminders.length) {
+        setVehicleReminders(cachedReminders);
+        setVehicleNextReminder(sortRemindersByDue(cachedReminders)[0] || null);
+        seeded = true;
       }
 
-      // 2) backend fetch
+      if (!seeded) {
+        setVehicleReminders([]);
+        setVehicleNextReminder(null);
+      }
+
+      // 3) THIRD choice: backend refresh overrides cache if available
       if (apiBaseUrl) {
         const fetched = await fetchVehicleRemindersSafe({
           baseUrl: apiBaseUrl,
@@ -986,15 +1084,23 @@ export default function VehicleLogScreen() {
           regNumber: reg,
         });
 
-        if (Array.isArray(fetched) && fetched.length) {
-          setVehicleReminders(fetched);
+        if (fetched && typeof fetched === "object") {
+          const reminders = normalizeReminderList(fetched.reminders);
+          const next = normalizeReminderItem(fetched.nextReminder);
 
-          const nextMap = map && typeof map === "object" ? { ...map } : {};
-          nextMap[reg] = fetched;
-          await AsyncStorage.setItem(
-            VEHICLE_REMINDERS_KEY,
-            JSON.stringify(nextMap),
-          );
+          if (reminders.length || next) {
+            setVehicleReminders(reminders);
+            setVehicleNextReminder(
+              next || sortRemindersByDue(reminders)[0] || null,
+            );
+
+            const nextMap = map && typeof map === "object" ? { ...map } : {};
+            nextMap[reg] = reminders;
+            await AsyncStorage.setItem(
+              VEHICLE_REMINDERS_KEY,
+              JSON.stringify(nextMap),
+            );
+          }
         }
       }
     })();
@@ -1066,12 +1172,19 @@ export default function VehicleLogScreen() {
     entryTypes.find((t) => String(t.id) === String(purchaseTypeId)) || null;
 
   const reminderOptions = useMemo(() => {
-    const sorted = sortRemindersByDue(vehicleReminders || []);
+    const sorted = sortRemindersByDue(normalizeReminderList(vehicleReminders));
+
     return sorted.map((r) => ({
-      id: r.id,
-      label: r.dueAt ? `${r.title} (due ${fmtDue(r.dueAt)})` : r.title,
+      id: String(r.id || r._id || ""),
+      label:
+        r.kind === "odometer" && r.dueOdometer != null
+          ? `${r.title} (due at ${r.dueOdometer} km)`
+          : r.dueAt
+            ? `${r.title} (due ${fmtDue(r.dueAt)})`
+            : r.title,
       title: r.title,
       dueAt: r.dueAt || null,
+      dueOdometer: r.dueOdometer ?? null,
     }));
   }, [vehicleReminders]);
 
@@ -1766,13 +1879,9 @@ export default function VehicleLogScreen() {
                 <Text style={styles.reminderBig}>
                   {nextReminder.title || "Reminder"}
                 </Text>
-                {nextReminder.dueAt ? (
-                  <Text style={styles.cardSubtitle}>
-                    Due: {fmtDue(nextReminder.dueAt)}
-                  </Text>
-                ) : (
-                  <Text style={styles.cardSubtitle}>Due date not set</Text>
-                )}
+                <Text style={styles.cardSubtitle}>
+                  {reminderDueText(nextReminder)}
+                </Text>
               </>
             )}
           </View>
