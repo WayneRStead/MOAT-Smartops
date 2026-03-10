@@ -266,6 +266,64 @@ function toGeoFromLocation(loc) {
   };
 }
 
+function computeNextDue(reminders = []) {
+  const active = (Array.isArray(reminders) ? reminders : []).filter(
+    (r) => r && r.active !== false,
+  );
+
+  if (!active.length) {
+    return { dateDue: null, odoDue: null };
+  }
+
+  const dateDue = active
+    .filter((r) => r.kind === "date" && r.dueDate)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
+
+  const odoDue = active
+    .filter(
+      (r) => r.kind === "odometer" && Number.isFinite(Number(r.dueOdometer)),
+    )
+    .sort((a, b) => Number(a.dueOdometer) - Number(b.dueOdometer))[0];
+
+  return {
+    dateDue: dateDue || null,
+    odoDue: odoDue || null,
+  };
+}
+
+function normalizeReminderForMobile(r) {
+  if (!r) return null;
+
+  const id = String(r._id || r.id || "").trim();
+  const kind = String(r.kind || "")
+    .trim()
+    .toLowerCase();
+  const notes = String(r.notes || "").trim();
+
+  let title = "Reminder";
+  if (kind === "date") {
+    title = notes || "Date reminder";
+  } else if (kind === "odometer") {
+    title = notes || "Odometer reminder";
+  }
+
+  return {
+    _id: id || undefined,
+    id: id || undefined,
+    kind,
+    title,
+    notes,
+    dueDate: r.dueDate || null,
+    dueOdometer:
+      r.dueOdometer != null && !Number.isNaN(Number(r.dueOdometer))
+        ? Number(r.dueOdometer)
+        : null,
+    active: r.active !== false,
+    createdAt: r.createdAt || null,
+    lastNotifiedAt: r.lastNotifiedAt || null,
+  };
+}
+
 async function ensureVehicleFromPayload({ orgId, payload }) {
   const Vehicle = require("../models/Vehicle");
 
@@ -831,6 +889,7 @@ router.get("/lists", requireOrg, async (req, res) => {
             driverId: 1,
             projectId: 1,
             taskId: 1,
+            reminders: 1,
           })
           .lean()
       : [];
@@ -890,6 +949,121 @@ router.get("/lists", requireOrg, async (req, res) => {
   } catch (e) {
     console.error("[mobile/lists] error", e);
     return res.status(500).json({ error: "Failed to load lists" });
+  }
+});
+
+router.get("/vehicles/:reg/reminders", requireOrg, async (req, res) => {
+  try {
+    const Vehicle = require("../models/Vehicle");
+
+    const orgId = req.orgObjectId || req.user?.orgId;
+    const reg = normReg(req.params.reg || "");
+
+    if (!reg) {
+      return res.status(400).json({ error: "Registration required" });
+    }
+
+    const orgIdStr = String(orgId || "").trim();
+    const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+      ? new mongoose.Types.ObjectId(orgIdStr)
+      : null;
+
+    const orgFilter = orgIdObj
+      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+      : orgIdStr
+        ? { orgId: orgIdStr }
+        : {};
+
+    const vehicle = await Vehicle.findOne({
+      ...orgFilter,
+      reg,
+    })
+      .select({
+        _id: 1,
+        reg: 1,
+        make: 1,
+        model: 1,
+        year: 1,
+        vehicleType: 1,
+        reminders: 1,
+      })
+      .lean();
+
+    if (!vehicle) {
+      return res.status(404).json({ error: "Vehicle not found" });
+    }
+
+    const reminders = (
+      Array.isArray(vehicle.reminders) ? vehicle.reminders : []
+    )
+      .map(normalizeReminderForMobile)
+      .filter(Boolean);
+
+    const nextDue = computeNextDue(reminders);
+
+    return res.json({
+      ok: true,
+      vehicleId: String(vehicle._id),
+      reg: String(vehicle.reg || ""),
+      reminders,
+      nextDue,
+    });
+  } catch (e) {
+    console.error("[mobile/vehicles/:reg/reminders] error", e);
+    return res.status(500).json({ error: "Failed to load reminders" });
+  }
+});
+
+router.get("/vehicles/:reg/reminders/next", requireOrg, async (req, res) => {
+  try {
+    const Vehicle = require("../models/Vehicle");
+
+    const orgId = req.orgObjectId || req.user?.orgId;
+    const reg = normReg(req.params.reg || "");
+
+    if (!reg) {
+      return res.status(400).json({ error: "Registration required" });
+    }
+
+    const orgIdStr = String(orgId || "").trim();
+    const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+      ? new mongoose.Types.ObjectId(orgIdStr)
+      : null;
+
+    const orgFilter = orgIdObj
+      ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+      : orgIdStr
+        ? { orgId: orgIdStr }
+        : {};
+
+    const vehicle = await Vehicle.findOne({
+      ...orgFilter,
+      reg,
+    })
+      .select({ _id: 1, reg: 1, reminders: 1 })
+      .lean();
+
+    if (!vehicle) {
+      return res.status(404).json({ error: "Vehicle not found" });
+    }
+
+    const reminders = (
+      Array.isArray(vehicle.reminders) ? vehicle.reminders : []
+    )
+      .map(normalizeReminderForMobile)
+      .filter(Boolean);
+
+    const nextDue = computeNextDue(reminders);
+
+    return res.json({
+      ok: true,
+      vehicleId: String(vehicle._id),
+      reg: String(vehicle.reg || ""),
+      nextDue,
+    });
+  } catch (e) {
+    console.error("[mobile/vehicles/:reg/reminders/next] error", e);
+    return res.status(500).json({ error: "Failed to load next reminder" });
   }
 });
 

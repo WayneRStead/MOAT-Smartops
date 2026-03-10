@@ -59,11 +59,12 @@ const CACHE_VEHICLES_KEY = "@moat:cache:vehicles";
 const ORG_KEY = "@moat:cache:orgid";
 const TOKEN_KEY = "@moat:cache:token";
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
+const CACHE_DEFINITIONS_KEY = "@moat:cache:definitions";
 
 const API_BASE_URL_KEY = "@moat:api";
 
 // Local vendor cache (simple UX list; later can be synced)
-const VENDORS_KEY = "@moat:cache:vendors";
+const VENDORS_KEY = "@moat:cache:vehicleVendors";
 
 // Optional local reminder cache
 // shape: { [REG]: [ { id, title, dueAt, ... } ] }
@@ -522,6 +523,39 @@ function sortByLabel(a, b) {
 /* -----------------------------
    Backend fetch: Types + Reminders
 ------------------------------*/
+async function loadVehicleEntryTypesFromCache() {
+  const defs = await loadCache(CACHE_DEFINITIONS_KEY, {});
+  const raw =
+    defs?.vehicleEntryTypes ||
+    defs?.types ||
+    defs?.logTypes ||
+    defs?.purchaseTypes ||
+    [];
+
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((x) => {
+      if (!x) return null;
+      if (typeof x === "string") return { id: x, label: x };
+
+      const id = String(
+        x.id || x._id || x.key || x.code || x.value || "",
+      ).trim();
+      const label = String(x.label || x.name || x.title || id).trim();
+
+      if (!label) return null;
+
+      return {
+        id: id || label,
+        label,
+        raw: x,
+      };
+    })
+    .filter(Boolean)
+    .sort(sortByLabel);
+}
+
 async function fetchVehicleEntryTypesSafe({ baseUrl, token }) {
   // 1) First use cached offline definitions
   try {
@@ -784,14 +818,18 @@ export default function VehicleLogScreen() {
     null;
 
   // Load cached projects/tasks + identity + vendors once
+  // Load cached projects/tasks + identity + vendors + cached types once
   useEffect(() => {
     (async () => {
-      const [p, t] = await Promise.all([
+      const [p, t, defsTypes] = await Promise.all([
         loadCache(CACHE_PROJECTS_KEY, []),
         loadCache(CACHE_TASKS_KEY, []),
+        loadVehicleEntryTypesFromCache(),
       ]);
+
       setProjects(Array.isArray(p) ? p : []);
       setTasks(Array.isArray(t) ? t : []);
+      setEntryTypes(Array.isArray(defsTypes) ? defsTypes : []);
 
       const oid = (await AsyncStorage.getItem(ORG_KEY)) || "";
       setOrgId(String(oid || ""));
@@ -818,23 +856,37 @@ export default function VehicleLogScreen() {
       let alive = true;
 
       (async () => {
-        setTypesLoading(true);
-        try {
-          const vs = await loadVendors();
-          const vehicleItems = await refreshVehiclesList();
-          const types = await fetchVehicleEntryTypesSafe({
-            baseUrl: apiBaseUrl,
-            token,
-          });
+        const [p, t, vs, vehicleItems, cachedTypes] = await Promise.all([
+          loadCache(CACHE_PROJECTS_KEY, []),
+          loadCache(CACHE_TASKS_KEY, []),
+          loadVendors(),
+          refreshVehiclesList(),
+          loadVehicleEntryTypesFromCache(),
+        ]);
 
-          if (!alive) return;
+        let liveTypes = cachedTypes;
 
-          setVendors(vs.sort(sortByLabel));
-          setVehiclesList(vehicleItems);
-          setEntryTypes(Array.isArray(types) ? types : []);
-        } finally {
-          if (alive) setTypesLoading(false);
+        if (apiBaseUrl) {
+          try {
+            const fetchedTypes = await fetchVehicleEntryTypesSafe({
+              baseUrl: apiBaseUrl,
+              token,
+            });
+            if (Array.isArray(fetchedTypes) && fetchedTypes.length > 0) {
+              liveTypes = fetchedTypes;
+            }
+          } catch {
+            // keep cached types
+          }
         }
+
+        if (!alive) return;
+
+        setProjects(Array.isArray(p) ? p : []);
+        setTasks(Array.isArray(t) ? t : []);
+        setVendors(vs.sort(sortByLabel));
+        setVehiclesList(vehicleItems);
+        setEntryTypes(Array.isArray(liveTypes) ? liveTypes : []);
       })();
 
       return () => {
@@ -846,14 +898,23 @@ export default function VehicleLogScreen() {
   // Fetch types from backend (if base URL exists)
   useEffect(() => {
     (async () => {
+      const cachedTypes = await loadVehicleEntryTypesFromCache();
+      if (cachedTypes.length) {
+        setEntryTypes(cachedTypes);
+      }
+
       if (!apiBaseUrl) return;
+
       setTypesLoading(true);
       try {
         const types = await fetchVehicleEntryTypesSafe({
           baseUrl: apiBaseUrl,
           token,
         });
-        setEntryTypes(types);
+
+        if (Array.isArray(types) && types.length > 0) {
+          setEntryTypes(types);
+        }
       } finally {
         setTypesLoading(false);
       }
