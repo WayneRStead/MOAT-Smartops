@@ -6,11 +6,13 @@ const multer = require("multer");
 const router = express.Router();
 
 // Prefer already-compiled model; only require if missing
-const VehicleLog = mongoose.models.VehicleLog || require("../models/VehicleLog");
+const VehicleLog =
+  mongoose.models.VehicleLog || require("../models/VehicleLog");
 
 /* ----------------------------- helpers ------------------------------ */
 const isValidId = (v) => mongoose.Types.ObjectId.isValid(String(v));
-const asObjectId = (v) => (isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : null);
+const asObjectId = (v) =>
+  isValidId(v) ? new mongoose.Types.ObjectId(String(v)) : null;
 
 function computeDistance(start, end) {
   if (start == null || end == null) return undefined;
@@ -100,25 +102,47 @@ async function createLog(req, res) {
 
   const vehicleId = body.vehicleId || vParam;
   const vid = asObjectId(vehicleId);
-  if (!vid) return res.status(400).json({ error: "vehicleId required/invalid" });
+  if (!vid)
+    return res.status(400).json({ error: "vehicleId required/invalid" });
 
   const title = body.title;
   if (!title) return res.status(400).json({ error: "title required" });
 
+  const odometer =
+    body.odometer != null && body.odometer !== ""
+      ? Number(body.odometer)
+      : undefined;
+
   const odometerStart =
-    body.odometerStart != null && body.odometerStart !== "" ? Number(body.odometerStart) : undefined;
+    body.odometerStart != null && body.odometerStart !== ""
+      ? Number(body.odometerStart)
+      : odometer;
+
   const odometerEnd =
-    body.odometerEnd != null && body.odometerEnd !== "" ? Number(body.odometerEnd) : undefined;
+    body.odometerEnd != null && body.odometerEnd !== ""
+      ? Number(body.odometerEnd)
+      : odometer;
+
+  const cost =
+    body.cost != null && body.cost !== "" ? Number(body.cost) : undefined;
 
   const doc = {
     vehicleId: vid,
     title: String(title).trim(),
+    type: String(body.type || "other")
+      .trim()
+      .toLowerCase(),
+    vendor: String(body.vendor || "").trim(),
+    cost: Number.isFinite(cost) ? cost : undefined,
     notes: String(body.notes || ""),
     tags: cleanTags(body.tags),
     ts: body.ts ? new Date(body.ts) : new Date(),
-    odometerStart,
-    odometerEnd,
+    odometer: Number.isFinite(odometer) ? odometer : undefined,
+    odometerStart: Number.isFinite(odometerStart) ? odometerStart : undefined,
+    odometerEnd: Number.isFinite(odometerEnd) ? odometerEnd : undefined,
     distance: computeDistance(odometerStart, odometerEnd),
+    attachments: Array.isArray(body.attachments) ? body.attachments : [],
+    sourceOfflineEventId: body.sourceOfflineEventId || undefined,
     createdBy: req.user?.sub || req.user?._id || "unknown",
   };
 
@@ -141,16 +165,26 @@ router.get("/logbook", (req, res, next) => listLogs(req, res).catch(next));
 router.get("/logbooks", (req, res, next) => listLogs(req, res).catch(next));
 
 // Your frontend is calling this:
-router.get("/vehicles/:vehicleId/entries", (req, res, next) => listLogs(req, res).catch(next));
+router.get("/vehicles/:vehicleId/entries", (req, res, next) =>
+  listLogs(req, res).catch(next),
+);
 
 // Additional useful aliases
-router.get("/vehicles/:vehicleId/logbook", (req, res, next) => listLogs(req, res).catch(next));
-router.get("/vehicles/:vehicleId/logbook-entries", (req, res, next) => listLogs(req, res).catch(next));
+router.get("/vehicles/:vehicleId/logbook", (req, res, next) =>
+  listLogs(req, res).catch(next),
+);
+router.get("/vehicles/:vehicleId/logbook-entries", (req, res, next) =>
+  listLogs(req, res).catch(next),
+);
 
 // CREATE aliases (the ones you showed in your network log)
 router.post("/logbook", (req, res, next) => createLog(req, res).catch(next));
 router.post("/logbooks", (req, res, next) => createLog(req, res).catch(next));
-router.post("/vehicles/:vehicleId/logbook", (req, res, next) => createLog(req, res).catch(next));
-router.post("/vehicles/:vehicleId/logbook-entries", (req, res, next) => createLog(req, res).catch(next));
+router.post("/vehicles/:vehicleId/logbook", (req, res, next) =>
+  createLog(req, res).catch(next),
+);
+router.post("/vehicles/:vehicleId/logbook-entries", (req, res, next) =>
+  createLog(req, res).catch(next),
+);
 
 module.exports = router;

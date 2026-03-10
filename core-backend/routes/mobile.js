@@ -1542,6 +1542,202 @@ router.post(
         }
       }
 
+      // ✅ APPLY VEHICLE LOGS
+      if (eventType === "vehicle-log") {
+        try {
+          const Vehicle = require("../models/Vehicle");
+          const VehicleLog =
+            mongoose.models.VehicleLog || require("../models/VehicleLog");
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const reg = normReg(payload?.regNumber || entityRef || "");
+
+          if (!reg) {
+            console.warn("[vehicle-log] missing reg number", {
+              offlineEventId: String(doc?._id || ""),
+            });
+          } else {
+            const orgIdStr = String(orgId2 || "").trim();
+            const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+              ? new mongoose.Types.ObjectId(orgIdStr)
+              : null;
+
+            const orgFilter = orgIdObj
+              ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+              : orgIdStr
+                ? { orgId: orgIdStr }
+                : {};
+
+            let vehicle = await Vehicle.findOne({
+              ...orgFilter,
+              reg,
+            }).select({ _id: 1, reg: 1 });
+
+            if (!vehicle && mongoose.isValidObjectId(String(entityRef || ""))) {
+              vehicle = await Vehicle.findOne({
+                ...orgFilter,
+                _id: new mongoose.Types.ObjectId(String(entityRef)),
+              }).select({ _id: 1, reg: 1 });
+            }
+
+            if (!vehicle) {
+              vehicle = await ensureVehicleFromPayload({
+                orgId: orgId2,
+                payload,
+              });
+            }
+
+            if (!vehicle?._id) {
+              console.warn("[vehicle-log] vehicle not found / not created", {
+                reg,
+                offlineEventId: String(doc?._id || ""),
+              });
+            } else {
+              const uploaded = Array.isArray(doc?.uploadedFiles)
+                ? doc.uploadedFiles
+                : [];
+
+              const attachments = uploaded
+                .map((f) =>
+                  buildVehicleOfflineAttachment(f, "Vehicle log photo"),
+                )
+                .filter(Boolean)
+                .map((a) => ({
+                  fileId: String(a.fileId || ""),
+                  filename: a.filename || "",
+                  url: a.url || "",
+                  mime: a.mime || "",
+                  size: a.size,
+                  note: a.note || "",
+                  uploadedAt: a.uploadedAt || new Date(),
+                }));
+
+              const dateValue = parseDateTimeLoose(
+                payload?.dateTime ||
+                  payload?.createdAt ||
+                  payload?.updatedAt ||
+                  createdAtClient,
+                new Date(),
+              );
+
+              const odometer =
+                payload?.odometer != null && payload?.odometer !== ""
+                  ? Number(payload.odometer)
+                  : null;
+
+              const cost =
+                payload?.cost != null && payload?.cost !== ""
+                  ? Number(payload.cost)
+                  : null;
+
+              const type = String(
+                payload?.typeId || payload?.typeLabel || "other",
+              )
+                .trim()
+                .toLowerCase();
+
+              const title = String(
+                payload?.typeLabel ||
+                  payload?.typeId ||
+                  payload?.tag ||
+                  "Vehicle log",
+              ).trim();
+
+              const notes = String(payload?.notes || "").trim();
+
+              const tagList = [
+                type || null,
+                payload?.tag ? String(payload.tag).trim() : null,
+              ].filter(Boolean);
+
+              const logDoc = await VehicleLog.findOneAndUpdate(
+                {
+                  orgId: orgIdObj || orgIdStr || orgId2,
+                  sourceOfflineEventId: doc._id,
+                },
+                {
+                  $setOnInsert: {
+                    orgId: orgIdObj || orgIdStr || orgId2,
+                    sourceOfflineEventId: doc._id,
+                    createdAt: new Date(),
+                  },
+                  $set: {
+                    vehicleId: vehicle._id,
+                    title: title || "Vehicle log",
+                    type: type || "other",
+                    vendor: String(payload?.vendor || "").trim(),
+                    cost: Number.isFinite(cost) ? cost : undefined,
+                    notes,
+                    tags: tagList,
+                    ts: dateValue,
+                    odometer: Number.isFinite(odometer) ? odometer : undefined,
+                    odometerStart: Number.isFinite(odometer)
+                      ? odometer
+                      : undefined,
+                    odometerEnd: Number.isFinite(odometer)
+                      ? odometer
+                      : undefined,
+                    distance: 0,
+                    attachments,
+                    createdBy:
+                      req.user?.sub ||
+                      req.user?._id ||
+                      req.user?.email ||
+                      "mobile-offline",
+                    updatedAt: new Date(),
+                  },
+                },
+                {
+                  upsert: true,
+                  new: true,
+                  setDefaultsOnInsert: true,
+                },
+              );
+
+              appliedTo.vehicleLogId = String(logDoc?._id || "");
+              appliedTo.vehicleId = String(vehicle._id);
+              appliedTo.reg = String(vehicle.reg || reg);
+
+              const reminderId = String(
+                payload?.completesReminderId || "",
+              ).trim();
+
+              if (mongoose.isValidObjectId(reminderId)) {
+                try {
+                  const vehicleForReminder = await Vehicle.findById(
+                    vehicle._id,
+                  );
+                  const reminder =
+                    vehicleForReminder?.reminders?.id(reminderId);
+
+                  if (reminder) {
+                    reminder.active = false;
+                    await vehicleForReminder.save();
+                    appliedTo.completedReminderId = reminderId;
+                  } else {
+                    console.warn(
+                      "[vehicle-log] reminder not found on vehicle",
+                      {
+                        reminderId,
+                        vehicleId: String(vehicle._id),
+                        offlineEventId: String(doc?._id || ""),
+                      },
+                    );
+                  }
+                } catch (eReminder) {
+                  console.error(
+                    "[vehicle-log] failed to complete reminder",
+                    eReminder,
+                  );
+                }
+              }
+            }
+          }
+        } catch (eVehicleLog) {
+          console.error("[vehicle-log] failed to apply", eVehicleLog);
+        }
+      }
+
       // ✅ APPLY VEHICLE TRIPS
       if (eventType === "vehicle-trip") {
         try {
