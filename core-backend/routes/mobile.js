@@ -935,17 +935,17 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const definitions = {
       vehicleEntryTypes: [
-  { id: "fuel", label: "Fuel" },
-  { id: "service", label: "Service" },
-  { id: "repair", label: "Repair" },
-  { id: "parts", label: "Parts" },
-  { id: "tyres", label: "Tyres" },
-  { id: "toll", label: "Toll" },
-  { id: "registration", label: "Registration" },
-  { id: "inspection", label: "Inspection" },
-  { id: "incident", label: "Incident" },
-  { id: "other", label: "Other" },
-];
+        { id: "fuel", label: "Fuel" },
+        { id: "service", label: "Service" },
+        { id: "repair", label: "Repair" },
+        { id: "parts", label: "Parts" },
+        { id: "tyres", label: "Tyres" },
+        { id: "toll", label: "Toll" },
+        { id: "registration", label: "Registration" },
+        { id: "inspection", label: "Inspection" },
+        { id: "incident", label: "Incident" },
+        { id: "other", label: "Other" },
+      ],
     };
 
     return res.json({
