@@ -1,4 +1,4 @@
-// core-backend/routes/mobile.js (updateing offline lists 9-3-2026)
+// core-backend/routes/mobile.js
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-03-06-vehicle-trip-01";
+const ROUTER_VERSION = "mobile-router-v2026-03-10-vehicle-purchase-01";
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
@@ -1778,6 +1778,124 @@ router.post(
           }
         } catch (eTrip) {
           console.error("[vehicle-trip] failed to apply", eTrip);
+        }
+      }
+
+      // ✅ APPLY VEHICLE PURCHASES
+      if (eventType === "vehicle-purchase") {
+        try {
+          const Purchase = require("../models/Purchase");
+          const Vendor = require("../models/Vendor");
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const orgIdStr = String(orgId2 || "").trim();
+
+          const vehicle = await ensureVehicleFromPayload({
+            orgId: orgId2,
+            payload,
+          });
+
+          if (!vehicle?._id) {
+            console.warn("[vehicle-purchase] vehicle not found / not created", {
+              regNumber: payload?.regNumber,
+              offlineEventId: String(doc?._id || ""),
+            });
+          } else {
+            const uploaded = Array.isArray(doc?.uploadedFiles)
+              ? doc.uploadedFiles
+              : [];
+
+            // build public URLs for any uploaded slip/receipt files
+            const docUrls = uploaded
+              .map((f) => {
+                const att = buildVehicleOfflineAttachment(f, "Purchase slip");
+                return att?.url || null;
+              })
+              .filter(Boolean);
+
+            const projectId = mongoose.isValidObjectId(
+              String(payload?.projectId || ""),
+            )
+              ? new mongoose.Types.ObjectId(String(payload.projectId))
+              : undefined;
+
+            const taskId = mongoose.isValidObjectId(
+              String(payload?.taskId || ""),
+            )
+              ? new mongoose.Types.ObjectId(String(payload.taskId))
+              : undefined;
+
+            // Resolve vendorId from vendor name if possible
+            let vendorId = undefined;
+            const vendorName = String(payload?.vendor || "").trim();
+
+            if (vendorName && Vendor?.findOne) {
+              const vendorDoc = await Vendor.findOne({
+                name: new RegExp(
+                  `^${vendorName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+                  "i",
+                ),
+              })
+                .select({ _id: 1, name: 1 })
+                .lean()
+                .catch(() => null);
+
+              if (vendorDoc?._id) {
+                vendorId = new mongoose.Types.ObjectId(String(vendorDoc._id));
+              }
+            }
+
+            const purchaseDate = parseDateTimeLoose(
+              payload?.dateTime ||
+                payload?.createdAt ||
+                createdAtClient ||
+                new Date(),
+              new Date(),
+            );
+
+            const cost = toFiniteNumberOrNull(payload?.cost) ?? 0;
+
+            // idempotency: one purchase per offline event
+            const existingPurchase = await Purchase.findOne({
+              orgId: orgIdStr,
+              notes: new RegExp(`\\(offlineEventId:${String(doc._id)}\\)$`),
+            })
+              .select({ _id: 1 })
+              .lean()
+              .catch(() => null);
+
+            if (existingPurchase?._id) {
+              appliedTo.purchaseId = String(existingPurchase._id);
+              appliedTo.vehicleId = String(vehicle._id);
+              appliedTo.reg = String(vehicle.reg || "");
+              appliedTo.purchaseStatus = "already-exists";
+            } else {
+              const createdPurchase = await Purchase.create({
+                vehicleId: vehicle._id,
+                ...(vendorId ? { vendorId } : {}),
+                vendorName: vendorName || "",
+                ...(projectId ? { projectId } : {}),
+                ...(taskId ? { taskId } : {}),
+                date: purchaseDate,
+                cost,
+                type: String(payload?.typeId || payload?.typeLabel || "other")
+                  .trim()
+                  .toLowerCase(),
+                notes: `${String(payload?.notes || "").trim()}${
+                  vendorName && !vendorId ? ` (Vendor: ${vendorName})` : ""
+                } (offlineEventId:${String(doc._id)})`.trim(),
+                docUrls,
+                orgId: orgIdStr || undefined,
+              });
+
+              appliedTo.purchaseId = String(createdPurchase._id);
+              appliedTo.vehicleId = String(vehicle._id);
+              appliedTo.reg = String(vehicle.reg || "");
+              appliedTo.purchaseStatus = "created";
+            }
+          }
+        } catch (ePurchase) {
+          console.error("[vehicle-purchase] failed to apply", ePurchase);
         }
       }
 
