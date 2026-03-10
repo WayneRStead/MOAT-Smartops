@@ -1858,7 +1858,7 @@ router.post(
             // idempotency: one purchase per offline event
             const existingPurchase = await Purchase.findOne({
               orgId: orgIdStr,
-              notes: new RegExp(`\\(offlineEventId:${String(doc._id)}\\)$`),
+              sourceOfflineEventId: doc._id,
             })
               .select({ _id: 1 })
               .lean()
@@ -1881,10 +1881,9 @@ router.post(
                 type: String(payload?.typeId || payload?.typeLabel || "other")
                   .trim()
                   .toLowerCase(),
-                notes: `${String(payload?.notes || "").trim()}${
-                  vendorName && !vendorId ? ` (Vendor: ${vendorName})` : ""
-                } (offlineEventId:${String(doc._id)})`.trim(),
+                notes: String(payload?.notes || "").trim(),
                 docUrls,
+                sourceOfflineEventId: doc._id,
                 orgId: orgIdStr || undefined,
               });
 

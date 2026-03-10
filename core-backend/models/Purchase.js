@@ -45,10 +45,22 @@ const PurchaseSchema = new Schema(
     // When it happened + bookkeeping
     date: { type: Date, required: true, index: true },
     cost: { type: Number, default: 0, min: 0 },
-    type: { type: String, trim: true, default: "other" }, // e.g. service, repair, tyres, parts, fuel, toll, registration, other
+    type: { type: String, trim: true, default: "other" },
     notes: { type: String, trim: true, default: "" },
 
-    docUrls: [{ type: String }], // optional invoice/receipt links
+    docUrls: [{ type: String }],
+
+    sourceOfflineEventId: {
+      type: Schema.Types.ObjectId,
+      index: true,
+      default: undefined,
+    },
+
+    // optional single receipt image
+    receiptPhoto: {
+      type: ReceiptPhotoSchema,
+      default: undefined,
+    },
 
     // IMPORTANT: keep String to match routes/purchases buildOrgFilter()
     orgId: { type: String, index: true, default: undefined },
@@ -63,6 +75,7 @@ PurchaseSchema.pre("validate", function () {
   } else {
     this.type = "other";
   }
+
   if (!Array.isArray(this.docUrls)) this.docUrls = [];
 });
 
