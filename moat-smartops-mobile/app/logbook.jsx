@@ -945,23 +945,50 @@ export default function VehicleLogScreen() {
         return;
       }
 
-      // 1) local cache
+      // 0) try selected vehicle cached reminders first
+      const cachedVehicle =
+        vehiclesList.find((v) => normReg(v?.regNumber) === reg) || null;
+
+      const cachedVehicleReminders = Array.isArray(
+        cachedVehicle?.raw?.reminders,
+      )
+        ? cachedVehicle.raw.reminders.map((r) => ({
+            id: String(r?._id || r?.id || ""),
+            title:
+              r?.title ||
+              r?.notes ||
+              (r?.kind === "odometer" ? "Odometer reminder" : "Date reminder"),
+            dueAt: r?.dueDate || null,
+            dueOdometer: r?.dueOdometer != null ? Number(r.dueOdometer) : null,
+            kind: r?.kind || "",
+            notes: r?.notes || "",
+            active: r?.active !== false,
+          }))
+        : [];
+
+      if (cachedVehicleReminders.length) {
+        setVehicleReminders(cachedVehicleReminders);
+      }
+
+      // 1) local reminder cache
       const raw = await AsyncStorage.getItem(VEHICLE_REMINDERS_KEY);
       const map = raw ? safeJsonParse(raw) : null;
       const fromCache = map && typeof map === "object" ? map[reg] : null;
-      if (Array.isArray(fromCache)) setVehicleReminders(fromCache);
+      if (Array.isArray(fromCache) && fromCache.length) {
+        setVehicleReminders(fromCache);
+      }
 
-      // 2) backend fetch (if configured)
+      // 2) backend fetch
       if (apiBaseUrl) {
         const fetched = await fetchVehicleRemindersSafe({
           baseUrl: apiBaseUrl,
           token,
           regNumber: reg,
         });
-        if (Array.isArray(fetched)) {
+
+        if (Array.isArray(fetched) && fetched.length) {
           setVehicleReminders(fetched);
 
-          // update cache
           const nextMap = map && typeof map === "object" ? { ...map } : {};
           nextMap[reg] = fetched;
           await AsyncStorage.setItem(
@@ -971,7 +998,7 @@ export default function VehicleLogScreen() {
         }
       }
     })();
-  }, [regNumber, apiBaseUrl, token]);
+  }, [regNumber, apiBaseUrl, token, vehiclesList]);
 
   const selectedProject = projects.find((p) => pickId(p) === projectId) || null;
   const selectedTask = tasks.find((t) => pickId(t) === taskId) || null;

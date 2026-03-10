@@ -957,9 +957,10 @@ router.get("/vehicles/:reg/reminders", requireOrg, async (req, res) => {
     const Vehicle = require("../models/Vehicle");
 
     const orgId = req.orgObjectId || req.user?.orgId;
-    const reg = normReg(req.params.reg || "");
+    const regOrId = String(req.params.reg || "").trim();
+    const reg = normReg(regOrId);
 
-    if (!reg) {
+    if (!regOrId) {
       return res.status(400).json({ error: "Registration required" });
     }
 
@@ -974,7 +975,10 @@ router.get("/vehicles/:reg/reminders", requireOrg, async (req, res) => {
         ? { orgId: orgIdStr }
         : {};
 
-    const vehicle = await Vehicle.findOne({
+    let vehicle = null;
+
+    // 1) try by exact reg
+    vehicle = await Vehicle.findOne({
       ...orgFilter,
       reg,
     })
@@ -989,7 +993,30 @@ router.get("/vehicles/:reg/reminders", requireOrg, async (req, res) => {
       })
       .lean();
 
+    // 2) fallback by _id
+    if (!vehicle && mongoose.isValidObjectId(regOrId)) {
+      vehicle = await Vehicle.findOne({
+        ...orgFilter,
+        _id: new mongoose.Types.ObjectId(regOrId),
+      })
+        .select({
+          _id: 1,
+          reg: 1,
+          make: 1,
+          model: 1,
+          year: 1,
+          vehicleType: 1,
+          reminders: 1,
+        })
+        .lean();
+    }
+
     if (!vehicle) {
+      console.warn("[mobile reminders] vehicle not found", {
+        regOrId,
+        reg,
+        orgId: orgIdStr,
+      });
       return res.status(404).json({ error: "Vehicle not found" });
     }
 
