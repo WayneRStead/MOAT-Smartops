@@ -896,7 +896,18 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const assets = Asset?.find
       ? await Asset.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
-          .select({ _id: 1, name: 1, assetCode: 1, status: 1 })
+          .select({
+            _id: 1,
+            code: 1,
+            name: 1,
+            type: 1,
+            projectId: 1,
+            location: 1,
+            lat: 1,
+            lng: 1,
+            geometry: 1,
+            status: 1,
+          })
           .lean()
       : [];
 

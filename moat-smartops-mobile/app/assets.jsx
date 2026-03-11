@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -23,6 +23,7 @@ const THEME_COLOR = "#22a6b3";
 const LAST_SCAN_KEY = "@moat:lastScan";
 const ASSETS_KEY = "@moat:assets";
 const CACHE_ASSETS_KEY = "@moat:cache:assets";
+const CACHE_PROJECTS_KEY = "@moat:cache:projects";
 const TOKEN_KEY = "@moat:cache:token";
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
 
@@ -31,7 +32,9 @@ const CAN_CREATE_ROLES = new Set([
   "project-manager",
   "manager",
   "admin",
+  "administrator",
   "superadmin",
+  "super_admin",
   "owner",
 ]);
 
@@ -116,9 +119,31 @@ function pickAssetCode(input, fallbackCode = "") {
       input?.tag ||
       input?.assetTag ||
       input?.barcode ||
-      input?._id ||
       fallbackCode,
   );
+}
+
+function pickProjectId(input) {
+  return String(
+    input?.projectId?._id ||
+      input?.projectId?.id ||
+      input?.project?._id ||
+      input?.project?.id ||
+      input?.projectId ||
+      input?.project ||
+      "",
+  ).trim();
+}
+
+function pickProjectLabel(input) {
+  return String(
+    input?.projectName ||
+      input?.projectLabel ||
+      input?.project?.name ||
+      input?.projectId?.name ||
+      pickProjectId(input) ||
+      "",
+  ).trim();
 }
 
 function normalizeAssetOption(input, fallbackCode = "") {
@@ -132,28 +157,62 @@ function normalizeAssetOption(input, fallbackCode = "") {
   ).trim();
 
   const assetCategory = String(
-    input.assetCategory || input.category || input.type || "",
+    input.assetCategory ||
+      input.category ||
+      input.type ||
+      input.assetType ||
+      "",
+  ).trim();
+
+  const projectId = String(
+    input?.assetProjectId ||
+      input?.projectId?._id ||
+      input?.projectId?.id ||
+      input?.project?._id ||
+      input?.project?.id ||
+      input?.projectId ||
+      input?.project ||
+      "",
   ).trim();
 
   const assetProject = String(
-    input.assetProject ||
-      input.projectName ||
-      input.projectLabel ||
-      input.projectId ||
+    input?.assetProject ||
+      input?.projectName ||
+      input?.projectLabel ||
+      input?.project?.name ||
+      input?.projectId?.name ||
+      projectId ||
       "",
   ).trim();
 
   const assetLocation = String(
-    input.assetLocation || input.location || input.area || "",
+    input?.assetLocation || input?.area || input?.locationName || "",
   ).trim();
+
+  const lat =
+    input?.location?.lat ??
+    input?.lat ??
+    (Array.isArray(input?.geometry?.coordinates)
+      ? input.geometry.coordinates[1]
+      : null);
+
+  const lng =
+    input?.location?.lng ??
+    input?.lng ??
+    (Array.isArray(input?.geometry?.coordinates)
+      ? input.geometry.coordinates[0]
+      : null);
 
   return {
     id: assetCode,
     assetCode,
     assetName,
     assetCategory,
+    assetProjectId: projectId || null,
     assetProject,
     assetLocation,
+    lat: Number.isFinite(Number(lat)) ? Number(lat) : null,
+    lng: Number.isFinite(Number(lng)) ? Number(lng) : null,
     label: assetName ? `${assetCode} — ${assetName}` : assetCode,
     raw: input,
   };
@@ -233,6 +292,8 @@ async function getCurrentUserMeta() {
   const roles = []
     .concat(payload?.roles || [])
     .concat(payload?.role ? [payload.role] : [])
+    .concat(payload?.user?.role ? [payload.user.role] : [])
+    .concat(payload?.permissions || [])
     .map((r) =>
       String(r || "")
         .trim()
@@ -283,6 +344,14 @@ async function tryImmediateSyncForAssets() {
     console.log("[ASSETS] immediate sync failed", e);
     return null;
   }
+}
+
+function pickProjectIdFromProject(input) {
+  return String(input?._id || input?.id || "").trim();
+}
+
+function pickProjectName(input) {
+  return String(input?.name || input?.title || pickProjectIdFromProject(input));
 }
 
 function SelectModal({
@@ -364,13 +433,33 @@ function SelectModal({
   );
 }
 
+function SelectField({ label, valueText, onPress, disabled }) {
+  return (
+    <TouchableOpacity
+      style={[styles.selectField, disabled && { opacity: 0.5 }]}
+      onPress={onPress}
+      disabled={!!disabled}
+    >
+      <Text style={styles.selectFieldLabel}>{label}</Text>
+      <Text style={styles.selectFieldValue} numberOfLines={1}>
+        {valueText || "Tap to select"}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
 export default function AssetsScreen() {
   const router = useRouter();
 
   const [userRole, setUserRole] = useState("");
   const [userId, setUserId] = useState("");
+
   const [assetsList, setAssetsList] = useState([]);
+  const [projects, setProjects] = useState([]);
+
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [createProjectPickerOpen, setCreateProjectPickerOpen] = useState(false);
 
   const canCreateAsset = CAN_CREATE_ROLES.has(
     String(userRole || "").toLowerCase(),
@@ -379,21 +468,23 @@ export default function AssetsScreen() {
   const [assetCode, setAssetCode] = useState("");
   const [assetName, setAssetName] = useState("");
   const [assetCategory, setAssetCategory] = useState("");
-  const [assetProject, setAssetProject] = useState("");
+  const [assetProjectId, setAssetProjectId] = useState("");
   const [assetLocation, setAssetLocation] = useState("");
 
   const [createVisible, setCreateVisible] = useState(false);
   const [newCode, setNewCode] = useState("");
   const [newName, setNewName] = useState("");
   const [newCategory, setNewCategory] = useState("");
-  const [newProject, setNewProject] = useState("");
+  const [newProjectId, setNewProjectId] = useState("");
   const [newLocation, setNewLocation] = useState("");
   const [pendingScanRaw, setPendingScanRaw] = useState(null);
+  const [isSavingAssetCreate, setIsSavingAssetCreate] = useState(false);
 
   const [logModalVisible, setLogModalVisible] = useState(false);
   const [logDateTime, setLogDateTime] = useState(formatNow());
   const [logNote, setLogNote] = useState("");
   const [logPhoto, setLogPhoto] = useState(null);
+  const [isSavingLog, setIsSavingLog] = useState(false);
 
   const effectiveCode = String(assetCode || "").trim();
 
@@ -401,14 +492,25 @@ export default function AssetsScreen() {
     assetsList.find((a) => normCode(a.assetCode) === normCode(assetCode)) ||
     null;
 
+  const selectedProject =
+    projects.find(
+      (p) => pickProjectIdFromProject(p) === String(assetProjectId),
+    ) || null;
+
+  const selectedCreateProject =
+    projects.find(
+      (p) => pickProjectIdFromProject(p) === String(newProjectId),
+    ) || null;
+
   useFocusEffect(
     useCallback(() => {
       let alive = true;
 
       (async () => {
-        const [userMeta, assetItems] = await Promise.all([
+        const [userMeta, assetItems, cachedProjects] = await Promise.all([
           getCurrentUserMeta(),
           refreshAssetsList(),
+          loadCache(CACHE_PROJECTS_KEY, []),
         ]);
 
         if (!alive) return;
@@ -421,6 +523,7 @@ export default function AssetsScreen() {
         setUserRole(preferredRole);
         setUserId(String(userMeta.userId || ""));
         setAssetsList(assetItems);
+        setProjects(Array.isArray(cachedProjects) ? cachedProjects : []);
       })();
 
       return () => {
@@ -434,7 +537,7 @@ export default function AssetsScreen() {
       setNewCode(prefill.assetCode || effectiveCode || "");
       setNewName(prefill.assetName || "");
       setNewCategory(prefill.assetCategory || "");
-      setNewProject(prefill.assetProject || "");
+      setNewProjectId(prefill.assetProjectId || "");
       setNewLocation(prefill.assetLocation || "");
       setPendingScanRaw(prefill.raw || null);
       setCreateVisible(true);
@@ -453,7 +556,7 @@ export default function AssetsScreen() {
     setAssetCode(item.assetCode || "");
     setAssetName(item.assetName || "");
     setAssetCategory(item.assetCategory || "");
-    setAssetProject(item.assetProject || "");
+    setAssetProjectId(item.assetProjectId || "");
     setAssetLocation(item.assetLocation || "");
   }, []);
 
@@ -484,11 +587,7 @@ export default function AssetsScreen() {
 
       const existing = await applyAssetFromStore(parsedCode);
       if (existing) {
-        setAssetCode(existing.assetCode || parsedCode);
-        setAssetName(existing.assetName || "");
-        setAssetCategory(existing.assetCategory || "");
-        setAssetProject(existing.assetProject || "");
-        setAssetLocation(existing.assetLocation || "");
+        applySelectedAsset(existing);
         return;
       }
 
@@ -505,7 +604,7 @@ export default function AssetsScreen() {
         raw: parsed.raw,
       });
     },
-    [applyAssetFromStore, canCreateAsset, openCreateModal],
+    [applyAssetFromStore, applySelectedAsset, canCreateAsset, openCreateModal],
   );
 
   useFocusEffect(
@@ -537,22 +636,6 @@ export default function AssetsScreen() {
       };
     }, [ensureAssetKnownOrPrompt]),
   );
-
-  useEffect(() => {
-    (async () => {
-      const code = normCode(assetCode);
-      if (!code) return;
-
-      const existing = await applyAssetFromStore(code);
-      if (!existing) return;
-
-      setAssetCode(existing.assetCode || code);
-      setAssetName(existing.assetName || "");
-      setAssetCategory(existing.assetCategory || "");
-      setAssetProject(existing.assetProject || "");
-      setAssetLocation(existing.assetLocation || "");
-    })();
-  }, [assetCode, applyAssetFromStore]);
 
   const takePhoto = async (setter) => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -588,6 +671,8 @@ export default function AssetsScreen() {
   }, [assetCode]);
 
   const handleSaveNewAsset = async () => {
+    if (isSavingAssetCreate) return;
+
     if (!canCreateAsset) {
       Alert.alert(
         "Not allowed",
@@ -608,34 +693,37 @@ export default function AssetsScreen() {
       return;
     }
 
-    const coords = await getCurrentCoords();
-
-    const meta = {
-      assetCode: code,
-      assetName: name,
-      assetCategory: String(newCategory || "").trim() || null,
-      assetProject: String(newProject || "").trim() || null,
-      assetLocation: String(newLocation || "").trim() || null,
-      assignedGeo: coords || null,
-      createdAt: new Date().toISOString(),
-      source: pendingScanRaw ? "scan" : "manual",
-      scanRaw: pendingScanRaw || null,
-    };
-
-    const map = await loadAssetsMap();
-    map[code.toUpperCase()] = meta;
-    await saveAssetsMap(map);
-
-    const nextAssets = await refreshAssetsList();
-    setAssetsList(nextAssets);
-
-    setAssetCode(code);
-    setAssetName(name);
-    setAssetCategory(meta.assetCategory || "");
-    setAssetProject(meta.assetProject || "");
-    setAssetLocation(meta.assetLocation || "");
+    setIsSavingAssetCreate(true);
 
     try {
+      const coords = await getCurrentCoords();
+
+      const meta = {
+        assetCode: code,
+        assetName: name,
+        assetCategory: String(newCategory || "").trim() || null,
+        assetProjectId: null,
+        assetProject: String(newProject || "").trim() || null,
+        assetLocation: String(newLocation || "").trim() || null,
+        assignedGeo: coords || null,
+        createdAt: new Date().toISOString(),
+        source: pendingScanRaw ? "scan" : "manual",
+        scanRaw: pendingScanRaw || null,
+      };
+
+      const map = await loadAssetsMap();
+      map[code.toUpperCase()] = meta;
+      await saveAssetsMap(map);
+
+      const nextAssets = await refreshAssetsList();
+      setAssetsList(nextAssets);
+
+      setAssetCode(code);
+      setAssetName(name);
+      setAssetCategory(meta.assetCategory || "");
+      setAssetProjectId(meta.assetProjectId || "");
+      setAssetLocation(meta.assetLocation || "");
+
       await saveAssetCreate({
         ...meta,
         userId: userId || null,
@@ -645,22 +733,25 @@ export default function AssetsScreen() {
       await tryImmediateSyncForAssets();
 
       console.log("[ASSETS] asset-create queued for sync");
+
+      Alert.alert(
+        "Asset created",
+        "Asset saved on this device and queued for sync.",
+      );
+      closeCreateModal();
     } catch (e) {
       console.log("[ASSETS] Failed to queue asset-create", e);
+      Alert.alert("Save failed", "Could not save asset on this device.");
+    } finally {
+      setIsSavingAssetCreate(false);
     }
-
-    Alert.alert(
-      "Asset created",
-      "Asset saved on this device and queued for sync.",
-    );
-    closeCreateModal();
   };
 
   const openLogModal = () => {
     if (!canProceedWithAsset) {
       Alert.alert(
         "No asset selected",
-        "Please scan or enter an asset before adding a log.",
+        "Please scan or select an asset before adding a log.",
       );
       return;
     }
@@ -668,10 +759,7 @@ export default function AssetsScreen() {
     (async () => {
       const existing = await applyAssetFromStore(assetCode);
       if (existing) {
-        setAssetName(existing.assetName || assetName);
-        setAssetCategory(existing.assetCategory || assetCategory);
-        setAssetProject(existing.assetProject || assetProject);
-        setAssetLocation(existing.assetLocation || assetLocation);
+        applySelectedAsset(existing);
       }
     })();
 
@@ -682,26 +770,30 @@ export default function AssetsScreen() {
   };
 
   const handleSaveLog = async () => {
-    const coords = await getCurrentCoords();
-    const nowIso = new Date().toISOString();
-
-    const payload = {
-      kind: "log",
-      userId: userId || null,
-      assetCode: String(assetCode || "").trim(),
-      assetName: String(assetName || "").trim(),
-      assetCategory: String(assetCategory || "").trim(),
-      assetProject: String(assetProject || "").trim() || null,
-      assetLocation: String(assetLocation || "").trim() || null,
-      dateTime: logDateTime,
-      note: logNote,
-      photoUri: logPhoto,
-      location: coords,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
+    if (isSavingLog) return;
+    setIsSavingLog(true);
 
     try {
+      const coords = await getCurrentCoords();
+      const nowIso = new Date().toISOString();
+
+      const payload = {
+        kind: "log",
+        userId: userId || null,
+        assetCode: String(assetCode || "").trim(),
+        assetName: String(assetName || "").trim(),
+        assetCategory: String(assetCategory || "").trim(),
+        assetProjectId: selectedAssetOption?.assetProjectId || null,
+        assetProject: String(assetProject || "").trim() || null,
+        assetLocation: String(assetLocation || "").trim() || null,
+        dateTime: logDateTime,
+        note: logNote,
+        photoUri: logPhoto,
+        location: coords,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
       const id = await saveAssetLog(payload);
       await tryImmediateSyncForAssets();
 
@@ -711,6 +803,8 @@ export default function AssetsScreen() {
     } catch (e) {
       console.log("[ASSETS] Failed to save asset log", e);
       Alert.alert("Save failed", "Could not save asset log on this device.");
+    } finally {
+      setIsSavingLog(false);
     }
   };
 
@@ -749,13 +843,6 @@ export default function AssetsScreen() {
               <Text style={styles.scanText}>Scan asset</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.scanButton, { marginLeft: 8 }]}
-              onPress={() => setAssetPickerOpen(true)}
-            >
-              <Text style={styles.scanText}>Select asset</Text>
-            </TouchableOpacity>
-
             {canCreateAsset && (
               <TouchableOpacity
                 style={[styles.scanButton, { marginLeft: 8 }]}
@@ -764,7 +851,7 @@ export default function AssetsScreen() {
                     assetCode: assetCode || "",
                     assetName,
                     assetCategory,
-                    assetProject,
+                    assetProjectId,
                     assetLocation,
                   })
                 }
@@ -773,6 +860,16 @@ export default function AssetsScreen() {
               </TouchableOpacity>
             )}
           </View>
+
+          <SelectField
+            label="Asset"
+            valueText={
+              selectedAssetOption
+                ? selectedAssetOption.label
+                : "Select asset or scan asset"
+            }
+            onPress={() => setAssetPickerOpen(true)}
+          />
 
           <TextInput
             style={styles.input}
@@ -783,34 +880,18 @@ export default function AssetsScreen() {
             autoCapitalize="characters"
           />
 
-          {selectedAssetOption ? (
-            <Text style={styles.selectedHint}>
-              Selected: {selectedAssetOption.label}
-            </Text>
-          ) : null}
-
-          <TextInput
-            style={styles.input}
-            placeholder="Asset name"
-            placeholderTextColor="#aaa"
-            value={assetName}
-            onChangeText={setAssetName}
-          />
-
           <TextInput
             style={styles.input}
             placeholder="Category / type"
             placeholderTextColor="#aaa"
             value={assetCategory}
-            onChangeText={setAssetCategory}
+            editable={false}
           />
 
-          <TextInput
-            style={styles.input}
-            placeholder="Project (optional)"
-            placeholderTextColor="#aaa"
-            value={assetProject}
-            onChangeText={setAssetProject}
+          <SelectField
+            label="Project (optional)"
+            valueText={selectedProject ? pickProjectName(selectedProject) : ""}
+            onPress={() => setProjectPickerOpen(true)}
           />
 
           <TextInput
@@ -841,7 +922,7 @@ export default function AssetsScreen() {
         visible={assetPickerOpen}
         title="Select asset"
         items={assetsList}
-        selectedId={normCode(assetCode)}
+        selectedId={selectedAssetOption?.assetCode || ""}
         getId={(a) => a.assetCode}
         getLabel={(a) => a.label}
         onSelect={(a) => {
@@ -849,7 +930,37 @@ export default function AssetsScreen() {
           setAssetPickerOpen(false);
         }}
         onClose={() => setAssetPickerOpen(false)}
-        emptyText="No assets cached yet. Refresh offline lists or scan/create an asset."
+        emptyText="No assets cached yet. Scan an asset or refresh offline lists."
+      />
+
+      <SelectModal
+        visible={projectPickerOpen}
+        title="Select project (optional)"
+        items={projects}
+        selectedId={assetProjectId}
+        getId={(p) => pickProjectIdFromProject(p)}
+        getLabel={(p) => pickProjectName(p)}
+        onSelect={(p) => {
+          setAssetProjectId(pickProjectIdFromProject(p));
+          setProjectPickerOpen(false);
+        }}
+        onClose={() => setProjectPickerOpen(false)}
+        emptyText="No projects cached yet. Refresh offline lists."
+      />
+
+      <SelectModal
+        visible={createProjectPickerOpen}
+        title="Select project (optional)"
+        items={projects}
+        selectedId={newProjectId}
+        getId={(p) => pickProjectIdFromProject(p)}
+        getLabel={(p) => pickProjectName(p)}
+        onSelect={(p) => {
+          setNewProjectId(pickProjectIdFromProject(p));
+          setCreateProjectPickerOpen(false);
+        }}
+        onClose={() => setCreateProjectPickerOpen(false)}
+        emptyText="No projects cached yet. Refresh offline lists."
       />
 
       <Modal
@@ -870,6 +981,7 @@ export default function AssetsScreen() {
               value={newCode}
               onChangeText={setNewCode}
               autoCapitalize="characters"
+              editable={!isSavingAssetCreate}
             />
 
             <TextInput
@@ -878,6 +990,7 @@ export default function AssetsScreen() {
               placeholderTextColor="#aaa"
               value={newName}
               onChangeText={setNewName}
+              editable={!isSavingAssetCreate}
             />
 
             <TextInput
@@ -886,14 +999,18 @@ export default function AssetsScreen() {
               placeholderTextColor="#aaa"
               value={newCategory}
               onChangeText={setNewCategory}
+              editable={!isSavingAssetCreate}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Project (optional)"
-              placeholderTextColor="#aaa"
-              value={newProject}
-              onChangeText={setNewProject}
+            <SelectField
+              label="Project (optional)"
+              valueText={
+                selectedCreateProject
+                  ? pickProjectName(selectedCreateProject)
+                  : ""
+              }
+              onPress={() => setCreateProjectPickerOpen(true)}
+              disabled={isSavingAssetCreate}
             />
 
             <TextInput
@@ -902,18 +1019,27 @@ export default function AssetsScreen() {
               placeholderTextColor="#aaa"
               value={newLocation}
               onChangeText={setNewLocation}
+              editable={!isSavingAssetCreate}
             />
 
             <View style={styles.modalButtonsRow}>
               <TouchableOpacity
-                style={[styles.primaryButton, styles.modalButton]}
+                style={[
+                  styles.primaryButton,
+                  styles.modalButton,
+                  isSavingAssetCreate && { opacity: 0.6 },
+                ]}
                 onPress={handleSaveNewAsset}
+                disabled={isSavingAssetCreate}
               >
-                <Text style={styles.primaryButtonText}>Save asset</Text>
+                <Text style={styles.primaryButtonText}>
+                  {isSavingAssetCreate ? "Saving..." : "Save asset"}
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.secondaryButton, styles.modalButton]}
                 onPress={closeCreateModal}
+                disabled={isSavingAssetCreate}
               >
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
               </TouchableOpacity>
@@ -930,7 +1056,7 @@ export default function AssetsScreen() {
         visible={logModalVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setLogModalVisible(false)}
+        onRequestClose={() => (isSavingLog ? null : setLogModalVisible(false))}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -946,10 +1072,12 @@ export default function AssetsScreen() {
                 placeholderTextColor="#aaa"
                 value={logDateTime}
                 onChangeText={setLogDateTime}
+                editable={!isSavingLog}
               />
               <TouchableOpacity
-                style={styles.useNowButton}
+                style={[styles.useNowButton, isSavingLog && { opacity: 0.5 }]}
                 onPress={() => setLogDateTime(formatNow())}
+                disabled={isSavingLog}
               >
                 <Text style={styles.useNowText}>Use now</Text>
               </TouchableOpacity>
@@ -962,12 +1090,14 @@ export default function AssetsScreen() {
               value={logNote}
               onChangeText={setLogNote}
               multiline
+              editable={!isSavingLog}
             />
 
             {!logPhoto ? (
               <TouchableOpacity
-                style={styles.photoButton}
-                onPress={() => takePhoto(setLogPhoto)}
+                style={[styles.photoButton, isSavingLog && { opacity: 0.5 }]}
+                onPress={() => (!isSavingLog ? takePhoto(setLogPhoto) : null)}
+                disabled={isSavingLog}
               >
                 <Image
                   source={require("../assets/camera.png")}
@@ -982,8 +1112,12 @@ export default function AssetsScreen() {
                   style={styles.photoPreviewImage}
                 />
                 <TouchableOpacity
-                  style={styles.retryPhotoButton}
-                  onPress={() => takePhoto(setLogPhoto)}
+                  style={[
+                    styles.retryPhotoButton,
+                    isSavingLog && { opacity: 0.5 },
+                  ]}
+                  onPress={() => (!isSavingLog ? takePhoto(setLogPhoto) : null)}
+                  disabled={isSavingLog}
                 >
                   <Text style={styles.retryPhotoText}>Retry</Text>
                 </TouchableOpacity>
@@ -992,14 +1126,22 @@ export default function AssetsScreen() {
 
             <View style={styles.modalButtonsRow}>
               <TouchableOpacity
-                style={[styles.primaryButton, styles.modalButton]}
+                style={[
+                  styles.primaryButton,
+                  styles.modalButton,
+                  isSavingLog && { opacity: 0.6 },
+                ]}
                 onPress={handleSaveLog}
+                disabled={isSavingLog}
               >
-                <Text style={styles.primaryButtonText}>Save log</Text>
+                <Text style={styles.primaryButtonText}>
+                  {isSavingLog ? "Saving..." : "Save log"}
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.secondaryButton, styles.modalButton]}
                 onPress={() => setLogModalVisible(false)}
+                disabled={isSavingLog}
               >
                 <Text style={styles.secondaryButtonText}>Cancel</Text>
               </TouchableOpacity>
@@ -1055,7 +1197,6 @@ const styles = StyleSheet.create({
   scanRow: {
     flexDirection: "row",
     justifyContent: "flex-start",
-    flexWrap: "wrap",
     marginBottom: 8,
   },
   scanButton: {
@@ -1078,11 +1219,23 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     fontSize: 13,
   },
-  selectedHint: {
-    marginTop: -4,
+  selectField: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 6,
+    padding: 10,
     marginBottom: 10,
-    fontSize: 12,
-    color: "#666",
+    backgroundColor: "#fafafa",
+  },
+  selectFieldLabel: {
+    fontSize: 11,
+    color: "#777",
+    marginBottom: 4,
+  },
+  selectFieldValue: {
+    fontSize: 14,
+    color: "#111",
+    fontWeight: "600",
   },
   input: {
     borderWidth: 1,
@@ -1158,6 +1311,44 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textAlign: "center",
   },
+  selectModalCard: {
+    backgroundColor: "#fff",
+    borderRadius: 10,
+    padding: 16,
+  },
+  selectModalTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  selectRow: {
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+  selectRowActive: {
+    backgroundColor: "#e8f8fa",
+  },
+  selectRowText: {
+    fontSize: 14,
+    color: "#111",
+  },
+  selectRowTextActive: {
+    color: THEME_COLOR,
+    fontWeight: "700",
+  },
+  modalCloseButton: {
+    marginTop: 8,
+    alignSelf: "center",
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  modalCloseText: {
+    color: "#555",
+    fontSize: 12,
+  },
   dateRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1230,43 +1421,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#777",
     textAlign: "center",
-  },
-  selectModalCard: {
-    backgroundColor: "#fff",
-    borderRadius: 10,
-    padding: 16,
-  },
-  selectModalTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    marginBottom: 10,
-    textAlign: "center",
-  },
-  selectRow: {
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "#eee",
-  },
-  selectRowActive: {
-    backgroundColor: "#e8f8fa",
-  },
-  selectRowText: {
-    fontSize: 14,
-    color: "#111",
-  },
-  selectRowTextActive: {
-    color: THEME_COLOR,
-    fontWeight: "700",
-  },
-  modalCloseButton: {
-    marginTop: 8,
-    alignSelf: "center",
-    paddingVertical: 6,
-    paddingHorizontal: 16,
-  },
-  modalCloseText: {
-    color: "#555",
-    fontSize: 12,
   },
 });
