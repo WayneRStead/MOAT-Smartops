@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { refreshCachedMe } from "../apiClient";
 import { saveAssetCreate, saveAssetLog } from "../database";
 import { syncOutbox } from "../syncOutbox";
 
@@ -24,6 +25,7 @@ const LAST_SCAN_KEY = "@moat:lastScan";
 const ASSETS_KEY = "@moat:assets";
 const CACHE_ASSETS_KEY = "@moat:cache:assets";
 const CACHE_PROJECTS_KEY = "@moat:cache:projects";
+const CACHE_ME_KEY = "@moat:cache:me";
 const TOKEN_KEY = "@moat:cache:token";
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
 
@@ -119,13 +121,20 @@ function pickAssetCode(input, fallbackCode = "") {
       input?.tag ||
       input?.assetTag ||
       input?.barcode ||
+      input?.value ||
+      input?.data?.assetCode ||
+      input?.data?.code ||
+      input?.data?.tag ||
+      input?.asset?.code ||
+      input?.asset?.assetCode ||
       fallbackCode,
   );
 }
 
 function pickProjectId(input) {
   return String(
-    input?.projectId?._id ||
+    input?.assetProjectId ||
+      input?.projectId?._id ||
       input?.projectId?.id ||
       input?.project?._id ||
       input?.project?.id ||
@@ -137,7 +146,8 @@ function pickProjectId(input) {
 
 function pickProjectLabel(input) {
   return String(
-    input?.projectName ||
+    input?.assetProject ||
+      input?.projectName ||
       input?.projectLabel ||
       input?.project?.name ||
       input?.projectId?.name ||
@@ -164,29 +174,16 @@ function normalizeAssetOption(input, fallbackCode = "") {
       "",
   ).trim();
 
-  const projectId = String(
-    input?.assetProjectId ||
-      input?.projectId?._id ||
-      input?.projectId?.id ||
-      input?.project?._id ||
-      input?.project?.id ||
-      input?.projectId ||
-      input?.project ||
-      "",
-  ).trim();
-
-  const assetProject = String(
-    input?.assetProject ||
-      input?.projectName ||
-      input?.projectLabel ||
-      input?.project?.name ||
-      input?.projectId?.name ||
-      projectId ||
-      "",
-  ).trim();
+  const projectId = pickProjectId(input);
+  const assetProject = pickProjectLabel(input);
 
   const assetLocation = String(
-    input?.assetLocation || input?.area || input?.locationName || "",
+    input?.assetLocation ||
+      input?.locationName ||
+      input?.area ||
+      input?.location?.name ||
+      input?.location?.label ||
+      "",
   ).trim();
 
   const lat =
@@ -209,7 +206,7 @@ function normalizeAssetOption(input, fallbackCode = "") {
     assetName,
     assetCategory,
     assetProjectId: projectId || null,
-    assetProject,
+    assetProject: assetProject || null,
     assetLocation,
     lat: Number.isFinite(Number(lat)) ? Number(lat) : null,
     lng: Number.isFinite(Number(lng)) ? Number(lng) : null,
@@ -278,6 +275,14 @@ async function getCurrentUserMeta() {
 
   const payload = token ? decodeJwtPayload(token) : null;
 
+  let cachedMe = null;
+  try {
+    const rawMe = await AsyncStorage.getItem(CACHE_ME_KEY);
+    cachedMe = rawMe ? JSON.parse(rawMe) : null;
+  } catch {
+    cachedMe = null;
+  }
+
   let userId = "";
   for (const k of USER_ID_KEYS) {
     const v = await AsyncStorage.getItem(k);
@@ -287,11 +292,16 @@ async function getCurrentUserMeta() {
     }
   }
 
+  if (!userId && cachedMe?._id) userId = String(cachedMe._id);
+  if (!userId && cachedMe?.userId) userId = String(cachedMe.userId);
   if (!userId && payload?.sub) userId = String(payload.sub);
 
   const roles = []
+    .concat(cachedMe?.roles || [])
+    .concat(cachedMe?.role ? [cachedMe.role] : [])
     .concat(payload?.roles || [])
     .concat(payload?.role ? [payload.role] : [])
+    .concat(payload?.user?.roles || [])
     .concat(payload?.user?.role ? [payload.user.role] : [])
     .concat(payload?.permissions || [])
     .map((r) =>
@@ -301,38 +311,84 @@ async function getCurrentUserMeta() {
     )
     .filter(Boolean);
 
+  console.log("[ASSETS] cachedMe:", cachedMe);
+  console.log("[ASSETS] token payload:", payload);
+  console.log("[ASSETS] decoded roles:", roles);
+
   return {
     userId,
     roles,
     token,
+    cachedMe,
   };
 }
 
 function parseAssetScan(scanValue) {
+  if (scanValue == null) return null;
+
+  // if scanner passed an object directly
+  if (typeof scanValue === "object") {
+    const obj = scanValue;
+
+    const code =
+      obj?.assetCode ||
+      obj?.code ||
+      obj?.tag ||
+      obj?.assetTag ||
+      obj?.barcode ||
+      obj?.value ||
+      obj?.data ||
+      obj?.text ||
+      obj?.raw ||
+      obj?.asset?.code ||
+      obj?.asset?.assetCode ||
+      null;
+
+    const rawString =
+      typeof code === "string"
+        ? code
+        : typeof obj?.data === "string"
+          ? obj.data
+          : JSON.stringify(obj);
+
+    return {
+      assetCode: code ? String(code).trim() : null,
+      raw: rawString,
+      meta: obj,
+    };
+  }
+
   const raw = String(scanValue || "").trim();
   if (!raw) return null;
 
   try {
     const obj = JSON.parse(raw);
     const code =
-      obj.assetCode ||
-      obj.code ||
-      obj.tag ||
-      obj.assetTag ||
-      obj.id ||
-      obj.assetId ||
+      obj?.assetCode ||
+      obj?.code ||
+      obj?.tag ||
+      obj?.assetTag ||
+      obj?.barcode ||
+      obj?.value ||
+      obj?.data ||
+      obj?.text ||
+      obj?.raw ||
+      obj?.asset?.code ||
+      obj?.asset?.assetCode ||
       null;
 
     return {
-      assetCode: code ? String(code).trim() : null,
+      assetCode: code ? String(code).trim() : raw,
       raw,
       meta: obj,
     };
   } catch {
-    // not JSON
+    return {
+      assetCode: raw,
+      raw,
+      meta: null,
+    };
   }
-
-  return { assetCode: raw, raw, meta: null };
 }
 
 async function tryImmediateSyncForAssets() {
@@ -507,6 +563,12 @@ export default function AssetsScreen() {
       let alive = true;
 
       (async () => {
+        try {
+          await refreshCachedMe();
+        } catch (e) {
+          console.log("[ASSETS] refreshCachedMe failed", e);
+        }
+
         const [userMeta, assetItems, cachedProjects] = await Promise.all([
           getCurrentUserMeta(),
           refreshAssetsList(),
@@ -517,8 +579,13 @@ export default function AssetsScreen() {
 
         const preferredRole =
           userMeta.roles.find((r) => CAN_CREATE_ROLES.has(r)) ||
+          userMeta.roles.find((r) => r.includes("admin")) ||
+          userMeta.roles.find((r) => r.includes("manager")) ||
           userMeta.roles[0] ||
           "worker";
+
+        console.log("[ASSETS] resolved userRole:", preferredRole);
+        console.log("[ASSETS] resolved userId:", userMeta.userId);
 
         setUserRole(preferredRole);
         setUserId(String(userMeta.userId || ""));
@@ -583,13 +650,13 @@ export default function AssetsScreen() {
         return;
       }
 
-      setAssetCode(parsedCode);
-
       const existing = await applyAssetFromStore(parsedCode);
       if (existing) {
         applySelectedAsset(existing);
         return;
       }
+
+      setAssetCode(parsedCode);
 
       if (!canCreateAsset) {
         Alert.alert(
@@ -621,10 +688,14 @@ export default function AssetsScreen() {
 
           if (!mounted) return;
 
-          const value = scan?.value ? String(scan.value) : "";
-          if (!value) return;
+          const candidate =
+            scan?.value ?? scan?.data ?? scan?.text ?? scan?.raw ?? scan;
 
-          const parsed = parseAssetScan(value);
+          const parsed = parseAssetScan(candidate);
+
+          console.log("[ASSETS] scan object:", scan);
+          console.log("[ASSETS] parsed scan:", parsed);
+
           await ensureAssetKnownOrPrompt(parsed);
         } catch (e) {
           console.log("[ASSETS] Failed to apply scan result", e);
@@ -698,12 +769,19 @@ export default function AssetsScreen() {
     try {
       const coords = await getCurrentCoords();
 
+      const selectedCreateProjectObj =
+        projects.find(
+          (p) => pickProjectIdFromProject(p) === String(newProjectId),
+        ) || null;
+
       const meta = {
         assetCode: code,
         assetName: name,
         assetCategory: String(newCategory || "").trim() || null,
-        assetProjectId: null,
-        assetProject: String(newProject || "").trim() || null,
+        assetProjectId: String(newProjectId || "").trim() || null,
+        assetProject: selectedCreateProjectObj
+          ? pickProjectName(selectedCreateProjectObj)
+          : null,
         assetLocation: String(newLocation || "").trim() || null,
         assignedGeo: coords || null,
         createdAt: new Date().toISOString(),
@@ -777,14 +855,21 @@ export default function AssetsScreen() {
       const coords = await getCurrentCoords();
       const nowIso = new Date().toISOString();
 
+      const selectedProjectObj =
+        projects.find(
+          (p) => pickProjectIdFromProject(p) === String(assetProjectId),
+        ) || null;
+
       const payload = {
         kind: "log",
         userId: userId || null,
         assetCode: String(assetCode || "").trim(),
         assetName: String(assetName || "").trim(),
         assetCategory: String(assetCategory || "").trim(),
-        assetProjectId: selectedAssetOption?.assetProjectId || null,
-        assetProject: String(assetProject || "").trim() || null,
+        assetProjectId: String(assetProjectId || "").trim() || null,
+        assetProject: selectedProjectObj
+          ? pickProjectName(selectedProjectObj)
+          : null,
         assetLocation: String(assetLocation || "").trim() || null,
         dateTime: logDateTime,
         note: logNote,

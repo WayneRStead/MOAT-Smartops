@@ -1,11 +1,13 @@
 // moat-smartops-mobile/apiClient.js
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-// Keep your primary keys:
+// Primary keys
 export const TOKEN_KEY = "@moat:token";
 export const ORG_KEY = "@moat:orgId";
+export const CACHE_ME_KEY = "@moat:cache:me";
+export const USER_ID_KEY = "@moat:userId";
 
-// Fallback keys used elsewhere in the app (compat)
+// Fallback keys used elsewhere in the app
 const TOKEN_KEYS_FALLBACK = [
   TOKEN_KEY,
   "@moat:cache:token",
@@ -23,6 +25,8 @@ const ORG_KEYS_FALLBACK = [
   "moat:orgid",
   "moat:orgId",
 ];
+
+const USER_ID_KEYS_FALLBACK = [USER_ID_KEY, "@moat:userid", "moat:userid"];
 
 // Example: https://moat-smartops.onrender.com
 export const API_BASE_URL =
@@ -46,9 +50,7 @@ export async function getAuthHeaders({ json = true } = {}) {
 
   const headers = {};
 
-  // Only set JSON content-type when sending JSON
   if (json) headers["Content-Type"] = "application/json";
-
   if (tokenFound.value) headers.Authorization = `Bearer ${tokenFound.value}`;
   if (orgFound.value) headers["x-org-id"] = orgFound.value;
 
@@ -98,7 +100,6 @@ export async function apiGet(path) {
   return parseResponse(res);
 }
 
-// JSON POST (existing behavior, but more robust)
 export async function apiPost(path, body) {
   const { headers } = await getAuthHeaders({ json: true });
   const res = await fetch(joinUrl(API_BASE_URL, path), {
@@ -109,9 +110,27 @@ export async function apiPost(path, body) {
   return parseResponse(res);
 }
 
-// ✅ NEW: multipart/form-data POST (for photos)
+export async function apiPut(path, body) {
+  const { headers } = await getAuthHeaders({ json: true });
+  const res = await fetch(joinUrl(API_BASE_URL, path), {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(body ?? {}),
+  });
+  return parseResponse(res);
+}
+
+export async function apiDelete(path) {
+  const { headers } = await getAuthHeaders({ json: true });
+  const res = await fetch(joinUrl(API_BASE_URL, path), {
+    method: "DELETE",
+    headers,
+  });
+  return parseResponse(res);
+}
+
+// multipart/form-data POST
 export async function apiPostForm(path, formData) {
-  // IMPORTANT: do NOT set Content-Type for FormData (fetch will set boundary)
   const { headers } = await getAuthHeaders({ json: false });
 
   const res = await fetch(joinUrl(API_BASE_URL, path), {
@@ -121,4 +140,41 @@ export async function apiPostForm(path, formData) {
   });
 
   return parseResponse(res);
+}
+
+// Fetch backend user profile and cache it locally
+export async function refreshCachedMe() {
+  try {
+    const data = await apiGet("/api/mobile/whoami");
+    const user = data?.user || null;
+
+    if (user) {
+      await AsyncStorage.setItem(CACHE_ME_KEY, JSON.stringify(user));
+
+      const userId = user?._id || user?.id || user?.userId || "";
+
+      if (userId) {
+        await AsyncStorage.setItem(USER_ID_KEY, String(userId));
+      }
+    }
+
+    return user;
+  } catch (e) {
+    console.log("[apiClient] refreshCachedMe failed", e?.message || e);
+    return null;
+  }
+}
+
+export async function getCachedMe() {
+  try {
+    const raw = await AsyncStorage.getItem(CACHE_ME_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getStoredUserId() {
+  const found = await getFirstStorageValue(USER_ID_KEYS_FALLBACK);
+  return found.value ? String(found.value) : "";
 }

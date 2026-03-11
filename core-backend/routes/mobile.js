@@ -18,7 +18,7 @@ const {
  * 🔎 Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-03-10-vehicle-purchase-01";
+const ROUTER_VERSION = "mobile-router-v2026-03-11-assets-01";
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
@@ -368,6 +368,89 @@ function buildVehicleOfflineAttachment(uploaded, noteText = "") {
     note: noteText || "",
     uploadedAt: new Date(),
   };
+}
+
+function normAssetCode(v) {
+  return String(v || "")
+    .trim()
+    .toUpperCase();
+}
+
+function buildAssetOfflineAttachment(uploaded, noteText = "") {
+  const fid = String(uploaded?.fileId || "").trim();
+  if (!mongoose.isValidObjectId(fid)) return null;
+
+  const k = String(uploaded?.downloadKey || "").trim();
+  const url = k
+    ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
+    : `/api/mobile/offline-files/${fid}`;
+
+  return {
+    fileId: fid,
+    storage: "gridfs",
+    bucket: "mobileOffline",
+    url,
+    filename: uploaded?.filename || "offline_upload",
+    mime: uploaded?.contentType || "",
+    size: typeof uploaded?.size === "number" ? uploaded.size : undefined,
+    note: noteText || "",
+    uploadedAt: new Date(),
+    uploadedBy: String(uploaded?.userId || ""),
+    uploadedByLabel: "",
+  };
+}
+
+async function ensureAssetFromPayload({ orgId, payload }) {
+  const Asset = require("../models/Asset");
+
+  const code = normAssetCode(
+    payload?.assetCode || payload?.code || payload?.tag || "",
+  );
+  if (!code) return null;
+
+  const orgIdStr = String(orgId || "").trim();
+  const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+    ? new mongoose.Types.ObjectId(orgIdStr)
+    : null;
+
+  const orgFilter = orgIdObj
+    ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+    : orgIdStr
+      ? { orgId: orgIdStr }
+      : {};
+
+  let asset = await Asset.findOne({
+    ...orgFilter,
+    code,
+  });
+
+  if (asset) return asset;
+
+  const lat =
+    toFiniteNumberOrNull(payload?.assignedGeo?.lat) ??
+    toFiniteNumberOrNull(payload?.location?.lat) ??
+    toFiniteNumberOrNull(payload?.lat);
+
+  const lng =
+    toFiniteNumberOrNull(payload?.assignedGeo?.lng) ??
+    toFiniteNumberOrNull(payload?.location?.lng) ??
+    toFiniteNumberOrNull(payload?.lng);
+
+  asset = await Asset.create({
+    orgId: orgIdObj || orgIdStr || orgId,
+    name: String(payload?.assetName || payload?.name || code).trim(),
+    code,
+    type:
+      String(payload?.assetCategory || payload?.type || "").trim() || undefined,
+    status: "active",
+    projectId: mongoose.isValidObjectId(String(payload?.assetProjectId || ""))
+      ? new mongoose.Types.ObjectId(String(payload.assetProjectId))
+      : undefined,
+    notes: String(payload?.notes || "").trim() || undefined,
+    ...(lat != null && lng != null ? { lat, lng } : {}),
+  });
+
+  return asset;
 }
 
 /**
@@ -2115,6 +2198,237 @@ router.post(
           }
         } catch (ePurchase) {
           console.error("[vehicle-purchase] failed to apply", ePurchase);
+        }
+      }
+
+      // ✅ APPLY ASSET CREATE
+      if (eventType === "asset-create") {
+        try {
+          const Asset = require("../models/Asset");
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const orgIdStr = String(orgId2 || "").trim();
+          const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+            ? new mongoose.Types.ObjectId(orgIdStr)
+            : null;
+
+          const assetCode = normAssetCode(
+            payload?.assetCode || payload?.code || entityRef || "",
+          );
+
+          if (!assetCode) {
+            console.warn("[asset-create] missing assetCode", {
+              offlineEventId: String(doc?._id || ""),
+            });
+          } else {
+            const existing = await Asset.findOne({
+              ...(orgIdObj
+                ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+                : orgIdStr
+                  ? { orgId: orgIdStr }
+                  : {}),
+              code: assetCode,
+            })
+              .select({ _id: 1, code: 1, name: 1 })
+              .lean()
+              .catch(() => null);
+
+            if (existing?._id) {
+              appliedTo.assetId = String(existing._id);
+              appliedTo.assetCode = String(existing.code || assetCode);
+              appliedTo.assetStatus = "already-exists";
+            } else {
+              const lat =
+                toFiniteNumberOrNull(payload?.assignedGeo?.lat) ??
+                toFiniteNumberOrNull(payload?.location?.lat) ??
+                toFiniteNumberOrNull(payload?.lat);
+
+              const lng =
+                toFiniteNumberOrNull(payload?.assignedGeo?.lng) ??
+                toFiniteNumberOrNull(payload?.location?.lng) ??
+                toFiniteNumberOrNull(payload?.lng);
+
+              const createdAsset = await Asset.create({
+                orgId: orgIdObj || orgIdStr || orgId2,
+                name: String(
+                  payload?.assetName || payload?.name || assetCode,
+                ).trim(),
+                code: assetCode,
+                type:
+                  String(
+                    payload?.assetCategory || payload?.type || "",
+                  ).trim() || undefined,
+                status: "active",
+                projectId: mongoose.isValidObjectId(
+                  String(payload?.assetProjectId || ""),
+                )
+                  ? new mongoose.Types.ObjectId(String(payload.assetProjectId))
+                  : undefined,
+                notes: String(payload?.notes || "").trim() || undefined,
+                ...(lat != null && lng != null ? { lat, lng } : {}),
+              });
+
+              appliedTo.assetId = String(createdAsset._id);
+              appliedTo.assetCode = String(createdAsset.code || assetCode);
+              appliedTo.assetStatus = "created";
+            }
+          }
+        } catch (eAssetCreate) {
+          console.error("[asset-create] failed to apply", eAssetCreate);
+        }
+      }
+
+      // ✅ APPLY ASSET LOG
+      if (eventType === "asset-log") {
+        try {
+          const Asset = require("../models/Asset");
+
+          const orgId2 = req.orgObjectId || req.user?.orgId;
+          const orgIdStr = String(orgId2 || "").trim();
+          const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+            ? new mongoose.Types.ObjectId(orgIdStr)
+            : null;
+
+          const assetCode = normAssetCode(
+            payload?.assetCode || payload?.code || entityRef || "",
+          );
+
+          if (!assetCode) {
+            console.warn("[asset-log] missing assetCode", {
+              offlineEventId: String(doc?._id || ""),
+            });
+          } else {
+            let asset = await Asset.findOne({
+              ...(orgIdObj
+                ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+                : orgIdStr
+                  ? { orgId: orgIdStr }
+                  : {}),
+              code: assetCode,
+            });
+
+            if (!asset) {
+              asset = await ensureAssetFromPayload({
+                orgId: orgId2,
+                payload,
+              });
+            }
+
+            if (!asset?._id) {
+              console.warn("[asset-log] asset not found / not created", {
+                assetCode,
+                offlineEventId: String(doc?._id || ""),
+              });
+            } else {
+              const uploaded = Array.isArray(doc?.uploadedFiles)
+                ? doc.uploadedFiles
+                : [];
+
+              const when = parseDateTimeLoose(
+                payload?.dateTime ||
+                  payload?.createdAt ||
+                  payload?.updatedAt ||
+                  createdAtClient,
+                new Date(),
+              );
+
+              const noteText = String(payload?.note || "").trim();
+              const loc = payload?.location || {};
+              const lat = toFiniteNumberOrNull(loc?.lat);
+              const lng = toFiniteNumberOrNull(loc?.lng);
+              const acc = toFiniteNumberOrNull(loc?.acc);
+
+              asset.maintenance = Array.isArray(asset.maintenance)
+                ? asset.maintenance
+                : [];
+
+              const alreadyHasLog = asset.maintenance.some(
+                (m) =>
+                  String(m?.sourceOfflineEventId || "") === String(doc._id),
+              );
+
+              if (!alreadyHasLog) {
+                asset.maintenance.push({
+                  date: when,
+                  note: noteText,
+                  by:
+                    req.user?.name ||
+                    req.user?.email ||
+                    String(req.user?._id || "mobile-offline"),
+                  ...(lat != null ? { lat } : {}),
+                  ...(lng != null ? { lng } : {}),
+                  ...(acc != null ? { acc } : {}),
+                  scanned: false,
+                  sourceOfflineEventId: doc._id,
+                });
+              }
+
+              asset.attachments = Array.isArray(asset.attachments)
+                ? asset.attachments
+                : [];
+
+              const alreadyHasAttachments = asset.attachments.some(
+                (a) =>
+                  String(a?.sourceOfflineEventId || "") === String(doc._id),
+              );
+
+              if (!alreadyHasAttachments && uploaded.length) {
+                for (const f of uploaded) {
+                  const att = buildAssetOfflineAttachment(
+                    f,
+                    noteText || "Asset log photo",
+                  );
+                  if (!att) continue;
+
+                  asset.attachments.push({
+                    ...att,
+                    uploadedBy: req.user?._id
+                      ? String(req.user._id)
+                      : req.user?.sub
+                        ? String(req.user.sub)
+                        : "",
+                    uploadedByLabel: req.user?.name || req.user?.email || "",
+                    ...(lat != null ? { lat } : {}),
+                    ...(lng != null ? { lng } : {}),
+                    ...(acc != null ? { acc } : {}),
+                    scanned: false,
+                    sourceOfflineEventId: doc._id,
+                  });
+                }
+              }
+
+              if (!asset.type && String(payload?.assetCategory || "").trim()) {
+                asset.type = String(payload.assetCategory).trim();
+              }
+
+              if (
+                !asset.projectId &&
+                mongoose.isValidObjectId(String(payload?.assetProjectId || ""))
+              ) {
+                asset.projectId = new mongoose.Types.ObjectId(
+                  String(payload.assetProjectId),
+                );
+              }
+
+              if (
+                !asset.location?.lat &&
+                !asset.location?.lng &&
+                lat != null &&
+                lng != null
+              ) {
+                asset.lat = lat;
+                asset.lng = lng;
+              }
+
+              await asset.save();
+
+              appliedTo.assetId = String(asset._id);
+              appliedTo.assetCode = String(asset.code || assetCode);
+              appliedTo.assetLogStatus = "applied";
+            }
+          }
+        } catch (eAssetLog) {
+          console.error("[asset-log] failed to apply", eAssetLog);
         }
       }
 

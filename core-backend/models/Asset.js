@@ -1,5 +1,5 @@
 // core-backend/models/Asset.js
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 /**
  * Attachments can be legacy disk (/files/assets/<name>) OR GridFS (/assets/files/<fileId>)
@@ -11,8 +11,8 @@ const AttachmentSchema = new mongoose.Schema(
     fileId: { type: String }, // e.g. "65a...." (GridFS file _id)
 
     // Optional helpers for clarity (won't break old data)
-    storage: { type: String, enum: ['disk', 'gridfs'], default: 'disk' },
-    bucket: { type: String, default: 'assets' },
+    storage: { type: String, enum: ["disk", "gridfs"], default: "disk" },
+    bucket: { type: String, default: "assets" },
 
     // Legacy-compatible canonical URL the frontend uses
     url: { type: String, required: true },
@@ -31,8 +31,11 @@ const AttachmentSchema = new mongoose.Schema(
     lng: { type: Number },
     acc: { type: Number },
     scanned: { type: Boolean, default: false },
+
+    // Helps prevent duplicate attachment inserts from offline resync
+    sourceOfflineEventId: { type: mongoose.Schema.Types.ObjectId, index: true },
   },
-  { _id: true }
+  { _id: true },
 );
 
 const MaintenanceSchema = new mongoose.Schema(
@@ -46,24 +49,31 @@ const MaintenanceSchema = new mongoose.Schema(
     lng: { type: Number },
     acc: { type: Number },
     scanned: { type: Boolean, default: false },
+
+    sourceOfflineEventId: { type: mongoose.Schema.Types.ObjectId, index: true },
   },
-  { _id: true, timestamps: true }
+  { _id: true, timestamps: true },
 );
 
-const ALLOWED_STATUSES = ['active', 'maintenance', 'retired', 'lost', 'stolen'];
+const ALLOWED_STATUSES = ["active", "maintenance", "retired", "lost", "stolen"];
 
 const AssetSchema = new mongoose.Schema(
   {
     /* ---------- tenancy ---------- */
-    orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Org', index: true },
+    orgId: { type: mongoose.Schema.Types.ObjectId, ref: "Org", index: true },
 
     /* ---------- core fields ---------- */
     name: { type: String, required: true, trim: true },
     code: { type: String, trim: true },
     type: { type: String, trim: true },
-    status: { type: String, enum: ALLOWED_STATUSES, default: 'active' },
+    status: { type: String, enum: ALLOWED_STATUSES, default: "active" },
 
-    projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
+    projectId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Project",
+      default: null,
+      index: true,
+    },
     notes: { type: String },
 
     // Location
@@ -74,7 +84,7 @@ const AssetSchema = new mongoose.Schema(
       lng: { type: Number },
     },
     geometry: {
-      type: { type: String, enum: ['Point'], default: 'Point' },
+      type: { type: String, enum: ["Point"], default: "Point" },
       coordinates: { type: [Number] }, // [lng, lat]
     },
 
@@ -84,7 +94,7 @@ const AssetSchema = new mongoose.Schema(
     // Logs
     maintenance: [MaintenanceSchema],
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 /* helpful compound indexes for list queries */
@@ -94,18 +104,18 @@ AssetSchema.index({ orgId: 1, name: 1 });
 AssetSchema.index({ orgId: 1, code: 1 });
 
 function num(v) {
-  const n = typeof v === 'string' ? parseFloat(v) : v;
+  const n = typeof v === "string" ? parseFloat(v) : v;
   return Number.isFinite(n) ? n : undefined;
 }
 
-AssetSchema.pre('validate', function (next) {
-  if (this.isModified('status') && typeof this.status === 'string') {
+AssetSchema.pre("validate", function (next) {
+  if (this.isModified("status") && typeof this.status === "string") {
     const s = this.status.trim().toLowerCase();
     const canon =
-      s === 'missing' || s === 'misplaced'
-        ? 'lost'
-        : s === 'theft' || s === 'reported stolen'
-          ? 'stolen'
+      s === "missing" || s === "misplaced"
+        ? "lost"
+        : s === "theft" || s === "reported stolen"
+          ? "stolen"
           : s;
     if (ALLOWED_STATUSES.includes(canon)) this.status = canon;
   }
@@ -116,50 +126,56 @@ AssetSchema.pre('validate', function (next) {
       if (!a) continue;
 
       // If fileId exists and storage not set, infer GridFS
-      if (a.fileId && !a.storage) a.storage = 'gridfs';
+      if (a.fileId && !a.storage) a.storage = "gridfs";
 
       // If url looks like our new GridFS route, infer GridFS
-      if (!a.storage && typeof a.url === 'string' && /^\/assets\/files\/[0-9a-fA-F]{24}$/.test(a.url)) {
-        a.storage = 'gridfs';
+      if (
+        !a.storage &&
+        typeof a.url === "string" &&
+        /^\/assets\/files\/[0-9a-fA-F]{24}$/.test(a.url)
+      ) {
+        a.storage = "gridfs";
       }
 
-      if (!a.bucket) a.bucket = 'assets';
-      if (!a.storage) a.storage = 'disk';
+      if (!a.bucket) a.bucket = "assets";
+      if (!a.storage) a.storage = "disk";
     }
   }
 
   next();
 });
 
-AssetSchema.pre('save', function (next) {
+AssetSchema.pre("save", function (next) {
   const lat = num(this.lat ?? this.location?.lat);
   const lng = num(this.lng ?? this.location?.lng);
   if (lat != null && lng != null) {
     this.lat = lat;
     this.lng = lng;
     this.location = { lat, lng };
-    this.geometry = { type: 'Point', coordinates: [lng, lat] };
+    this.geometry = { type: "Point", coordinates: [lng, lat] };
   } else {
     this.lat = undefined;
     this.lng = undefined;
     this.location =
-      this.location && (this.location.lat != null || this.location.lng != null) ? this.location : undefined;
+      this.location && (this.location.lat != null || this.location.lng != null)
+        ? this.location
+        : undefined;
     this.geometry = undefined;
   }
   next();
 });
 
-AssetSchema.pre('findOneAndUpdate', function (next) {
+AssetSchema.pre("findOneAndUpdate", function (next) {
   const u = this.getUpdate() || {};
   const $set = u.$set || u;
 
-  if ($set.status && typeof $set.status === 'string') {
+  if ($set.status && typeof $set.status === "string") {
     const s = $set.status.trim().toLowerCase();
     const canon =
-      s === 'missing' || s === 'misplaced'
-        ? 'lost'
-        : s === 'theft' || s === 'reported stolen'
-          ? 'stolen'
+      s === "missing" || s === "misplaced"
+        ? "lost"
+        : s === "theft" || s === "reported stolen"
+          ? "stolen"
           : s;
     if (ALLOWED_STATUSES.includes(canon)) $set.status = canon;
   }
@@ -171,14 +187,18 @@ AssetSchema.pre('findOneAndUpdate', function (next) {
     $set.lat = lat;
     $set.lng = lng;
     $set.location = { ...($set.location || {}), lat, lng };
-    $set.geometry = { type: 'Point', coordinates: [lng, lat] };
-  } else if ($set.location && (num($set.location.lat) != null && num($set.location.lng) != null)) {
+    $set.geometry = { type: "Point", coordinates: [lng, lat] };
+  } else if (
+    $set.location &&
+    num($set.location.lat) != null &&
+    num($set.location.lng) != null
+  ) {
     const la = num($set.location.lat),
       lo = num($set.location.lng);
     $set.lat = la;
     $set.lng = lo;
-    $set.geometry = { type: 'Point', coordinates: [lo, la] };
-  } else if ('lat' in $set || 'lng' in $set) {
+    $set.geometry = { type: "Point", coordinates: [lo, la] };
+  } else if ("lat" in $set || "lng" in $set) {
     delete $set.lat;
     delete $set.lng;
     delete $set.location;
@@ -190,4 +210,4 @@ AssetSchema.pre('findOneAndUpdate', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Asset', AssetSchema);
+module.exports = mongoose.model("Asset", AssetSchema);
