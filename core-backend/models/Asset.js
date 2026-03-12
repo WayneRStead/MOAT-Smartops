@@ -101,7 +101,9 @@ const AssetSchema = new mongoose.Schema(
 AssetSchema.index({ orgId: 1, updatedAt: -1 });
 AssetSchema.index({ orgId: 1, status: 1, updatedAt: -1 });
 AssetSchema.index({ orgId: 1, name: 1 });
-AssetSchema.index({ orgId: 1, code: 1 });
+
+// Prevent duplicate asset codes inside the same organisation
+AssetSchema.index({ orgId: 1, code: 1 }, { unique: true, sparse: true });
 
 function num(v) {
   const n = typeof v === "string" ? parseFloat(v) : v;
