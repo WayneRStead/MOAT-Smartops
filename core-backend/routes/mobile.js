@@ -38,6 +38,16 @@ try {
   Org = require("../models/Org");
 } catch {}
 
+let InspectionSubmission = null;
+try {
+  InspectionSubmission = require("../models/InspectionSubmission");
+} catch {}
+
+let InspectionFormModel = null;
+try {
+  InspectionFormModel = require("../models/InspectionForm");
+} catch {}
+
 /* -----------------------------
    Helpers
 ------------------------------*/
@@ -572,6 +582,121 @@ async function ensureAssetFromPayload({ orgId, payload }) {
   });
 
   return asset;
+}
+
+function normalizeInspectionItemResult(v) {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+
+  if (s === "pass") return "pass";
+  if (s === "fail") return "fail";
+  if (s === "na" || s === "n/a") return "na";
+  return "na";
+}
+
+function buildInspectionEvidenceFiles(uploadedFiles = []) {
+  return (Array.isArray(uploadedFiles) ? uploadedFiles : [])
+    .map((f) => {
+      const fid = String(f?.fileId || "").trim();
+      if (!mongoose.isValidObjectId(fid)) return null;
+
+      const k = String(f?.downloadKey || "").trim();
+      const url = k
+        ? `/api/mobile/offline-files/${fid}?k=${encodeURIComponent(k)}`
+        : `/api/mobile/offline-files/${fid}`;
+
+      return {
+        fileId: fid,
+        filename: f?.filename || "inspection_upload",
+        url,
+        mime: f?.contentType || "",
+        size: typeof f?.size === "number" ? f.size : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
+function computeInspectionScoringSummaryMobile(form, items) {
+  const summary = {
+    mode: String(form?.scoring?.mode || "any-fail").toLowerCase(),
+    percentScore: 100,
+    counts: {
+      total: items.length,
+      considered: 0,
+      pass: 0,
+      fail: 0,
+      na: 0,
+      criticalFails: 0,
+      nonCriticalFails: 0,
+    },
+  };
+
+  for (const it of items) {
+    const r = String(it?.result || "").toLowerCase();
+    if (r === "na") {
+      summary.counts.na += 1;
+      continue;
+    }
+
+    summary.counts.considered += 1;
+
+    if (r === "pass") {
+      summary.counts.pass += 1;
+    } else if (r === "fail") {
+      summary.counts.fail += 1;
+      if (it?.criticalTriggered) summary.counts.criticalFails += 1;
+      else summary.counts.nonCriticalFails += 1;
+    }
+  }
+
+  summary.percentScore =
+    summary.counts.considered > 0
+      ? (summary.counts.pass / summary.counts.considered) * 100
+      : 100;
+
+  return summary;
+}
+
+function computeInspectionOverallResultMobile(form, items) {
+  const scoring = form?.scoring || {};
+  const mode = String(scoring.mode || "any-fail").toLowerCase();
+
+  const hasCriticalFail = items.some(
+    (it) =>
+      String(it?.result || "").toLowerCase() === "fail" &&
+      it?.criticalTriggered,
+  );
+  if (hasCriticalFail) return "fail";
+
+  const applicable = items.filter(
+    (it) => String(it?.result || "").toLowerCase() !== "na",
+  );
+  const passCount = applicable.filter(
+    (it) => String(it?.result || "").toLowerCase() === "pass",
+  ).length;
+  const nonCriticalFailCount = applicable.filter(
+    (it) =>
+      String(it?.result || "").toLowerCase() === "fail" &&
+      !it?.criticalTriggered,
+  ).length;
+
+  if (mode === "tolerance") {
+    const maxFails = Number.isFinite(Number(scoring?.maxNonCriticalFails))
+      ? Number(scoring.maxNonCriticalFails)
+      : 0;
+    return nonCriticalFailCount > maxFails ? "fail" : "pass";
+  }
+
+  if (mode === "percent") {
+    const minPct = Number.isFinite(Number(scoring?.minPassPercent))
+      ? Number(scoring.minPassPercent)
+      : 100;
+    const pct = applicable.length ? (passCount / applicable.length) * 100 : 100;
+    return pct + 1e-9 >= minPct ? "pass" : "fail";
+  }
+
+  return nonCriticalFailCount > 0 ? "fail" : "pass";
 }
 
 /**
@@ -1470,6 +1595,264 @@ router.post(
       });
 
       const appliedTo = {};
+
+      // ✅ APPLY INSPECTION RUN
+      if (eventType === "inspection-run") {
+        try {
+          if (!InspectionSubmission?.create || !InspectionFormModel?.findById) {
+            console.warn("[inspection-run] model missing", {
+              hasInspectionSubmission: !!InspectionSubmission,
+              hasInspectionFormModel: !!InspectionFormModel,
+            });
+          } else {
+            const formIdStr = String(payload?.formId || "").trim();
+
+            if (!mongoose.isValidObjectId(formIdStr)) {
+              console.warn("[inspection-run] invalid formId", {
+                formIdStr,
+                offlineEventId: String(doc?._id || ""),
+              });
+            } else {
+              const orgId2 = req.orgObjectId || req.user?.orgId || null;
+              const orgIdStr = String(orgId2 || "").trim();
+              const orgIdObj = mongoose.isValidObjectId(orgIdStr)
+                ? new mongoose.Types.ObjectId(orgIdStr)
+                : null;
+
+              const form = await InspectionFormModel.findOne({
+                _id: new mongoose.Types.ObjectId(formIdStr),
+                ...(orgIdObj
+                  ? { $or: [{ orgId: orgIdObj }, { orgId: orgIdStr }] }
+                  : orgIdStr
+                    ? { orgId: orgIdStr }
+                    : {}),
+                isDeleted: { $ne: true },
+              }).lean();
+
+              if (!form?._id) {
+                console.warn("[inspection-run] form not found", {
+                  formIdStr,
+                  offlineEventId: String(doc?._id || ""),
+                });
+              } else {
+                const existingSubmission = await InspectionSubmission.findOne({
+                  orgId: orgIdObj || orgIdStr || orgId2,
+                  sourceOfflineEventId: doc._id,
+                })
+                  .select({ _id: 1 })
+                  .lean()
+                  .catch(() => null);
+
+                if (existingSubmission?._id) {
+                  appliedTo.inspectionSubmissionId = String(
+                    existingSubmission._id,
+                  );
+                  appliedTo.inspectionStatus = "already-exists";
+                } else {
+                  const tplById = {};
+                  for (const tpl of Array.isArray(form.items)
+                    ? form.items
+                    : []) {
+                    if (tpl?._id) tplById[String(tpl._id)] = tpl;
+                  }
+
+                  const uploadedEvidence = buildInspectionEvidenceFiles(
+                    doc?.uploadedFiles || [],
+                  );
+
+                  const payloadItems = Array.isArray(payload?.items)
+                    ? payload.items
+                    : [];
+                  const normalizedItems = payloadItems.map((inItem, idx) => {
+                    const itemIdStr = String(
+                      inItem?.itemId || inItem?.id || "",
+                    ).trim();
+
+                    const tpl =
+                      tplById[itemIdStr] ||
+                      (Array.isArray(form.items) ? form.items[idx] : null) ||
+                      {};
+
+                    const result = normalizeInspectionItemResult(
+                      inItem?.result || inItem?.status,
+                    );
+
+                    const noteText = String(
+                      inItem?.note ||
+                        inItem?.actionNote ||
+                        inItem?.correctiveAction ||
+                        "",
+                    ).trim();
+
+                    const evidence = {
+                      note: noteText,
+                      photoUrl: inItem?.photoUri
+                        ? String(inItem.photoUri)
+                        : uploadedEvidence[0]?.url || "",
+                      scanRef: inItem?.scanValue
+                        ? String(inItem.scanValue)
+                        : inItem?.scanDone
+                          ? "mobile-scan-completed"
+                          : "",
+                      files: uploadedEvidence,
+                    };
+
+                    return {
+                      itemId: mongoose.isValidObjectId(itemIdStr)
+                        ? new mongoose.Types.ObjectId(itemIdStr)
+                        : tpl?._id && mongoose.isValidObjectId(String(tpl._id))
+                          ? new mongoose.Types.ObjectId(String(tpl._id))
+                          : new mongoose.Types.ObjectId(),
+                      label: String(
+                        tpl?.label ||
+                          inItem?.label ||
+                          inItem?.title ||
+                          `Item ${idx + 1}`,
+                      ).trim(),
+                      result,
+                      evidence,
+                      correctiveAction: result === "fail" ? noteText : "",
+                      criticalTriggered:
+                        result === "fail" && !!tpl?.criticalOnFail,
+                    };
+                  });
+
+                  const overallResult = computeInspectionOverallResultMobile(
+                    form,
+                    normalizedItems,
+                  );
+                  const scoringSummary = computeInspectionScoringSummaryMobile(
+                    form,
+                    normalizedItems,
+                  );
+
+                  const links = {
+                    projectId: String(
+                      payload?.links?.projectId ||
+                        payload?.projectId ||
+                        payload?.header?.projectId ||
+                        "",
+                    ).trim(),
+                    taskId: String(
+                      payload?.links?.taskId ||
+                        payload?.taskId ||
+                        payload?.header?.taskId ||
+                        "",
+                    ).trim(),
+                    milestoneId: String(
+                      payload?.links?.milestoneId ||
+                        payload?.milestoneId ||
+                        payload?.header?.milestoneId ||
+                        "",
+                    ).trim(),
+                  };
+
+                  const runByUserId =
+                    req.user?._id &&
+                    mongoose.isValidObjectId(String(req.user._id))
+                      ? new mongoose.Types.ObjectId(String(req.user._id))
+                      : undefined;
+
+                  const submittedAt = parseDateTimeLoose(
+                    payload?.submittedAt ||
+                      payload?.runDateTime ||
+                      payload?.createdAt ||
+                      createdAtClient,
+                    new Date(),
+                  );
+
+                  const locationFlat = payload?.coords
+                    ? {
+                        lat: toFiniteNumberOrNull(
+                          payload.coords.lat ?? payload.coords.latitude,
+                        ),
+                        lng: toFiniteNumberOrNull(
+                          payload.coords.lng ?? payload.coords.longitude,
+                        ),
+                      }
+                    : undefined;
+
+                  const locationGeo =
+                    locationFlat?.lat != null && locationFlat?.lng != null
+                      ? {
+                          type: "Point",
+                          coordinates: [locationFlat.lng, locationFlat.lat],
+                        }
+                      : undefined;
+
+                  const submission = await InspectionSubmission.create({
+                    orgId: orgIdObj || orgIdStr || orgId2,
+                    formId: form._id,
+                    formTitle: form.title,
+                    formType: form.formType || "standard",
+                    scopeAtRun: form?.scope?.type || "global",
+                    runBy: {
+                      _id: runByUserId,
+                      userId: runByUserId,
+                      name:
+                        String(payload?.inspectorName || "").trim() ||
+                        req.user?.name ||
+                        req.user?.email ||
+                        "Inspector",
+                      email: req.user?.email || "",
+                    },
+                    links,
+                    subjectAtRun: {
+                      type: String(form?.subject?.type || "none"),
+                      id:
+                        payload?.subjectAtRun?.id ||
+                        form?.subject?.lockToId ||
+                        undefined,
+                      label:
+                        String(payload?.header?.subject || "").trim() ||
+                        String(form?.subject?.lockLabel || "").trim() ||
+                        "",
+                    },
+                    location: locationGeo,
+                    locationAtRun:
+                      locationFlat?.lat != null && locationFlat?.lng != null
+                        ? {
+                            lat: locationFlat.lat,
+                            lng: locationFlat.lng,
+                            at: submittedAt,
+                          }
+                        : undefined,
+                    locationMeta:
+                      locationFlat?.lat != null && locationFlat?.lng != null
+                        ? {
+                            capturedAt: submittedAt,
+                            source: "mobile-offline",
+                          }
+                        : undefined,
+                    items: normalizedItems,
+                    overallResult,
+                    scoringSummary,
+                    signoff: {
+                      confirmed: true,
+                      name:
+                        String(payload?.inspectorName || "").trim() ||
+                        req.user?.name ||
+                        req.user?.email ||
+                        "",
+                      date: submittedAt.toISOString(),
+                      signatureDataUrl: "",
+                    },
+                    sourceOfflineEventId: doc._id,
+                    createdAt: submittedAt,
+                    updatedAt: new Date(),
+                  });
+
+                  appliedTo.inspectionSubmissionId = String(submission._id);
+                  appliedTo.formId = String(form._id);
+                  appliedTo.inspectionStatus = "created";
+                }
+              }
+            }
+          }
+        } catch (eInspection) {
+          console.error("[inspection-run] failed to apply", eInspection);
+        }
+      }
 
       // ✅ APPLY PROJECT UPDATES (manager note + status + optional attachments)
       if (eventType === "project-update") {
