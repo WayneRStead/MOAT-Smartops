@@ -1656,7 +1656,7 @@ router.post(
                     if (tpl?._id) tplById[String(tpl._id)] = tpl;
                   }
 
-                  const uploadedEvidence = buildInspectionEvidenceFiles(
+                  const sharedUploadedEvidence = buildInspectionEvidenceFiles(
                     doc?.uploadedFiles || [],
                   );
 
@@ -1694,7 +1694,9 @@ router.post(
                         : inItem?.scanDone
                           ? "mobile-scan-completed"
                           : "",
-                      files: uploadedEvidence,
+                      files: sharedUploadedEvidence.length
+                        ? sharedUploadedEvidence
+                        : undefined,
                     };
 
                     return {
@@ -1727,24 +1729,59 @@ router.post(
                   );
 
                   const links = {
-                    projectId: String(
-                      payload?.links?.projectId ||
-                        payload?.projectId ||
-                        payload?.header?.projectId ||
-                        "",
-                    ).trim(),
-                    taskId: String(
-                      payload?.links?.taskId ||
-                        payload?.taskId ||
-                        payload?.header?.taskId ||
-                        "",
-                    ).trim(),
-                    milestoneId: String(
-                      payload?.links?.milestoneId ||
-                        payload?.milestoneId ||
-                        payload?.header?.milestoneId ||
-                        "",
-                    ).trim(),
+                    projectId: mongoose.isValidObjectId(
+                      String(
+                        payload?.links?.projectId ||
+                          payload?.projectId ||
+                          payload?.header?.projectId ||
+                          "",
+                      ).trim(),
+                    )
+                      ? new mongoose.Types.ObjectId(
+                          String(
+                            payload?.links?.projectId ||
+                              payload?.projectId ||
+                              payload?.header?.projectId ||
+                              "",
+                          ).trim(),
+                        )
+                      : undefined,
+
+                    taskId: mongoose.isValidObjectId(
+                      String(
+                        payload?.links?.taskId ||
+                          payload?.taskId ||
+                          payload?.header?.taskId ||
+                          "",
+                      ).trim(),
+                    )
+                      ? new mongoose.Types.ObjectId(
+                          String(
+                            payload?.links?.taskId ||
+                              payload?.taskId ||
+                              payload?.header?.taskId ||
+                              "",
+                          ).trim(),
+                        )
+                      : undefined,
+
+                    milestoneId: mongoose.isValidObjectId(
+                      String(
+                        payload?.links?.milestoneId ||
+                          payload?.milestoneId ||
+                          payload?.header?.milestoneId ||
+                          "",
+                      ).trim(),
+                    )
+                      ? new mongoose.Types.ObjectId(
+                          String(
+                            payload?.links?.milestoneId ||
+                              payload?.milestoneId ||
+                              payload?.header?.milestoneId ||
+                              "",
+                          ).trim(),
+                        )
+                      : undefined,
                   };
 
                   const runByUserId =
@@ -1809,14 +1846,6 @@ router.post(
                         "",
                     },
                     location: locationGeo,
-                    locationAtRun:
-                      locationFlat?.lat != null && locationFlat?.lng != null
-                        ? {
-                            lat: locationFlat.lat,
-                            lng: locationFlat.lng,
-                            at: submittedAt,
-                          }
-                        : undefined,
                     locationMeta:
                       locationFlat?.lat != null && locationFlat?.lng != null
                         ? {
