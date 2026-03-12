@@ -12,9 +12,7 @@ async function getDb() {
   if (!dbPromise) {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync("moatSmartOps.db");
-      // WAL is good for concurrent reads/writes
       await db.execAsync(`PRAGMA journal_mode = WAL;`);
-      // ✅ Ensure schema exists before anyone tries to insert
       await ensureOfflineEventsSchema(db);
       return db;
     })();
@@ -43,18 +41,17 @@ function safeJsonArray(value) {
 }
 
 async function ensureOfflineEventsSchema(db) {
-  // Create table + indexes
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS offline_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      eventType TEXT NOT NULL,         -- e.g. 'activity-log', 'clock-batch-v2', 'biometric-enroll'
+      eventType TEXT NOT NULL,
       orgId TEXT,
       userId TEXT,
-      entityRef TEXT,                  -- optional: projectId/taskId/targetUserId/etc
-      payloadJson TEXT NOT NULL,        -- JSON string
-      fileUrisJson TEXT NOT NULL,       -- JSON array of file URIs
-      syncStatus TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'synced' | 'failed'
-      serverStage TEXT,                -- 'received' | 'applied' (optional)
+      entityRef TEXT,
+      payloadJson TEXT NOT NULL,
+      fileUrisJson TEXT NOT NULL,
+      syncStatus TEXT NOT NULL DEFAULT 'pending',
+      serverStage TEXT,
       errorText TEXT,
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
@@ -73,7 +70,6 @@ async function ensureOfflineEventsSchema(db) {
       ON offline_events(entityRef, createdAt);
   `);
 
-  // Migration guard: add missing columns safely (older DBs)
   try {
     const cols = await db.getAllAsync(`PRAGMA table_info(offline_events);`);
     const colNames = new Set((cols || []).map((c) => c?.name).filter(Boolean));
@@ -100,18 +96,12 @@ async function ensureOfflineEventsSchema(db) {
   }
 }
 
-/**
- * Initialize SQLite + offline_events outbox table.
- */
 export async function initDatabase() {
-  await getDb(); // getDb now guarantees schema exists
+  await getDb();
   console.log("[DB] initDatabase complete (offline_events ready)");
   return true;
 }
 
-/**
- * Generic insert into offline_events outbox.
- */
 async function insertOfflineEvent({
   eventType,
   orgId,
@@ -215,18 +205,18 @@ export async function saveUserDocumentAttachment(doc) {
 /* ------------------------------------------------------------------ */
 /*  BIOMETRICS MODULE SAVES                                            */
 /* ------------------------------------------------------------------ */
-/**
- * If your onboarding screen wants to save directly via database.js
- * (instead of its own insertOfflineEvent), use this helper.
- */
+
 export async function saveBiometricEnrollment(enrollment) {
-  // enrollment: { orgId, userId, targetUserId, groupId?, profilePhotoUri, biometricPhotoUris:[...], ... }
   const fileUris = [];
   if (enrollment?.profilePhotoUri) fileUris.push(enrollment.profilePhotoUri);
+
   const bios = Array.isArray(enrollment?.biometricPhotoUris)
     ? enrollment.biometricPhotoUris
     : [];
-  for (const u of bios) if (u) fileUris.push(u);
+
+  for (const u of bios) {
+    if (u) fileUris.push(u);
+  }
 
   const rowId = await insertOfflineEvent({
     eventType: "biometric-enroll",
@@ -238,6 +228,40 @@ export async function saveBiometricEnrollment(enrollment) {
   });
 
   console.log("[DB] biometric-enroll saved locally with rowId:", rowId);
+  return rowId;
+}
+
+/* ------------------------------------------------------------------ */
+/*  INSPECTIONS MODULE SAVES                                           */
+/* ------------------------------------------------------------------ */
+
+export async function saveInspectionRun(run) {
+  const payload = run?.payload || run || {};
+  const fileUris = [];
+
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  for (const item of items) {
+    const photoUri =
+      item?.photoUri ||
+      item?.evidence?.photoUrl ||
+      item?.evidence?.photoUri ||
+      null;
+
+    if (photoUri) fileUris.push(photoUri);
+  }
+
+  const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
+
+  const rowId = await insertOfflineEvent({
+    eventType: "inspection-run",
+    orgId: run?.orgId ?? payload?.orgId ?? null,
+    userId: run?.userId ?? payload?.userId ?? null,
+    entityRef: run?.formId ?? payload?.formId ?? null,
+    payload,
+    fileUris: dedupedFileUris,
+  });
+
+  console.log("[DB] inspection-run saved locally with rowId:", rowId);
   return rowId;
 }
 
@@ -269,12 +293,18 @@ export async function listOfflineEvents(limit = 50) {
     try {
       const obj = JSON.parse(r.payloadJson || "{}");
       payloadPreview = {
-        projectId: obj.projectId ?? obj?.batch?.projectId ?? null,
-        taskId: obj.taskId ?? obj?.batch?.taskId ?? null,
+        projectId:
+          obj.projectId ??
+          obj?.batch?.projectId ??
+          obj?.links?.projectId ??
+          null,
+        taskId: obj.taskId ?? obj?.batch?.taskId ?? obj?.links?.taskId ?? null,
+        milestoneId: obj.milestoneId ?? obj?.links?.milestoneId ?? null,
         groupId: obj.groupId ?? obj?.batch?.groupId ?? null,
         targetUserId: obj.targetUserId ?? null,
-        note: obj.note ?? obj?.batch?.note ?? null,
-        title: obj.title ?? null,
+        formId: obj.formId ?? null,
+        note: obj.note ?? obj?.batch?.note ?? obj?.overallNote ?? null,
+        title: obj.title ?? obj?.formName ?? obj?.formTitle ?? null,
       };
     } catch {
       payloadPreview = null;
@@ -402,7 +432,7 @@ export async function saveVehicleCreate(vehicle) {
     eventType: "vehicle-create",
     orgId,
     userId,
-    entityRef: regNumber, // for dedupe
+    entityRef: regNumber,
     payload,
     fileUris: [],
   });
@@ -414,11 +444,8 @@ export async function saveVehicleCreate(vehicle) {
 export async function saveVehicleTrip(trip) {
   const fileUris = [];
 
-  // ✅ New logbook.jsx fields
   if (trip?.odometerStartPhotoUri) fileUris.push(trip.odometerStartPhotoUri);
   if (trip?.odometerEndPhotoUri) fileUris.push(trip.odometerEndPhotoUri);
-
-  // ✅ Backward compatibility with any older callers
   if (trip?.odometerPhotoUri) fileUris.push(trip.odometerPhotoUri);
   if (trip?.photoUri) fileUris.push(trip.photoUri);
 
@@ -440,10 +467,7 @@ export async function saveVehicleTrip(trip) {
 export async function saveVehiclePurchase(purchase) {
   const fileUris = [];
 
-  // ✅ New purchase screen field
   if (purchase?.slipPhotoUri) fileUris.push(purchase.slipPhotoUri);
-
-  // ✅ Backward compatibility
   if (purchase?.odometerPhotoUri) fileUris.push(purchase.odometerPhotoUri);
   if (purchase?.photoUri) fileUris.push(purchase.photoUri);
 
@@ -464,7 +488,6 @@ export async function saveVehiclePurchase(purchase) {
 
 export async function saveVehicleLog(log) {
   const fileUris = [];
-
   if (log?.photoUri) fileUris.push(log.photoUri);
 
   const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
@@ -500,13 +523,15 @@ export async function saveAssetLog(log) {
   const fileUris = [];
   if (log?.photoUri) fileUris.push(log.photoUri);
 
+  const dedupedFileUris = [...new Set(fileUris.filter(Boolean))];
+
   const rowId = await insertOfflineEvent({
     eventType: "asset-log",
     orgId: log?.orgId,
     userId: log?.userId,
     entityRef: log?.assetCode || null,
     payload: log,
-    fileUris,
+    fileUris: dedupedFileUris,
   });
 
   console.log("[DB] asset-log saved locally with rowId:", rowId);
@@ -516,17 +541,7 @@ export async function saveAssetLog(log) {
 /* ------------------------------------------------------------------ */
 /*  CLOCKING MODULE SAVES                                              */
 /* ------------------------------------------------------------------ */
-/**
- * Save a clocking batch (header + people) into offline_events outbox.
- *
- * batch: {
- *   orgId, projectId?, taskId?, groupId, clockType, note,
- *   createdAt, updatedAt,
- *   capturedByUserId?,
- *   location?: { lat, lng, acc? }  // ✅ NEW (optional)
- * }
- * people: [{ userId, name, method, status, note, manualPhotoUri? }]
- */
+
 export async function saveClockBatch(batch, people) {
   const safeBatch = batch || {};
   const safePeople = Array.isArray(people) ? people : [];
@@ -536,7 +551,6 @@ export async function saveClockBatch(batch, people) {
     if (p?.manualPhotoUri) fileUris.push(p.manualPhotoUri);
   }
 
-  // ✅ NEW: normalize optional location
   const loc =
     safeBatch?.location && typeof safeBatch.location === "object"
       ? safeBatch.location
@@ -559,8 +573,6 @@ export async function saveClockBatch(batch, people) {
       note: safeBatch.note ?? "",
       createdAt: safeBatch.createdAt ?? nowIso(),
       updatedAt: safeBatch.updatedAt ?? nowIso(),
-
-      // ✅ NEW: only include location if valid coords exist
       ...(hasCoords
         ? {
             location: {

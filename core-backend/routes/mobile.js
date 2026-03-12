@@ -324,6 +324,127 @@ function normalizeReminderForMobile(r) {
   };
 }
 
+function normalizeMobileRole(r) {
+  return String(r || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+function getUserRolesForMobile(userDoc) {
+  return []
+    .concat(userDoc?.roles || [])
+    .concat(userDoc?.role ? [userDoc.role] : [])
+    .map(normalizeMobileRole)
+    .filter(Boolean);
+}
+
+function mobileUserCanRunInspectionForm(userDoc, form) {
+  const allowed = Array.isArray(form?.rolesAllowed)
+    ? form.rolesAllowed.map(normalizeMobileRole).filter(Boolean)
+    : [];
+
+  if (!allowed.length) return true;
+
+  const mine = getUserRolesForMobile(userDoc);
+  return mine.some((r) => allowed.includes(r));
+}
+
+function mobileIdEquals(a, b) {
+  return String(a || "").trim() === String(b || "").trim();
+}
+
+function mobileArrayIncludesId(arr, id) {
+  if (!Array.isArray(arr) || !id) return false;
+  return arr.some((x) => mobileIdEquals(x, id));
+}
+
+function getAssignedProjectIdsForMobile(userDoc) {
+  return []
+    .concat(userDoc?.projectIds || [])
+    .concat(userDoc?.assignedProjectIds || [])
+    .concat(userDoc?.projects || [])
+    .map((x) => String(x?._id || x?.id || x || "").trim())
+    .filter(Boolean);
+}
+
+function getAssignedTaskIdsForMobile(userDoc) {
+  return []
+    .concat(userDoc?.taskIds || [])
+    .concat(userDoc?.assignedTaskIds || [])
+    .concat(userDoc?.tasks || [])
+    .map((x) => String(x?._id || x?.id || x || "").trim())
+    .filter(Boolean);
+}
+
+function getAssignedGroupIdsForMobile(userDoc) {
+  return []
+    .concat(userDoc?.groupIds || [])
+    .concat(userDoc?.assignedGroupIds || [])
+    .concat(userDoc?.groups || [])
+    .map((x) => String(x?._id || x?.id || x || "").trim())
+    .filter(Boolean);
+}
+
+function mobileUserMatchesInspectionAudience(userDoc, form) {
+  const audience = form?.audience || {};
+  const targetUserIds = Array.isArray(audience.userIds) ? audience.userIds : [];
+  const targetGroupIds = Array.isArray(audience.groupIds)
+    ? audience.groupIds
+    : [];
+
+  if (!targetUserIds.length && !targetGroupIds.length) {
+    return true;
+  }
+
+  const myUserId = String(userDoc?._id || userDoc?.id || "").trim();
+  const myGroupIds = getAssignedGroupIdsForMobile(userDoc);
+
+  if (targetUserIds.length && mobileArrayIncludesId(targetUserIds, myUserId)) {
+    return true;
+  }
+
+  if (
+    targetGroupIds.length &&
+    myGroupIds.some((gid) => mobileArrayIncludesId(targetGroupIds, gid))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function mobileUserMatchesInspectionScope(userDoc, form) {
+  const scope = form?.scope || {};
+  if (String(scope.type || "global") !== "scoped") return true;
+
+  const myProjectIds = getAssignedProjectIdsForMobile(userDoc);
+  const myTaskIds = getAssignedTaskIdsForMobile(userDoc);
+
+  const formProjectId = String(scope.projectId || "").trim();
+  const formTaskId = String(scope.taskId || "").trim();
+
+  if (formTaskId) {
+    return mobileArrayIncludesId(myTaskIds, formTaskId);
+  }
+
+  if (formProjectId) {
+    return mobileArrayIncludesId(myProjectIds, formProjectId);
+  }
+
+  return true;
+}
+
+function mobileFilterInspectionFormsForUser(forms, userDoc) {
+  return (Array.isArray(forms) ? forms : []).filter((form) => {
+    if (!form || form.isDeleted) return false;
+    if (!mobileUserCanRunInspectionForm(userDoc, form)) return false;
+    if (!mobileUserMatchesInspectionAudience(userDoc, form)) return false;
+    if (!mobileUserMatchesInspectionScope(userDoc, form)) return false;
+    return true;
+  });
+}
+
 async function ensureVehicleFromPayload({ orgId, payload }) {
   const Vehicle = require("../models/Vehicle");
 
@@ -872,7 +993,7 @@ router.get("/lists", requireOrg, async (req, res) => {
     let Task = null;
     let Milestone = null;
     let User = null;
-    let Inspection = null;
+    let InspectionForm = null;
     let Vehicle = null;
     let Asset = null;
     let Document = null;
@@ -892,7 +1013,7 @@ router.get("/lists", requireOrg, async (req, res) => {
       User = require("../models/User");
     } catch {}
     try {
-      Inspection = require("../models/InspectionForm");
+      InspectionForm = require("../models/InspectionForm");
     } catch {}
     try {
       Vehicle = require("../models/Vehicle");
@@ -949,15 +1070,56 @@ router.get("/lists", requireOrg, async (req, res) => {
           isDeleted: { $ne: true },
           active: { $ne: false },
         })
-          .select({ _id: 1, name: 1, email: 1, role: 1, roles: 1 })
+          .select({
+            _id: 1,
+            name: 1,
+            email: 1,
+            role: 1,
+            roles: 1,
+            projectIds: 1,
+            assignedProjectIds: 1,
+            projects: 1,
+            taskIds: 1,
+            assignedTaskIds: 1,
+            tasks: 1,
+            groupIds: 1,
+            assignedGroupIds: 1,
+            groups: 1,
+          })
           .lean()
       : [];
 
-    const inspections = Inspection?.find
-      ? await Inspection.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
-          .select({ _id: 1, name: 1, status: 1 })
+    const currentUserDoc =
+      (Array.isArray(users) ? users : []).find((u) =>
+        mobileIdEquals(u?._id, req.user?._id),
+      ) || req.user;
+
+    const inspectionFormsRaw = InspectionForm?.find
+      ? await InspectionForm.find({
+          ...makeOrgFilter(),
+          isDeleted: { $ne: true },
+        })
+          .select({
+            _id: 1,
+            title: 1,
+            description: 1,
+            formType: 1,
+            scope: 1,
+            subject: 1,
+            scoring: 1,
+            rolesAllowed: 1,
+            audience: 1,
+            items: 1,
+            updatedAt: 1,
+          })
+          .sort({ updatedAt: -1 })
           .lean()
       : [];
+
+    const inspectionForms = mobileFilterInspectionFormsForUser(
+      inspectionFormsRaw,
+      currentUserDoc,
+    );
 
     const vehicles = Vehicle?.find
       ? await Vehicle.find(makeOrgFilter())
@@ -1054,7 +1216,7 @@ router.get("/lists", requireOrg, async (req, res) => {
       documents,
       groups,
       vendors,
-      inspections,
+      inspectionForms,
     });
   } catch (e) {
     console.error("[mobile/lists] error", e);

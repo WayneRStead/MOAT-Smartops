@@ -1,11 +1,4 @@
 // moat-smartops-mobile/syncOutbox.js
-// FULL DROP-IN REPLACEMENT
-// ✅ JSON posts use apiPost (keeps current behavior)
-// ✅ Multipart posts use fetch with:
-//    - API_BASE_URL (absolute URL)
-//    - Authorization + x-org-id headers from getAuthHeaders()
-//    - NO manual Content-Type (FormData boundary must be auto-set)
-
 import { API_BASE_URL, apiPost, getAuthHeaders } from "./apiClient";
 import {
   getPendingEvents,
@@ -23,6 +16,13 @@ function safeParseJson(s, fallback) {
   }
 }
 
+function joinUrl(base, path) {
+  const b = String(base || "").replace(/\/+$/, "");
+  const p = String(path || "");
+  if (!p.startsWith("/")) return `${b}/${p}`;
+  return `${b}${p}`;
+}
+
 /**
  * Infer server stage from backend response.
  * Backend can return:
@@ -37,7 +37,6 @@ function inferServerStageFromResponse(res) {
 
 /**
  * Mark as "received" OR "applied" (backend confirmed applied).
- * If markEventApplied doesn't exist, falls back to markEventSynced.
  */
 async function markSyncedWithStage(rowId, serverStage) {
   if (serverStage === "applied" && typeof markEventApplied === "function") {
@@ -66,6 +65,9 @@ function guessFileMeta(uri, fallbackName = "file") {
   } else if (lower.endsWith(".webp")) {
     type = "image/webp";
     ext = "webp";
+  } else if (lower.endsWith(".pdf")) {
+    type = "application/pdf";
+    ext = "pdf";
   }
 
   return { type, ext, name: `${fallbackName}.${ext}` };
@@ -74,6 +76,7 @@ function guessFileMeta(uri, fallbackName = "file") {
 async function parseFetchResponse(res) {
   const text = await res.text().catch(() => "");
   let json = null;
+
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
@@ -91,15 +94,36 @@ async function parseFetchResponse(res) {
   return json || { ok: true, stage: "received" };
 }
 
+function buildInspectionRunRequest(payload, row) {
+  return {
+    formId: payload?.formId || row?.entityRef || "",
+    run: payload?.payload || payload,
+  };
+}
+
 /**
- * Upload offline event to backend with optional photos:
- * - If fileUris exist, use multipart/form-data (FormData)
- * - Else, use JSON apiPost
+ * Upload offline event to backend with optional files.
+ * - JSON events use apiPost
+ * - Multipart events use fetch + FormData
  */
 async function postOfflineEventToServer({ row, payload, fileUris }) {
-  const hasFiles = Array.isArray(fileUris) && fileUris.length > 0;
+  const eventType = String(row?.eventType || "")
+    .trim()
+    .toLowerCase();
+  const files = Array.isArray(fileUris) ? fileUris.filter(Boolean) : [];
 
-  // ✅ No files: keep your current JSON behaviour (this uses API_BASE_URL + auth headers)
+  // ✅ inspections go to their dedicated endpoint
+  if (eventType === "inspection-run") {
+    const body = buildInspectionRunRequest(payload, row);
+    return await apiPost(
+      `/api/inspections/forms/${encodeURIComponent(body.formId)}/run`,
+      body.run,
+    );
+  }
+
+  const hasFiles = files.length > 0;
+
+  // ✅ No files: keep current JSON mobile-offline behavior
   if (!hasFiles) {
     return await apiPost("/api/mobile/offline-events", {
       localId: row.id,
@@ -113,7 +137,7 @@ async function postOfflineEventToServer({ row, payload, fileUris }) {
     });
   }
 
-  // ✅ With files: multipart upload
+  // ✅ With files: multipart upload for mobile offline ingest
   const form = new FormData();
 
   form.append("localId", String(row.id));
@@ -124,8 +148,7 @@ async function postOfflineEventToServer({ row, payload, fileUris }) {
   form.append("createdAt", String(row.createdAt || new Date().toISOString()));
   form.append("payloadJson", JSON.stringify(payload || {}));
 
-  fileUris.forEach((uri, idx) => {
-    if (!uri) return;
+  files.forEach((uri, idx) => {
     const meta = guessFileMeta(
       uri,
       `offline_${row.eventType}_${row.id}_${idx}`,
@@ -137,13 +160,13 @@ async function postOfflineEventToServer({ row, payload, fileUris }) {
     });
   });
 
-  // ✅ IMPORTANT: absolute URL (no relative "/api/..." calls)
-  const url = `${API_BASE_URL}/api/mobile/offline-events`;
+  const url = joinUrl(API_BASE_URL, "/api/mobile/offline-events");
 
-  // ✅ IMPORTANT: include auth + org headers; do NOT set Content-Type
-  const { headers } = await getAuthHeaders();
-  // Remove JSON content-type if present (it breaks multipart)
-  if (headers && headers["Content-Type"]) delete headers["Content-Type"];
+  const auth = await getAuthHeaders({ json: false });
+  const headers = { ...(auth?.headers || {}) };
+
+  // IMPORTANT: never set Content-Type manually for FormData
+  delete headers["Content-Type"];
 
   const res = await fetch(url, {
     method: "POST",
@@ -156,8 +179,8 @@ async function postOfflineEventToServer({ row, payload, fileUris }) {
 
 /**
  * Sync pending offline_events to backend.
- * - Sends ONE event at a time.
- * - Marks each row as synced/failed.
+ * - Sends one event at a time
+ * - Marks each row as synced or failed
  */
 export async function syncOutbox({ limit = 25 } = {}) {
   const pending = await getPendingEvents(limit);
@@ -174,15 +197,19 @@ export async function syncOutbox({ limit = 25 } = {}) {
       const payload = safeParseJson(row.payloadJson, {});
       const fileUris = safeParseJson(row.fileUrisJson, []);
 
-      const res = await postOfflineEventToServer({ row, payload, fileUris });
+      const res = await postOfflineEventToServer({
+        row,
+        payload,
+        fileUris,
+      });
 
       const serverStage = inferServerStageFromResponse(res);
       await markSyncedWithStage(row.id, serverStage);
-
-      synced++;
+      synced += 1;
     } catch (e) {
+      console.log("[SYNC] failed row", row?.id, row?.eventType, e);
       await markEventFailed(row.id, e?.message || "Sync failed");
-      failed++;
+      failed += 1;
     }
   }
 
