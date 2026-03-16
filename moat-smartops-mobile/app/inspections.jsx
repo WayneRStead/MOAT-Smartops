@@ -25,6 +25,9 @@ const CACHE_PROJECTS_KEY = "@moat:cache:projects";
 const CACHE_TASKS_KEY = "@moat:cache:tasks";
 const CACHE_MILESTONES_KEY = "@moat:cache:milestones";
 const CACHE_MILESTONES_BY_TASK_KEY = "@moat:cache:milestonesByTask";
+const CACHE_ASSETS_KEY = "@moat:cache:assets";
+const CACHE_VEHICLES_KEY = "@moat:cache:vehicles";
+const CACHE_USERS_KEY = "@moat:cache:users";
 const TOKEN_KEY = "@moat:cache:token";
 
 const ORG_ID_KEYS = [
@@ -162,6 +165,110 @@ function pickMilestoneName(input) {
   return String(input?.name || input?.title || pickId(input) || "").trim();
 }
 
+function pickMilestoneId(input) {
+  if (!input) return "";
+  if (typeof input === "string") return String(input).trim();
+  return String(
+    input?._id || input?.id || input?.milestoneId || input?.code || "",
+  ).trim();
+}
+
+function milestoneTaskId(input) {
+  if (!input || typeof input === "string") return "";
+  return String(
+    input?.taskId?._id ||
+      input?.taskId?.id ||
+      input?.taskId ||
+      input?.task ||
+      "",
+  ).trim();
+}
+
+function getMilestonesForTask(taskIdValue, store, flatMilestones) {
+  if (!taskIdValue) return [];
+  const tid = String(taskIdValue).trim();
+  if (!tid) return [];
+
+  if (Array.isArray(store)) {
+    return store.filter((m) => milestoneTaskId(m) === tid);
+  }
+
+  if (store && typeof store === "object") {
+    let list =
+      store[tid] ||
+      store?.byTask?.[tid] ||
+      store?.milestonesByTask?.[tid] ||
+      null;
+
+    if (list && Array.isArray(list.items)) list = list.items;
+    if (list && Array.isArray(list.data)) list = list.data;
+
+    if (Array.isArray(list)) {
+      return list.filter((m) => {
+        const mTaskId = milestoneTaskId(m);
+        return !mTaskId || mTaskId === tid;
+      });
+    }
+
+    if (Array.isArray(store.items)) {
+      return store.items.filter((m) => milestoneTaskId(m) === tid);
+    }
+
+    if (Array.isArray(store.data)) {
+      return store.data.filter((m) => milestoneTaskId(m) === tid);
+    }
+  }
+
+  const flat = Array.isArray(flatMilestones) ? flatMilestones : [];
+  return flat.filter((m) => milestoneTaskId(m) === tid);
+}
+
+function getEmbeddedMilestonesFromTask(taskObj) {
+  if (!taskObj || typeof taskObj !== "object") return [];
+
+  if (Array.isArray(taskObj?.milestones)) return taskObj.milestones;
+  if (Array.isArray(taskObj?.taskMilestones)) return taskObj.taskMilestones;
+
+  return [];
+}
+
+async function ensureInspectionMilestonesLoadedForTask(
+  taskObj,
+  milestonesByTask,
+  setMilestonesByTask,
+) {
+  const tid = pickId(taskObj);
+  if (!tid) return;
+
+  const existing = getMilestonesForTask(tid, milestonesByTask, []);
+  if (Array.isArray(existing) && existing.length) return;
+
+  const embedded = getEmbeddedMilestonesFromTask(taskObj);
+  if (embedded.length) {
+    const next =
+      milestonesByTask &&
+      typeof milestonesByTask === "object" &&
+      !Array.isArray(milestonesByTask)
+        ? { ...(milestonesByTask || {}), [tid]: embedded }
+        : { [tid]: embedded };
+
+    setMilestonesByTask(next);
+
+    try {
+      await AsyncStorage.setItem(
+        CACHE_MILESTONES_BY_TASK_KEY,
+        JSON.stringify(next),
+      );
+    } catch {}
+
+    console.log(
+      "[INSPECTIONS] loaded embedded milestones for task",
+      tid,
+      embedded.length,
+    );
+  }
+}
+
 function buildResultRulesText(scoring) {
   const mode = String(scoring?.mode || "any-fail").toLowerCase();
 
@@ -212,6 +319,80 @@ function getSubjectLabel(subject) {
       subject?.type ||
       "",
   ).trim();
+}
+
+function getSubjectType(subject) {
+  return String(
+    subject?.type || subject?.subjectType || subject?.lockType || "none",
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function getRelatedProjectId(input) {
+  return String(
+    input?.projectId?._id ||
+      input?.projectId ||
+      input?.assignedProjectId?._id ||
+      input?.assignedProjectId ||
+      "",
+  ).trim();
+}
+
+function getRelatedTaskId(input) {
+  return String(
+    input?.taskId?._id ||
+      input?.taskId ||
+      input?.assignedTaskId?._id ||
+      input?.assignedTaskId ||
+      "",
+  ).trim();
+}
+
+function getAssetLabel(input) {
+  return String(
+    input?.name ||
+      input?.assetName ||
+      input?.code ||
+      input?.tag ||
+      pickId(input) ||
+      "",
+  ).trim();
+}
+
+function getVehicleLabel(input) {
+  const reg = String(input?.reg || input?.regNumber || "").trim();
+  const make = String(input?.make || "").trim();
+  const model = String(input?.model || "").trim();
+  return String(
+    reg || [make, model].filter(Boolean).join(" ") || pickId(input) || "",
+  ).trim();
+}
+
+function getUserLabel(input) {
+  return String(
+    input?.name || input?.fullName || input?.email || pickId(input) || "",
+  ).trim();
+}
+
+function userMatchesProjectOrTask(user, projectId, taskId) {
+  const projectIds = []
+    .concat(user?.projectIds || [])
+    .concat(user?.assignedProjectIds || [])
+    .concat(user?.projects || [])
+    .map((x) => String(x?._id || x?.id || x || "").trim())
+    .filter(Boolean);
+
+  const taskIds = []
+    .concat(user?.taskIds || [])
+    .concat(user?.assignedTaskIds || [])
+    .concat(user?.tasks || [])
+    .map((x) => String(x?._id || x?.id || x || "").trim())
+    .filter(Boolean);
+
+  if (taskId) return taskIds.includes(String(taskId).trim());
+  if (projectId) return projectIds.includes(String(projectId).trim());
+  return true;
 }
 
 function normalizeInspectionForm(input) {
@@ -381,6 +562,9 @@ export default function InspectionsScreen() {
   const [tasks, setTasks] = useState([]);
   const [milestones, setMilestones] = useState([]);
   const [milestonesByTask, setMilestonesByTask] = useState({});
+  const [assets, setAssets] = useState([]);
+  const [vehicles, setVehicles] = useState([]);
+  const [users, setUsers] = useState([]);
 
   const [currentForm, setCurrentForm] = useState(null);
   const [itemsState, setItemsState] = useState([]);
@@ -394,6 +578,8 @@ export default function InspectionsScreen() {
   const [selectedMilestoneId, setSelectedMilestoneId] = useState("");
 
   const [headerSubject, setHeaderSubject] = useState("");
+  const [selectedSubjectId, setSelectedSubjectId] = useState("");
+  const [selectedSubjectLabel, setSelectedSubjectLabel] = useState("");
 
   const [inspectorName, setInspectorName] = useState("");
   const [overallNote, setOverallNote] = useState("");
@@ -436,6 +622,9 @@ export default function InspectionsScreen() {
           cachedTasks,
           cachedMilestones,
           cachedMilestonesByTask,
+          cachedAssets,
+          cachedVehicles,
+          cachedUsers,
         ] = await Promise.all([
           getCurrentUserMeta(),
           loadCache(CACHE_INSPECTION_FORMS_KEY, []),
@@ -443,6 +632,9 @@ export default function InspectionsScreen() {
           loadCache(CACHE_TASKS_KEY, []),
           loadCache(CACHE_MILESTONES_KEY, []),
           loadCache(CACHE_MILESTONES_BY_TASK_KEY, {}),
+          loadCache(CACHE_ASSETS_KEY, []),
+          loadCache(CACHE_VEHICLES_KEY, []),
+          loadCache(CACHE_USERS_KEY, []),
         ]);
 
         if (!alive) return;
@@ -472,6 +664,18 @@ export default function InspectionsScreen() {
             ? cachedMilestonesByTask
             : {},
         );
+
+        console.log(
+          "[INSPECTIONS] milestones cache shape",
+          Array.isArray(cachedMilestonesByTask)
+            ? "array"
+            : typeof cachedMilestonesByTask,
+          cachedMilestonesByTask,
+        );
+
+        setAssets(Array.isArray(cachedAssets) ? cachedAssets : []);
+        setVehicles(Array.isArray(cachedVehicles) ? cachedVehicles : []);
+        setUsers(Array.isArray(cachedUsers) ? cachedUsers : []);
       })();
 
       return () => {
@@ -589,17 +793,63 @@ export default function InspectionsScreen() {
   }, [tasks, effectiveProjectId]);
 
   const availableMilestones = useMemo(() => {
-    if (effectiveTaskId && milestonesByTask?.[effectiveTaskId]) {
-      return Array.isArray(milestonesByTask[effectiveTaskId])
-        ? milestonesByTask[effectiveTaskId]
-        : [];
+    const allMilestones = Array.isArray(milestones) ? milestones : [];
+
+    if (effectiveTaskId) {
+      return getMilestonesForTask(
+        effectiveTaskId,
+        milestonesByTask,
+        allMilestones,
+      );
     }
 
-    return (Array.isArray(milestones) ? milestones : []).filter((m) => {
-      const mTaskId = String(m?.taskId?._id || m?.taskId || "").trim();
-      return effectiveTaskId ? mTaskId === effectiveTaskId : true;
-    });
-  }, [milestones, milestonesByTask, effectiveTaskId]);
+    if (effectiveProjectId) {
+      const projectTaskIds = (Array.isArray(tasks) ? tasks : [])
+        .filter((t) => {
+          const tProjectId = String(
+            t?.projectId?._id || t?.projectId || "",
+          ).trim();
+          return tProjectId === effectiveProjectId;
+        })
+        .map((t) => pickId(t))
+        .filter(Boolean);
+
+      const combined = projectTaskIds.flatMap((tid) =>
+        getMilestonesForTask(tid, milestonesByTask, allMilestones),
+      );
+
+      const seen = new Set();
+      return combined.filter((m) => {
+        const id = pickMilestoneId(m);
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    }
+
+    return [];
+  }, [
+    milestones,
+    milestonesByTask,
+    effectiveTaskId,
+    effectiveProjectId,
+    tasks,
+  ]);
+
+  console.log("[INSPECTIONS] milestone lookup", {
+    effectiveProjectId,
+    effectiveTaskId,
+    milestonesFlatCount: Array.isArray(milestones) ? milestones.length : 0,
+    milestoneTaskKeys:
+      milestonesByTask &&
+      typeof milestonesByTask === "object" &&
+      !Array.isArray(milestonesByTask)
+        ? Object.keys(milestonesByTask)
+        : [],
+    availableMilestonesCount: Array.isArray(availableMilestones)
+      ? availableMilestones.length
+      : 0,
+  });
 
   const projectDisplay = useMemo(() => {
     const id = effectiveProjectId;
@@ -622,11 +872,114 @@ export default function InspectionsScreen() {
   const milestoneDisplay = useMemo(() => {
     const id = effectiveMilestoneId;
     if (!id) return "";
-    const found = availableMilestones.find((m) => pickId(m) === id);
+    const found = availableMilestones.find((m) => pickMilestoneId(m) === id);
     return found
       ? pickMilestoneName(found)
       : String(currentForm?.scopeInfo?.milestoneName || "").trim();
   }, [availableMilestones, effectiveMilestoneId, currentForm]);
+
+  const subjectType = useMemo(() => {
+    return getSubjectType(currentForm?.subject);
+  }, [currentForm]);
+
+  const availableSubjectOptions = useMemo(() => {
+    if (!currentForm) return [];
+
+    if (subjectType === "asset") {
+      return (Array.isArray(assets) ? assets : [])
+        .filter((a) => {
+          const projectId = getRelatedProjectId(a);
+          const taskId = getRelatedTaskId(a);
+
+          if (effectiveTaskId) return taskId === effectiveTaskId;
+          if (effectiveProjectId) return projectId === effectiveProjectId;
+          return true;
+        })
+        .map((a) => ({
+          id: pickId(a),
+          label: getAssetLabel(a),
+          raw: a,
+        }))
+        .filter((x) => x.id && x.label);
+    }
+
+    if (subjectType === "vehicle") {
+      return (Array.isArray(vehicles) ? vehicles : [])
+        .filter((v) => {
+          const projectId = getRelatedProjectId(v);
+          const taskId = getRelatedTaskId(v);
+
+          if (effectiveTaskId) return taskId === effectiveTaskId;
+          if (effectiveProjectId) return projectId === effectiveProjectId;
+          return true;
+        })
+        .map((v) => ({
+          id: pickId(v),
+          label: getVehicleLabel(v),
+          raw: v,
+        }))
+        .filter((x) => x.id && x.label);
+    }
+
+    if (
+      subjectType === "performance" ||
+      subjectType === "person" ||
+      subjectType === "user" ||
+      subjectType === "employee" ||
+      subjectType === "staff"
+    ) {
+      return (Array.isArray(users) ? users : [])
+        .filter((u) =>
+          userMatchesProjectOrTask(u, effectiveProjectId, effectiveTaskId),
+        )
+        .map((u) => ({
+          id: pickId(u),
+          label: getUserLabel(u),
+          raw: u,
+        }))
+        .filter((x) => x.id && x.label);
+    }
+
+    return [];
+  }, [
+    currentForm,
+    subjectType,
+    assets,
+    vehicles,
+    users,
+    effectiveProjectId,
+    effectiveTaskId,
+  ]);
+
+  const subjectDisplay = useMemo(() => {
+    return headerSubject || "No specific subject";
+  }, [headerSubject]);
+
+  const subjectIsLocked = useMemo(() => {
+    const subject = currentForm?.subject || {};
+    return !!String(
+      subject?.lockToId || subject?.lockLabel || subject?.lockToLabel || "",
+    ).trim();
+  }, [currentForm]);
+
+  const selectedSubjectValueDisplay = useMemo(() => {
+    return selectedSubjectLabel || "Tap to select";
+  }, [selectedSubjectLabel]);
+
+  const subjectSelectionLabel = useMemo(() => {
+    if (subjectType === "vehicle") return "Vehicle";
+    if (subjectType === "asset") return "Asset";
+    if (
+      subjectType === "performance" ||
+      subjectType === "person" ||
+      subjectType === "user" ||
+      subjectType === "employee" ||
+      subjectType === "staff"
+    ) {
+      return "Person";
+    }
+    return "Selection";
+  }, [subjectType]);
 
   const refreshLocation = async () => {
     const coords = await getCurrentCoords();
@@ -747,6 +1100,8 @@ export default function InspectionsScreen() {
     setSelectedTaskId("");
     setSelectedMilestoneId("");
     setHeaderSubject("");
+    setSelectedSubjectId("");
+    setSelectedSubjectLabel("");
     setInspectorName("");
     setOverallNote("");
     setRunDateTime(formatNow());
@@ -787,6 +1142,12 @@ export default function InspectionsScreen() {
     setSelectedMilestoneId("");
 
     setHeaderSubject(getSubjectLabel(form?.subject));
+    setSelectedSubjectId(String(form?.subject?.lockToId || "").trim());
+    setSelectedSubjectLabel(
+      String(
+        form?.subject?.lockLabel || form?.subject?.lockToLabel || "",
+      ).trim(),
+    );
     setInspectorName(userMeta?.name || "");
     setOverallNote("");
     setRunDateTime(formatNow());
@@ -815,6 +1176,16 @@ export default function InspectionsScreen() {
       setSelectedProjectId(projectId);
       setSelectedTaskId("");
       setSelectedMilestoneId("");
+      setSelectedSubjectId(String(currentForm?.subject?.lockToId || "").trim());
+      setSelectedSubjectLabel(
+        subjectIsLocked
+          ? String(
+              currentForm?.subject?.lockLabel ||
+                currentForm?.subject?.lockToLabel ||
+                "",
+            ).trim()
+          : "",
+      );
     });
   };
 
@@ -833,29 +1204,64 @@ export default function InspectionsScreen() {
       return;
     }
 
-    openPicker("Select task", options, (item) => {
+    openPicker("Select task", options, async (item) => {
       setSelectedTaskId(item.id);
       setSelectedMilestoneId("");
+      setSelectedSubjectId(String(currentForm?.subject?.lockToId || "").trim());
+      setSelectedSubjectLabel(
+        subjectIsLocked
+          ? String(
+              currentForm?.subject?.lockLabel ||
+                currentForm?.subject?.lockToLabel ||
+                "",
+            ).trim()
+          : "",
+      );
+
+      await ensureInspectionMilestonesLoadedForTask(
+        item.raw,
+        milestonesByTask,
+        setMilestonesByTask,
+      );
     });
   };
 
   const showMilestonePicker = () => {
     const options = availableMilestones.map((m) => ({
-      id: pickId(m),
+      id: pickMilestoneId(m),
       label: pickMilestoneName(m),
       raw: m,
     }));
 
     if (!options.length) {
       Alert.alert(
-        "No milestones",
-        "No milestones are available for the selected task.",
+        "No deliverables",
+        effectiveTaskId
+          ? "No deliverables are available for the selected task."
+          : effectiveProjectId
+            ? "No deliverables are available for the selected project."
+            : "Select a project or task first.",
       );
       return;
     }
 
-    openPicker("Select milestone", options, (item) => {
+    openPicker("Select deliverable", options, (item) => {
       setSelectedMilestoneId(item.id);
+    });
+  };
+
+  const showSubjectPicker = () => {
+    if (!availableSubjectOptions.length) {
+      Alert.alert(
+        "No subjects",
+        "No matching subjects are available for the current project/task selection.",
+      );
+      return;
+    }
+
+    openPicker("Select subject", availableSubjectOptions, (item) => {
+      setSelectedSubjectId(item.id);
+      setSelectedSubjectLabel(item.label);
     });
   };
 
@@ -885,6 +1291,23 @@ export default function InspectionsScreen() {
       Alert.alert(
         "Missing signature name",
         "Please enter your name before submitting.",
+      );
+      return;
+    }
+
+    if (
+      (subjectType === "asset" ||
+        subjectType === "vehicle" ||
+        subjectType === "performance" ||
+        subjectType === "person" ||
+        subjectType === "user" ||
+        subjectType === "employee" ||
+        subjectType === "staff") &&
+      !selectedSubjectId
+    ) {
+      Alert.alert(
+        "Subject required",
+        "Please select the relevant subject before submitting.",
       );
       return;
     }
@@ -954,7 +1377,7 @@ export default function InspectionsScreen() {
           project: projectDisplay || "",
           task: taskDisplay || "",
           milestone: milestoneDisplay || "",
-          subject: headerSubject || "",
+          subject: selectedSubjectLabel || headerSubject || "",
           description: currentForm.description || "",
           resultRules: currentForm.resultRules || "",
           achievedScore,
@@ -967,9 +1390,10 @@ export default function InspectionsScreen() {
         },
         subjectAtRun: {
           type: String(currentForm?.subject?.type || "none").toLowerCase(),
-          id: currentForm?.subject?.lockToId || undefined,
+          id: selectedSubjectId || currentForm?.subject?.lockToId || undefined,
           label: String(
-            headerSubject ||
+            selectedSubjectLabel ||
+              headerSubject ||
               currentForm?.subject?.lockLabel ||
               currentForm?.subject?.lockToLabel ||
               "",
@@ -1227,7 +1651,7 @@ export default function InspectionsScreen() {
             />
 
             <SelectField
-              label="Milestone"
+              label="Deliverable"
               valueText={milestoneDisplay}
               onPress={showMilestonePicker}
               disabled={!!scopedMilestoneId || isSubmitting}
@@ -1235,10 +1659,23 @@ export default function InspectionsScreen() {
 
             <View style={styles.readonlyField}>
               <Text style={styles.selectFieldLabel}>Subject</Text>
-              <Text style={styles.selectFieldValue}>
-                {headerSubject || "No specific subject"}
-              </Text>
+              <Text style={styles.selectFieldValue}>{subjectDisplay}</Text>
             </View>
+
+            {subjectType === "asset" ||
+            subjectType === "vehicle" ||
+            subjectType === "performance" ||
+            subjectType === "person" ||
+            subjectType === "user" ||
+            subjectType === "employee" ||
+            subjectType === "staff" ? (
+              <SelectField
+                label={subjectSelectionLabel}
+                valueText={selectedSubjectValueDisplay}
+                onPress={showSubjectPicker}
+                disabled={subjectIsLocked || isSubmitting}
+              />
+            ) : null}
 
             {currentForm.description ? (
               <Text style={styles.headerInfoText}>

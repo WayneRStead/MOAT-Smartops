@@ -5,6 +5,7 @@ import { apiGet } from "./apiClient";
 export const CACHE_PROJECTS = "@moat:cache:projects";
 export const CACHE_TASKS = "@moat:cache:tasks";
 export const CACHE_MILESTONES = "@moat:cache:milestones";
+export const CACHE_MILESTONES_BY_TASK = "@moat:cache:milestonesByTask";
 export const CACHE_USERS = "@moat:cache:users";
 export const CACHE_VEHICLES = "@moat:cache:vehicles";
 export const CACHE_ASSETS = "@moat:cache:assets";
@@ -21,6 +22,19 @@ function safeArray(v) {
 
 function safeObject(v) {
   return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
+function buildMilestonesByTask(milestones) {
+  const out = {};
+  for (const m of Array.isArray(milestones) ? milestones : []) {
+    const taskId = String(
+      m?.taskId?._id || m?.taskId || m?.parentTaskId || "",
+    ).trim();
+    if (!taskId) continue;
+    if (!Array.isArray(out[taskId])) out[taskId] = [];
+    out[taskId].push(m);
+  }
+  return out;
 }
 
 /**
@@ -46,6 +60,7 @@ export async function refreshListsFromServer() {
   const projects = safeArray(data?.projects);
   const tasks = safeArray(data?.tasks);
   const milestones = safeArray(data?.milestones || data?.taskMilestones);
+  const milestonesByTask = buildMilestonesByTask(milestones);
   const users = safeArray(data?.users);
   const vehicles = safeArray(data?.vehicles);
   const assets = safeArray(data?.assets);
@@ -59,6 +74,7 @@ export async function refreshListsFromServer() {
     [CACHE_PROJECTS, JSON.stringify(projects)],
     [CACHE_TASKS, JSON.stringify(tasks)],
     [CACHE_MILESTONES, JSON.stringify(milestones)],
+    [CACHE_MILESTONES_BY_TASK, JSON.stringify(milestonesByTask)],
     [CACHE_USERS, JSON.stringify(users)],
     [CACHE_VEHICLES, JSON.stringify(vehicles)],
     [CACHE_ASSETS, JSON.stringify(assets)],
@@ -92,6 +108,7 @@ export async function loadCachedLists() {
     CACHE_PROJECTS,
     CACHE_TASKS,
     CACHE_MILESTONES,
+    CACHE_MILESTONES_BY_TASK,
     CACHE_USERS,
     CACHE_VEHICLES,
     CACHE_ASSETS,
@@ -117,6 +134,7 @@ export async function loadCachedLists() {
     projects: parse(map[CACHE_PROJECTS], []),
     tasks: parse(map[CACHE_TASKS], []),
     milestones: parse(map[CACHE_MILESTONES], []),
+    milestonesByTask: parse(map[CACHE_MILESTONES_BY_TASK], {}),
     users: parse(map[CACHE_USERS], []),
     vehicles: parse(map[CACHE_VEHICLES], []),
     assets: parse(map[CACHE_ASSETS], []),

@@ -1200,6 +1200,7 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     let Project = null;
     let Task = null;
+    let TaskMilestone = null;
     let Milestone = null;
     let User = null;
     let InspectionForm = null;
@@ -1214,6 +1215,9 @@ router.get("/lists", requireOrg, async (req, res) => {
     } catch {}
     try {
       Task = require("../models/Task");
+    } catch {}
+    try {
+      TaskMilestone = require("../models/TaskMilestone");
     } catch {}
     try {
       Milestone = require("../models/Milestone");
@@ -1267,11 +1271,35 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
-    const milestones = Milestone?.find
-      ? await Milestone.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
-          .select({ _id: 1, name: 1, taskId: 1, status: 1 })
+    const milestones = TaskMilestone?.find
+      ? await TaskMilestone.find({
+          ...makeOrgFilter(),
+          isDeleted: { $ne: true },
+        })
+          .select({
+            _id: 1,
+            name: 1,
+            title: 1,
+            code: 1,
+            taskId: 1,
+            status: 1,
+          })
           .lean()
-      : [];
+      : Milestone?.find
+        ? await Milestone.find({
+            ...makeOrgFilter(),
+            isDeleted: { $ne: true },
+          })
+            .select({
+              _id: 1,
+              name: 1,
+              title: 1,
+              code: 1,
+              taskId: 1,
+              status: 1,
+            })
+            .lean()
+        : [];
 
     const users = User?.find
       ? await User.find({
