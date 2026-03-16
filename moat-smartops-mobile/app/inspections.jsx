@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -28,6 +29,7 @@ const CACHE_MILESTONES_BY_TASK_KEY = "@moat:cache:milestonesByTask";
 const CACHE_ASSETS_KEY = "@moat:cache:assets";
 const CACHE_VEHICLES_KEY = "@moat:cache:vehicles";
 const CACHE_USERS_KEY = "@moat:cache:users";
+const LAST_SCAN_KEY = "@moat:lastScan";
 const TOKEN_KEY = "@moat:cache:token";
 
 const ORG_ID_KEYS = [
@@ -585,6 +587,7 @@ export default function InspectionsScreen() {
   const [overallNote, setOverallNote] = useState("");
   const [runDateTime, setRunDateTime] = useState(formatNow());
   const [followUpDate, setFollowUpDate] = useState("");
+  const [showFollowUpPicker, setShowFollowUpPicker] = useState(false);
   const [confirmAccurate, setConfirmAccurate] = useState(false);
   const [signatureDataUrl, setSignatureDataUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -593,6 +596,8 @@ export default function InspectionsScreen() {
   const [pickerTitle, setPickerTitle] = useState("");
   const [pickerItems, setPickerItems] = useState([]);
   const [pickerOnSelect, setPickerOnSelect] = useState(null);
+
+  const [pendingScanItemId, setPendingScanItemId] = useState("");
 
   const [pageScrollEnabled, setPageScrollEnabled] = useState(true);
 
@@ -645,13 +650,6 @@ export default function InspectionsScreen() {
             (f) => f && f.id && Array.isArray(f.items) && f.items.length > 0,
           );
 
-        console.log(
-          "[INSPECTIONS] cached forms found",
-          Array.isArray(cachedForms) ? cachedForms.length : 0,
-          "| usable forms",
-          normalizedForms.length,
-        );
-
         setUserMeta(meta);
         setForms(normalizedForms);
         setProjects(Array.isArray(cachedProjects) ? cachedProjects : []);
@@ -664,24 +662,44 @@ export default function InspectionsScreen() {
             ? cachedMilestonesByTask
             : {},
         );
-
-        console.log(
-          "[INSPECTIONS] milestones cache shape",
-          Array.isArray(cachedMilestonesByTask)
-            ? "array"
-            : typeof cachedMilestonesByTask,
-          cachedMilestonesByTask,
-        );
-
         setAssets(Array.isArray(cachedAssets) ? cachedAssets : []);
         setVehicles(Array.isArray(cachedVehicles) ? cachedVehicles : []);
         setUsers(Array.isArray(cachedUsers) ? cachedUsers : []);
+
+        try {
+          const rawLastScan = await AsyncStorage.getItem(LAST_SCAN_KEY);
+          if (!alive || !rawLastScan || !pendingScanItemId) return;
+
+          const lastScan = JSON.parse(rawLastScan || "{}");
+          const scannedValue = String(lastScan?.value || "").trim();
+
+          if (scannedValue) {
+            setItemsState((prev) =>
+              prev.map((item) =>
+                item.id === pendingScanItemId
+                  ? {
+                      ...item,
+                      scanDone: true,
+                      scanValue: scannedValue,
+                      note:
+                        item.note && item.note.trim().length > 0
+                          ? item.note
+                          : `Scan: ${scannedValue}`,
+                    }
+                  : item,
+              ),
+            );
+          }
+
+          await AsyncStorage.removeItem(LAST_SCAN_KEY);
+          setPendingScanItemId("");
+        } catch {}
       })();
 
       return () => {
         alive = false;
       };
-    }, []),
+    }, [pendingScanItemId]),
   );
 
   const formsForScope = useMemo(() => {
@@ -836,21 +854,6 @@ export default function InspectionsScreen() {
     tasks,
   ]);
 
-  console.log("[INSPECTIONS] milestone lookup", {
-    effectiveProjectId,
-    effectiveTaskId,
-    milestonesFlatCount: Array.isArray(milestones) ? milestones.length : 0,
-    milestoneTaskKeys:
-      milestonesByTask &&
-      typeof milestonesByTask === "object" &&
-      !Array.isArray(milestonesByTask)
-        ? Object.keys(milestonesByTask)
-        : [],
-    availableMilestonesCount: Array.isArray(availableMilestones)
-      ? availableMilestones.length
-      : 0,
-  });
-
   const projectDisplay = useMemo(() => {
     const id = effectiveProjectId;
     if (!id) return "";
@@ -981,6 +984,20 @@ export default function InspectionsScreen() {
     return "Selection";
   }, [subjectType]);
 
+  const formatDateOnly = (date) => {
+    const d = date instanceof Date ? date : new Date(date);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  const handleFollowUpDateChange = (_event, selectedDate) => {
+    setShowFollowUpPicker(false);
+    if (!selectedDate) return;
+    setFollowUpDate(formatDateOnly(selectedDate));
+  };
+
   const refreshLocation = async () => {
     const coords = await getCurrentCoords();
     setLocationCoords(coords);
@@ -1019,17 +1036,20 @@ export default function InspectionsScreen() {
     );
   };
 
-  const markScanDoneForItem = (itemId) => {
-    Alert.alert(
-      "Scan",
-      "This item is marked as scanned. Scanner wiring can be added next.",
-    );
+  const markScanDoneForItem = async (itemId) => {
+    setPendingScanItemId(String(itemId || "").trim());
 
-    setItemsState((prev) =>
-      prev.map((item) =>
-        item.id === itemId ? { ...item, scanDone: true } : item,
-      ),
-    );
+    try {
+      await AsyncStorage.removeItem(LAST_SCAN_KEY);
+    } catch {}
+
+    router.push({
+      pathname: "/scan",
+      params: {
+        field: "inspectionItemScan",
+        label: "Scan inspection item",
+      },
+    });
   };
 
   const setStatusForItem = (itemId, status) => {
@@ -1106,10 +1126,12 @@ export default function InspectionsScreen() {
     setOverallNote("");
     setRunDateTime(formatNow());
     setFollowUpDate("");
+    setShowFollowUpPicker(false);
     setConfirmAccurate(false);
     setSignatureDataUrl("");
     setIsSubmitting(false);
     setPageScrollEnabled(true);
+    setPendingScanItemId("");
     closePicker();
   };
 
@@ -1320,13 +1342,25 @@ export default function InspectionsScreen() {
       return;
     }
 
-    if (!signatureDataUrl) {
+    let finalSignature = signatureDataUrl;
+
+    if (!finalSignature) {
+      try {
+        signatureRef.current?.readSignature?.();
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        finalSignature = signatureDataUrl;
+      } catch {}
+    }
+
+    if (!finalSignature) {
       Alert.alert(
         "Signature required",
-        "Please sign in the signature box before submitting.",
+        "Please sign in the signature box and tap Save Signature before submitting.",
       );
       return;
     }
+
+    setSignatureDataUrl(finalSignature);
 
     const invalidFails = itemsState.filter(
       (i) =>
@@ -1403,7 +1437,7 @@ export default function InspectionsScreen() {
           confirmed: true,
           name: String(inspectorName || "").trim(),
           date: submittedAt,
-          signatureDataUrl,
+          signatureDataUrl: finalSignature,
         },
         location: coords || undefined,
         coords: coords || undefined,
@@ -1416,7 +1450,8 @@ export default function InspectionsScreen() {
           criticalTriggered: item.status === "fail" && !!item.criticalOnFail,
           evidence: {
             photoUrl: item.photoUri || "",
-            scanRef: item.scanDone ? "mobile-scan-complete" : "",
+            scanRef:
+              item.scanValue || (item.scanDone ? "mobile-scan-complete" : ""),
             note: String(item.note || "").trim(),
           },
         })),
@@ -1424,11 +1459,19 @@ export default function InspectionsScreen() {
         updatedAt: submittedAt,
       };
 
+      const payloadForLocalSave = {
+        ...payload,
+        signoff: {
+          ...(payload.signoff || {}),
+          signatureDataUrl: "",
+        },
+      };
+
       const localId = await saveInspectionRun({
         orgId: userMeta?.orgId || null,
         userId: userMeta?.userId || null,
         formId: currentForm.id,
-        payload,
+        payload: payloadForLocalSave,
       });
 
       console.log("[INSPECTIONS] Inspection saved locally with id:", localId);
@@ -1867,7 +1910,11 @@ export default function InspectionsScreen() {
                       ) : null}
 
                       {state.scanDone && (
-                        <Text style={styles.scanDoneText}>Scan completed.</Text>
+                        <Text style={styles.scanDoneText}>
+                          {state.scanValue
+                            ? `Scan completed: ${state.scanValue}`
+                            : "Scan completed."}
+                        </Text>
                       )}
 
                       {needsCorrective && (
@@ -1896,14 +1943,28 @@ export default function InspectionsScreen() {
                 required.
               </Text>
 
-              <TextInput
-                style={styles.input}
-                placeholder="Follow-up date (YYYY-MM-DD)"
-                placeholderTextColor="#aaa"
-                value={followUpDate}
-                onChangeText={setFollowUpDate}
-                editable={!isSubmitting}
-              />
+              <TouchableOpacity
+                style={[
+                  styles.selectField,
+                  isSubmitting && styles.disabledField,
+                ]}
+                onPress={() => setShowFollowUpPicker(true)}
+                disabled={isSubmitting}
+              >
+                <Text style={styles.selectFieldLabel}>Follow-up date</Text>
+                <Text style={styles.selectFieldValue}>
+                  {followUpDate || "Tap to select date"}
+                </Text>
+              </TouchableOpacity>
+
+              {showFollowUpPicker && (
+                <DateTimePicker
+                  value={followUpDate ? new Date(followUpDate) : new Date()}
+                  mode="date"
+                  display="default"
+                  onChange={handleFollowUpDateChange}
+                />
+              )}
             </View>
           )}
 

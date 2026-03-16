@@ -1768,9 +1768,43 @@ router.post(
                     if (tpl?._id) tplById[String(tpl._id)] = tpl;
                   }
 
-                  const sharedUploadedEvidence = buildInspectionEvidenceFiles(
-                    doc?.uploadedFiles || [],
+                  const uploadedFilesAll = Array.isArray(doc?.uploadedFiles)
+                    ? doc.uploadedFiles
+                    : [];
+
+                  const signatureUploadIndex = Number.isInteger(
+                    Number(payload?.signatureUploadIndex),
+                  )
+                    ? Number(payload.signatureUploadIndex)
+                    : -1;
+
+                  const signatureUpload =
+                    signatureUploadIndex >= 0 &&
+                    signatureUploadIndex < uploadedFilesAll.length
+                      ? uploadedFilesAll[signatureUploadIndex]
+                      : null;
+
+                  const evidenceUploads = uploadedFilesAll.filter(
+                    (_f, idx) => idx !== signatureUploadIndex,
                   );
+
+                  const sharedUploadedEvidence =
+                    buildInspectionEvidenceFiles(evidenceUploads);
+
+                  const signatureFile = signatureUpload
+                    ? {
+                        fileId: String(signatureUpload.fileId || ""),
+                        filename: signatureUpload.filename || "signature.png",
+                        url: signatureUpload.downloadKey
+                          ? `/api/mobile/offline-files/${signatureUpload.fileId}?k=${encodeURIComponent(signatureUpload.downloadKey)}`
+                          : `/api/mobile/offline-files/${signatureUpload.fileId}`,
+                        mime: signatureUpload.contentType || "image/png",
+                        size:
+                          typeof signatureUpload.size === "number"
+                            ? signatureUpload.size
+                            : undefined,
+                      }
+                    : undefined;
 
                   const payloadItems = Array.isArray(payload?.items)
                     ? payload.items
@@ -1976,7 +2010,10 @@ router.post(
                         req.user?.email ||
                         "",
                       date: submittedAt.toISOString(),
-                      signatureDataUrl: "",
+                      signatureDataUrl: String(
+                        payload?.signoff?.signatureDataUrl || "",
+                      ).trim(),
+                      ...(signatureFile ? { signatureFile } : {}),
                     },
                     sourceOfflineEventId: doc._id,
                     createdAt: submittedAt,

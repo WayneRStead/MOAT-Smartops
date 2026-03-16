@@ -90,9 +90,20 @@ const SubjectAtRunSchema = new Schema(
 const SignoffSchema = new Schema(
   {
     confirmed: { type: Boolean, required: true },
-    name: { type: String, required: true }, // captured from user details
+    name: { type: String, required: true },
     date: { type: Date, required: true },
-    signatureDataUrl: { type: String }, // canvas data URL
+
+    // old web/base64 support
+    signatureDataUrl: { type: String },
+
+    // new uploaded signature file support
+    signatureFile: {
+      fileId: String,
+      filename: String,
+      url: String,
+      mime: String,
+      size: Number,
+    },
   },
   { _id: false },
 );

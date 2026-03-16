@@ -1,18 +1,19 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+//moat-smartops-mobile/scan.jsx
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useRef, useState } from "react";
 import {
-    Alert,
-    Image,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-} from 'react-native';
+  Alert,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
-const THEME_COLOR = '#22a6b3';
-const LAST_SCAN_KEY = '@moat:lastScan';
+const THEME_COLOR = "#22a6b3";
+const LAST_SCAN_KEY = "@moat:lastScan";
 
 export default function ScanScreen() {
   const router = useRouter();
@@ -22,10 +23,10 @@ export default function ScanScreen() {
   // returnTo: '/logbook' (or omit to just router.back())
   // field: 'regNumber' (caller uses this to know where to put the value)
   // label: 'Scan vehicle QR'
-  const returnTo = typeof params.returnTo === 'string' ? params.returnTo : null;
-  const field = typeof params.field === 'string' ? params.field : null;
+  const returnTo = typeof params.returnTo === "string" ? params.returnTo : null;
+  const field = typeof params.field === "string" ? params.field : null;
   const label =
-    typeof params.label === 'string' ? params.label : 'Scan QR / Barcode';
+    typeof params.label === "string" ? params.label : "Scan QR / Barcode";
 
   const [permission, requestPermission] = useCameraPermissions();
   const [scannedValue, setScannedValue] = useState(null);
@@ -42,7 +43,7 @@ export default function ScanScreen() {
     async (result) => {
       if (hasHandledScanRef.current) return;
 
-      const value = result?.data ? String(result.data) : '';
+      const value = result?.data ? String(result.data) : "";
       if (!value) return;
 
       hasHandledScanRef.current = true;
@@ -70,14 +71,14 @@ export default function ScanScreen() {
           }
         }, 250);
       } catch (e) {
-        console.log('[SCAN] Failed to store scan result', e);
-        Alert.alert('Error', 'Could not save scan result on this device.');
+        console.log("[SCAN] Failed to store scan result", e);
+        Alert.alert("Error", "Could not save scan result on this device.");
         hasHandledScanRef.current = false;
       } finally {
         setIsSaving(false);
       }
     },
-    [field, returnTo, router]
+    [field, returnTo, router],
   );
 
   if (!permission) {
@@ -97,7 +98,10 @@ export default function ScanScreen() {
           Camera permission is required to scan codes.
         </Text>
 
-        <TouchableOpacity style={styles.primaryButton} onPress={requestPermission}>
+        <TouchableOpacity
+          style={styles.primaryButton}
+          onPress={requestPermission}
+        >
           <Text style={styles.primaryButtonText}>Allow camera</Text>
         </TouchableOpacity>
 
@@ -112,10 +116,7 @@ export default function ScanScreen() {
     <View style={styles.scanContainer}>
       {/* Top bar (simple, consistent feel) */}
       <View style={styles.topBar}>
-        <Image
-          source={require('../assets/home.png')}
-          style={styles.topIcon}
-        />
+        <Image source={require("../assets/home.png")} style={styles.topIcon} />
         <View style={{ flex: 1 }}>
           <Text style={styles.topTitle}>{label}</Text>
           <Text style={styles.topSubtitle}>Point camera at QR / barcode</Text>
@@ -149,9 +150,7 @@ export default function ScanScreen() {
             </View>
           ) : (
             <View style={styles.hintPill}>
-              <Text style={styles.hintText}>
-                Align the code inside the box
-              </Text>
+              <Text style={styles.hintText}>Align the code inside the box</Text>
             </View>
           )}
         </View>
@@ -165,58 +164,58 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingTop: 80,
     paddingHorizontal: 16,
-    backgroundColor: '#fff',
-    justifyContent: 'flex-start',
+    backgroundColor: "#fff",
+    justifyContent: "flex-start",
   },
   title: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 8,
-    textAlign: 'center',
+    textAlign: "center",
   },
   subtitle: {
     fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
+    color: "#666",
+    textAlign: "center",
     marginBottom: 16,
   },
   primaryButton: {
     backgroundColor: THEME_COLOR,
     paddingVertical: 12,
     borderRadius: 6,
-    alignItems: 'center',
+    alignItems: "center",
     marginTop: 8,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   secondaryButton: {
     borderWidth: 1,
     borderColor: THEME_COLOR,
     paddingVertical: 12,
     borderRadius: 6,
-    alignItems: 'center',
+    alignItems: "center",
     marginTop: 10,
   },
   secondaryButtonText: {
     color: THEME_COLOR,
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
   },
 
   scanContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: "#000",
   },
   topBar: {
     paddingTop: 50,
     paddingHorizontal: 12,
     paddingBottom: 10,
-    backgroundColor: '#fff',
-    flexDirection: 'row',
-    alignItems: 'center',
+    backgroundColor: "#fff",
+    flexDirection: "row",
+    alignItems: "center",
   },
   topIcon: {
     width: 28,
@@ -226,11 +225,11 @@ const styles = StyleSheet.create({
   },
   topTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   topSubtitle: {
     fontSize: 11,
-    color: '#666',
+    color: "#666",
     marginTop: 2,
   },
   cancelBtn: {
@@ -240,52 +239,52 @@ const styles = StyleSheet.create({
   cancelText: {
     color: THEME_COLOR,
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   cameraWrap: {
     flex: 1,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   frame: {
-    width: '72%',
-    height: '38%',
+    width: "72%",
+    height: "38%",
     borderWidth: 2,
     borderColor: THEME_COLOR,
     borderRadius: 10,
-    backgroundColor: 'rgba(0,0,0,0.12)',
+    backgroundColor: "rgba(0,0,0,0.12)",
   },
   hintPill: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 36,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: "rgba(0,0,0,0.55)",
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 18,
   },
   hintText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 12,
   },
   resultPill: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 30,
-    backgroundColor: 'rgba(34,166,179,0.85)',
+    backgroundColor: "rgba(34,166,179,0.85)",
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 12,
-    width: '86%',
+    width: "86%",
   },
   resultText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   resultHint: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 11,
     marginTop: 4,
     opacity: 0.95,
