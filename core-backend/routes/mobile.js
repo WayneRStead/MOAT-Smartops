@@ -349,6 +349,21 @@ function getUserRolesForMobile(userDoc) {
     .filter(Boolean);
 }
 
+function mobileUserCanSeeAllScopedInspectionForms(userDoc) {
+  const roles = getUserRolesForMobile(userDoc);
+
+  const elevated = new Set([
+    "manager",
+    "project-manager",
+    "pm",
+    "admin",
+    "superadmin",
+    "owner",
+  ]);
+
+  return roles.some((r) => elevated.has(r));
+}
+
 function getInspectionScopeTypeForMobile(form) {
   const raw = String(form?.scope?.type || form?.scope || "global")
     .trim()
@@ -417,6 +432,10 @@ function getAssignedGroupIdsForMobile(userDoc) {
 }
 
 function mobileUserMatchesInspectionAudience(userDoc, form) {
+  if (mobileUserCanSeeAllScopedInspectionForms(userDoc)) {
+    return true;
+  }
+
   const audience = form?.audience || {};
 
   const targetUserIds = Array.isArray(audience.userIds) ? audience.userIds : [];
@@ -482,6 +501,10 @@ function mobileUserMatchesInspectionAudience(userDoc, form) {
 function mobileUserMatchesInspectionScope(userDoc, form) {
   const scopeType = getInspectionScopeTypeForMobile(form);
   if (scopeType !== "scoped") return true;
+
+  if (mobileUserCanSeeAllScopedInspectionForms(userDoc)) {
+    return true;
+  }
 
   const scope = form?.scope || {};
   const myProjectIds = getAssignedProjectIdsForMobile(userDoc);
