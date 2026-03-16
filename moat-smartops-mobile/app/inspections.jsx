@@ -2,10 +2,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  FlatList,
   Image,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,14 +15,18 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import SignatureScreen from "react-native-signature-canvas";
 import { saveInspectionRun } from "../database";
 import { syncOutbox } from "../syncOutbox";
 
 const THEME_COLOR = "#22a6b3";
-const CACHE_INSPECTION_FORMS_KEY = "@moat:cache:inspectionForms";
+const CACHE_INSPECTION_FORMS_KEY = "@moat:cache:inspections";
 const CACHE_PROJECTS_KEY = "@moat:cache:projects";
 const CACHE_TASKS_KEY = "@moat:cache:tasks";
+const CACHE_MILESTONES_KEY = "@moat:cache:milestones";
+const CACHE_MILESTONES_BY_TASK_KEY = "@moat:cache:milestonesByTask";
 const TOKEN_KEY = "@moat:cache:token";
+
 const ORG_ID_KEYS = [
   "@moat:orgId",
   "@moat:orgid",
@@ -29,22 +35,15 @@ const ORG_ID_KEYS = [
   "moat:orgId",
   "moat:orgid",
 ];
+
 const USER_ID_KEYS = ["@moat:userId", "@moat:userid", "moat:userid"];
 
 function formatNow() {
   const d = new Date();
-  const pad = (n) => (n < 10 ? "0" + n : "" + n);
-  return (
-    d.getFullYear() +
-    "-" +
-    pad(d.getMonth() + 1) +
-    "-" +
-    pad(d.getDate()) +
-    " " +
-    pad(d.getHours()) +
-    ":" +
-    pad(d.getMinutes())
-  );
+  const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
 }
 
 async function loadCache(key, fallback) {
@@ -147,56 +146,78 @@ async function getCurrentCoords() {
   }
 }
 
-function normalizeRole(v) {
-  return String(v || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-");
-}
-
-function pickProjectId(input) {
-  return String(input?._id || input?.id || "").trim();
-}
-
-function pickTaskId(input) {
+function pickId(input) {
   return String(input?._id || input?.id || "").trim();
 }
 
 function pickProjectName(input) {
-  return String(
-    input?.name || input?.title || pickProjectId(input) || "",
-  ).trim();
+  return String(input?.name || input?.title || pickId(input) || "").trim();
 }
 
 function pickTaskName(input) {
-  return String(input?.title || input?.name || pickTaskId(input) || "").trim();
+  return String(input?.title || input?.name || pickId(input) || "").trim();
+}
+
+function pickMilestoneName(input) {
+  return String(input?.name || input?.title || pickId(input) || "").trim();
 }
 
 function buildResultRulesText(scoring) {
   const mode = String(scoring?.mode || "any-fail").toLowerCase();
+
   if (mode === "percent") {
     const min = Number.isFinite(Number(scoring?.minPassPercent))
       ? Number(scoring.minPassPercent)
       : 100;
     return `Pass when score is ${min}% or above, unless a critical item fails.`;
   }
+
   if (mode === "tolerance") {
     const maxFails = Number.isFinite(Number(scoring?.maxNonCriticalFails))
       ? Number(scoring.maxNonCriticalFails)
       : 0;
     return `Pass when non-critical fails are ${maxFails} or fewer, unless a critical item fails.`;
   }
+
   return "Fail if any fail condition is triggered, especially critical items.";
+}
+
+function getScopeType(input) {
+  const rawScope = String(input?.scope?.type || input?.scope || "global")
+    .trim()
+    .toLowerCase();
+
+  if (
+    rawScope === "scoped" ||
+    rawScope === "project" ||
+    rawScope === "task" ||
+    rawScope === "milestone" ||
+    rawScope === "project-scoped" ||
+    rawScope === "task-scoped"
+  ) {
+    return "scoped";
+  }
+
+  return "global";
+}
+
+function getSubjectLabel(subject) {
+  return String(
+    subject?.lockLabel ||
+      subject?.lockToLabel ||
+      subject?.label ||
+      subject?.name ||
+      subject?.title ||
+      subject?.subjectLabel ||
+      subject?.type ||
+      "",
+  ).trim();
 }
 
 function normalizeInspectionForm(input) {
   if (!input || typeof input !== "object") return null;
 
-  const scopeType =
-    String(input?.scope?.type || input?.scope || "global").toLowerCase() ===
-    "scoped"
-      ? "scoped"
-      : "global";
+  const scopeType = getScopeType(input);
 
   const itemsRaw = Array.isArray(input?.items) ? input.items : [];
   const items = itemsRaw
@@ -205,15 +226,16 @@ function normalizeInspectionForm(input) {
         item?._id || item?.id || `item-${index + 1}`,
       ).trim();
       const title = String(
-        item?.label || item?.title || `Item ${index + 1}`,
+        item?.label || item?.title || item?.name || `Item ${index + 1}`,
       ).trim();
+
       if (!itemId || !title) return null;
 
       return {
         id: itemId,
         title,
         description: String(item?.description || "").trim(),
-        allowPhoto: !!item?.allowPhoto,
+        allowPhoto: item?.allowPhoto !== false,
         allowScan: !!item?.allowScan,
         allowNote: item?.allowNote !== false,
         requireEvidenceOnFail: !!item?.requireEvidenceOnFail,
@@ -303,8 +325,47 @@ function SelectField({ label, valueText, onPress, disabled = false }) {
   );
 }
 
+function PickerModal({ visible, title, items, onSelect, onClose }) {
+  return (
+    <Modal visible={visible} transparent animationType="fade">
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>{title}</Text>
+
+          <FlatList
+            data={items}
+            keyExtractor={(item, index) =>
+              String(item?.id || item?.label || index)
+            }
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.modalRow}
+                onPress={() => {
+                  onSelect?.(item);
+                  onClose?.();
+                }}
+              >
+                <Text style={styles.modalRowText}>{item?.label || ""}</Text>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>Nothing available.</Text>
+            }
+          />
+
+          <TouchableOpacity style={styles.modalCloseBtn} onPress={onClose}>
+            <Text style={styles.modalCloseBtnText}>Close</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function InspectionsScreen() {
   const router = useRouter();
+  const signatureRef = useRef(null);
 
   const [mode, setMode] = useState("select");
   const [scope, setScope] = useState("global");
@@ -318,34 +379,71 @@ export default function InspectionsScreen() {
   const [forms, setForms] = useState([]);
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [milestones, setMilestones] = useState([]);
+  const [milestonesByTask, setMilestonesByTask] = useState({});
 
   const [currentForm, setCurrentForm] = useState(null);
   const [itemsState, setItemsState] = useState([]);
   const [expandedItemId, setExpandedItemId] = useState(null);
 
-  const [headerLocation, setHeaderLocation] = useState("");
-  const [headerProject, setHeaderProject] = useState("");
-  const [headerTask, setHeaderTask] = useState("");
-  const [headerMilestone, setHeaderMilestone] = useState("");
+  const [locationCoords, setLocationCoords] = useState(null);
+  const [locationText, setLocationText] = useState("");
+
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [selectedMilestoneId, setSelectedMilestoneId] = useState("");
+
   const [headerSubject, setHeaderSubject] = useState("");
 
   const [inspectorName, setInspectorName] = useState("");
   const [overallNote, setOverallNote] = useState("");
   const [runDateTime, setRunDateTime] = useState(formatNow());
+  const [followUpDate, setFollowUpDate] = useState("");
+  const [confirmAccurate, setConfirmAccurate] = useState(false);
+  const [signatureDataUrl, setSignatureDataUrl] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [pickerTitle, setPickerTitle] = useState("");
+  const [pickerItems, setPickerItems] = useState([]);
+  const [pickerOnSelect, setPickerOnSelect] = useState(null);
+
+  const [pageScrollEnabled, setPageScrollEnabled] = useState(true);
+
+  const closePicker = () => {
+    setPickerVisible(false);
+    setPickerTitle("");
+    setPickerItems([]);
+    setPickerOnSelect(null);
+  };
+
+  const openPicker = (title, items, onSelect) => {
+    setPickerTitle(title);
+    setPickerItems(Array.isArray(items) ? items : []);
+    setPickerOnSelect(() => onSelect);
+    setPickerVisible(true);
+  };
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
 
       (async () => {
-        const [meta, cachedForms, cachedProjects, cachedTasks] =
-          await Promise.all([
-            getCurrentUserMeta(),
-            loadCache(CACHE_INSPECTION_FORMS_KEY, []),
-            loadCache(CACHE_PROJECTS_KEY, []),
-            loadCache(CACHE_TASKS_KEY, []),
-          ]);
+        const [
+          meta,
+          cachedForms,
+          cachedProjects,
+          cachedTasks,
+          cachedMilestones,
+          cachedMilestonesByTask,
+        ] = await Promise.all([
+          getCurrentUserMeta(),
+          loadCache(CACHE_INSPECTION_FORMS_KEY, []),
+          loadCache(CACHE_PROJECTS_KEY, []),
+          loadCache(CACHE_TASKS_KEY, []),
+          loadCache(CACHE_MILESTONES_KEY, []),
+          loadCache(CACHE_MILESTONES_BY_TASK_KEY, {}),
+        ]);
 
         if (!alive) return;
 
@@ -355,10 +453,25 @@ export default function InspectionsScreen() {
             (f) => f && f.id && Array.isArray(f.items) && f.items.length > 0,
           );
 
+        console.log(
+          "[INSPECTIONS] cached forms found",
+          Array.isArray(cachedForms) ? cachedForms.length : 0,
+          "| usable forms",
+          normalizedForms.length,
+        );
+
         setUserMeta(meta);
         setForms(normalizedForms);
         setProjects(Array.isArray(cachedProjects) ? cachedProjects : []);
         setTasks(Array.isArray(cachedTasks) ? cachedTasks : []);
+        setMilestones(Array.isArray(cachedMilestones) ? cachedMilestones : []);
+        setMilestonesByTask(
+          cachedMilestonesByTask &&
+            typeof cachedMilestonesByTask === "object" &&
+            !Array.isArray(cachedMilestonesByTask)
+            ? cachedMilestonesByTask
+            : {},
+        );
       })();
 
       return () => {
@@ -366,6 +479,167 @@ export default function InspectionsScreen() {
       };
     }, []),
   );
+
+  const formsForScope = useMemo(() => {
+    const scopedForms = forms.filter((f) => f.scope === scope);
+
+    if (scope !== "scoped") return scopedForms;
+
+    return scopedForms.filter((form) => {
+      const scopeInfo = form?.scopeInfo || {};
+
+      const formProjectId = String(scopeInfo?.projectId || "").trim();
+      const formTaskId = String(scopeInfo?.taskId || "").trim();
+      const formMilestoneId = String(scopeInfo?.milestoneId || "").trim();
+
+      const myUserId = String(userMeta?.userId || "").trim();
+
+      const audience = form?.audience || {};
+      const audienceUserIds = Array.isArray(audience?.userIds)
+        ? audience.userIds.map((x) => String(x || "").trim())
+        : [];
+      const audienceProjectIds = Array.isArray(audience?.projectIds)
+        ? audience.projectIds.map((x) => String(x || "").trim())
+        : [];
+      const audienceTaskIds = Array.isArray(audience?.taskIds)
+        ? audience.taskIds.map((x) => String(x || "").trim())
+        : [];
+
+      const myProjectIds = (Array.isArray(projects) ? projects : [])
+        .map((p) => pickId(p))
+        .filter(Boolean);
+
+      const myTaskIds = (Array.isArray(tasks) ? tasks : [])
+        .map((t) => pickId(t))
+        .filter(Boolean);
+
+      if (audienceUserIds.length && audienceUserIds.includes(myUserId)) {
+        return true;
+      }
+
+      if (
+        audienceProjectIds.length &&
+        audienceProjectIds.some((id) => myProjectIds.includes(id))
+      ) {
+        return true;
+      }
+
+      if (
+        audienceTaskIds.length &&
+        audienceTaskIds.some((id) => myTaskIds.includes(id))
+      ) {
+        return true;
+      }
+
+      if (formTaskId) {
+        return myTaskIds.includes(formTaskId);
+      }
+
+      if (formProjectId) {
+        return myProjectIds.includes(formProjectId);
+      }
+
+      if (formMilestoneId) {
+        return true;
+      }
+
+      if (
+        !audienceUserIds.length &&
+        !audienceProjectIds.length &&
+        !audienceTaskIds.length &&
+        !formProjectId &&
+        !formTaskId &&
+        !formMilestoneId
+      ) {
+        return true;
+      }
+
+      return false;
+    });
+  }, [forms, scope, userMeta, projects, tasks]);
+
+  const currentAchievedScore = useMemo(() => {
+    return computePercentScore(itemsState);
+  }, [itemsState]);
+
+  const overallResult = useMemo(() => {
+    return computeOverallResult(itemsState, currentForm);
+  }, [itemsState, currentForm]);
+
+  const scopedProjectId = String(
+    currentForm?.scopeInfo?.projectId || "",
+  ).trim();
+  const scopedTaskId = String(currentForm?.scopeInfo?.taskId || "").trim();
+  const scopedMilestoneId = String(
+    currentForm?.scopeInfo?.milestoneId || "",
+  ).trim();
+
+  const effectiveProjectId = scopedProjectId || selectedProjectId;
+  const effectiveTaskId = scopedTaskId || selectedTaskId;
+  const effectiveMilestoneId = scopedMilestoneId || selectedMilestoneId;
+
+  const availableTasks = useMemo(() => {
+    const all = Array.isArray(tasks) ? tasks : [];
+    if (!effectiveProjectId) return all;
+
+    return all.filter((t) => {
+      const tProjectId = String(t?.projectId?._id || t?.projectId || "").trim();
+      return tProjectId === effectiveProjectId;
+    });
+  }, [tasks, effectiveProjectId]);
+
+  const availableMilestones = useMemo(() => {
+    if (effectiveTaskId && milestonesByTask?.[effectiveTaskId]) {
+      return Array.isArray(milestonesByTask[effectiveTaskId])
+        ? milestonesByTask[effectiveTaskId]
+        : [];
+    }
+
+    return (Array.isArray(milestones) ? milestones : []).filter((m) => {
+      const mTaskId = String(m?.taskId?._id || m?.taskId || "").trim();
+      return effectiveTaskId ? mTaskId === effectiveTaskId : true;
+    });
+  }, [milestones, milestonesByTask, effectiveTaskId]);
+
+  const projectDisplay = useMemo(() => {
+    const id = effectiveProjectId;
+    if (!id) return "";
+    const found = projects.find((p) => pickId(p) === id);
+    return found
+      ? pickProjectName(found)
+      : String(currentForm?.scopeInfo?.projectName || "").trim();
+  }, [projects, effectiveProjectId, currentForm]);
+
+  const taskDisplay = useMemo(() => {
+    const id = effectiveTaskId;
+    if (!id) return "";
+    const found = tasks.find((t) => pickId(t) === id);
+    return found
+      ? pickTaskName(found)
+      : String(currentForm?.scopeInfo?.taskName || "").trim();
+  }, [tasks, effectiveTaskId, currentForm]);
+
+  const milestoneDisplay = useMemo(() => {
+    const id = effectiveMilestoneId;
+    if (!id) return "";
+    const found = availableMilestones.find((m) => pickId(m) === id);
+    return found
+      ? pickMilestoneName(found)
+      : String(currentForm?.scopeInfo?.milestoneName || "").trim();
+  }, [availableMilestones, effectiveMilestoneId, currentForm]);
+
+  const refreshLocation = async () => {
+    const coords = await getCurrentCoords();
+    setLocationCoords(coords);
+
+    if (coords?.lat != null && coords?.lng != null) {
+      setLocationText(
+        `${Number(coords.lat).toFixed(6)}, ${Number(coords.lng).toFixed(6)}`,
+      );
+    } else {
+      setLocationText("Location not available");
+    }
+  };
 
   const takePhotoForItem = async (itemId) => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -429,8 +703,8 @@ export default function InspectionsScreen() {
       (!current.note || current.note.trim().length === 0)
     ) {
       Alert.alert(
-        "Actions required",
-        "Please add an action or note for this failed item before moving on.",
+        "Corrective action required",
+        "Please enter corrective action before moving on from this failed item.",
       );
       return false;
     }
@@ -467,18 +741,24 @@ export default function InspectionsScreen() {
     setCurrentForm(null);
     setItemsState([]);
     setExpandedItemId(null);
-    setHeaderLocation("");
-    setHeaderProject("");
-    setHeaderTask("");
-    setHeaderMilestone("");
+    setLocationCoords(null);
+    setLocationText("");
+    setSelectedProjectId("");
+    setSelectedTaskId("");
+    setSelectedMilestoneId("");
     setHeaderSubject("");
     setInspectorName("");
     setOverallNote("");
     setRunDateTime(formatNow());
+    setFollowUpDate("");
+    setConfirmAccurate(false);
+    setSignatureDataUrl("");
     setIsSubmitting(false);
+    setPageScrollEnabled(true);
+    closePicker();
   };
 
-  const startFormRun = (form) => {
+  const startFormRun = async (form) => {
     const initialState = (Array.isArray(form?.items) ? form.items : []).map(
       (item) => ({
         id: item.id,
@@ -502,22 +782,91 @@ export default function InspectionsScreen() {
     setItemsState(initialState);
     setExpandedItemId(initialState[0]?.id || null);
 
-    const scopeInfo = form?.scopeInfo || {};
-    const lockedProjectName = String(scopeInfo?.projectName || "").trim();
-    const lockedTaskName = String(scopeInfo?.taskName || "").trim();
-    const lockedMilestoneName = String(scopeInfo?.milestoneName || "").trim();
-    const lockedSubjectLabel = String(form?.subject?.lockLabel || "").trim();
+    setSelectedProjectId("");
+    setSelectedTaskId("");
+    setSelectedMilestoneId("");
 
-    setHeaderLocation("");
-    setHeaderProject(lockedProjectName);
-    setHeaderTask(lockedTaskName);
-    setHeaderMilestone(lockedMilestoneName);
-    setHeaderSubject(lockedSubjectLabel);
-
+    setHeaderSubject(getSubjectLabel(form?.subject));
     setInspectorName(userMeta?.name || "");
     setOverallNote("");
     setRunDateTime(formatNow());
+    setFollowUpDate("");
+    setConfirmAccurate(false);
+    setSignatureDataUrl("");
     setMode("run");
+
+    await refreshLocation();
+  };
+
+  const showProjectPicker = () => {
+    const options = (Array.isArray(projects) ? projects : []).map((p) => ({
+      id: pickId(p),
+      label: pickProjectName(p),
+      raw: p,
+    }));
+
+    if (!options.length) {
+      Alert.alert("No projects", "No projects are cached on this device.");
+      return;
+    }
+
+    openPicker("Select project", options, (item) => {
+      const projectId = item.id;
+      setSelectedProjectId(projectId);
+      setSelectedTaskId("");
+      setSelectedMilestoneId("");
+    });
+  };
+
+  const showTaskPicker = () => {
+    const options = availableTasks.map((t) => ({
+      id: pickId(t),
+      label: pickTaskName(t),
+      raw: t,
+    }));
+
+    if (!options.length) {
+      Alert.alert(
+        "No tasks",
+        "No tasks are available for the selected project.",
+      );
+      return;
+    }
+
+    openPicker("Select task", options, (item) => {
+      setSelectedTaskId(item.id);
+      setSelectedMilestoneId("");
+    });
+  };
+
+  const showMilestonePicker = () => {
+    const options = availableMilestones.map((m) => ({
+      id: pickId(m),
+      label: pickMilestoneName(m),
+      raw: m,
+    }));
+
+    if (!options.length) {
+      Alert.alert(
+        "No milestones",
+        "No milestones are available for the selected task.",
+      );
+      return;
+    }
+
+    openPicker("Select milestone", options, (item) => {
+      setSelectedMilestoneId(item.id);
+    });
+  };
+
+  const handleSignatureOK = (sig) => {
+    setSignatureDataUrl(sig || "");
+    setPageScrollEnabled(true);
+  };
+
+  const clearSignature = () => {
+    setSignatureDataUrl("");
+    signatureRef.current?.clearSignature?.();
   };
 
   const handleSubmitInspection = async () => {
@@ -534,8 +883,24 @@ export default function InspectionsScreen() {
 
     if (!inspectorName.trim()) {
       Alert.alert(
-        "Missing signature",
-        "Please enter your name as a signature before submitting.",
+        "Missing signature name",
+        "Please enter your name before submitting.",
+      );
+      return;
+    }
+
+    if (!confirmAccurate) {
+      Alert.alert(
+        "Confirmation required",
+        "Please confirm the inspection is accurate to the best of your knowledge.",
+      );
+      return;
+    }
+
+    if (!signatureDataUrl) {
+      Alert.alert(
+        "Signature required",
+        "Please sign in the signature box before submitting.",
       );
       return;
     }
@@ -549,8 +914,16 @@ export default function InspectionsScreen() {
 
     if (invalidFails.length > 0) {
       Alert.alert(
-        "Actions required",
-        "Some failed items still need an action or note before submitting.",
+        "Corrective action required",
+        "Some failed items still need corrective action before submitting.",
+      );
+      return;
+    }
+
+    if (overallResult === "fail" && !String(followUpDate || "").trim()) {
+      Alert.alert(
+        "Follow-up required",
+        "Please enter a follow-up date for a failed inspection.",
       );
       return;
     }
@@ -558,20 +931,10 @@ export default function InspectionsScreen() {
     setIsSubmitting(true);
 
     try {
-      const coords = await getCurrentCoords();
+      const freshCoords = await getCurrentCoords();
+      const coords = freshCoords || locationCoords;
       const submittedAt = new Date().toISOString();
       const achievedScore = computePercentScore(itemsState);
-      const overallResult = computeOverallResult(itemsState, currentForm);
-
-      const matchedProject =
-        projects.find((p) => pickProjectName(p) === headerProject) ||
-        projects.find((p) => pickProjectId(p) === headerProject) ||
-        null;
-
-      const matchedTask =
-        tasks.find((t) => pickTaskName(t) === headerTask) ||
-        tasks.find((t) => pickTaskId(t) === headerTask) ||
-        null;
 
       const payload = {
         orgId: userMeta?.orgId || null,
@@ -584,38 +947,39 @@ export default function InspectionsScreen() {
         submittedAt,
         inspectorName: String(inspectorName || "").trim(),
         overallNote: String(overallNote || "").trim(),
+        followUpDate:
+          overallResult === "fail" && followUpDate ? followUpDate : null,
         header: {
-          location: String(headerLocation || "").trim(),
-          project: String(headerProject || "").trim(),
-          task: String(headerTask || "").trim(),
-          milestone: String(headerMilestone || "").trim(),
-          subject: String(headerSubject || "").trim(),
+          location: locationText || "",
+          project: projectDisplay || "",
+          task: taskDisplay || "",
+          milestone: milestoneDisplay || "",
+          subject: headerSubject || "",
           description: currentForm.description || "",
           resultRules: currentForm.resultRules || "",
           achievedScore,
           overallResult,
         },
         links: {
-          projectId:
-            String(currentForm?.scopeInfo?.projectId || "").trim() ||
-            (matchedProject ? pickProjectId(matchedProject) : ""),
-          taskId:
-            String(currentForm?.scopeInfo?.taskId || "").trim() ||
-            (matchedTask ? pickTaskId(matchedTask) : ""),
-          milestoneId: String(currentForm?.scopeInfo?.milestoneId || "").trim(),
+          projectId: effectiveProjectId || "",
+          taskId: effectiveTaskId || "",
+          milestoneId: effectiveMilestoneId || "",
         },
         subjectAtRun: {
           type: String(currentForm?.subject?.type || "none").toLowerCase(),
           id: currentForm?.subject?.lockToId || undefined,
           label: String(
-            headerSubject || currentForm?.subject?.lockLabel || "",
+            headerSubject ||
+              currentForm?.subject?.lockLabel ||
+              currentForm?.subject?.lockToLabel ||
+              "",
           ).trim(),
         },
         signoff: {
           confirmed: true,
           name: String(inspectorName || "").trim(),
           date: submittedAt,
-          signatureDataUrl: "",
+          signatureDataUrl,
         },
         location: coords || undefined,
         coords: coords || undefined,
@@ -664,18 +1028,22 @@ export default function InspectionsScreen() {
     }
   };
 
-  const formsForScope = useMemo(() => {
-    return forms.filter((f) => f.scope === scope);
-  }, [forms, scope]);
-
-  const currentAchievedScore = useMemo(() => {
-    return computePercentScore(itemsState);
-  }, [itemsState]);
-
   return (
     <>
+      <PickerModal
+        visible={pickerVisible}
+        title={pickerTitle}
+        items={pickerItems}
+        onSelect={pickerOnSelect}
+        onClose={closePicker}
+      />
+
       {mode === "select" && (
-        <ScrollView contentContainerStyle={styles.container}>
+        <ScrollView
+          contentContainerStyle={styles.container}
+          scrollEnabled={pageScrollEnabled}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.topBar}>
             <Image
               source={require("../assets/inspections-screen.png")}
@@ -781,7 +1149,11 @@ export default function InspectionsScreen() {
       )}
 
       {mode === "run" && currentForm && (
-        <ScrollView contentContainerStyle={styles.container}>
+        <ScrollView
+          contentContainerStyle={styles.container}
+          scrollEnabled={pageScrollEnabled}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.topBar}>
             <Image
               source={require("../assets/inspections-screen.png")}
@@ -794,7 +1166,8 @@ export default function InspectionsScreen() {
                 if (
                   itemsState.some((i) => i.status !== "pending") ||
                   inspectorName ||
-                  overallNote
+                  overallNote ||
+                  signatureDataUrl
                 ) {
                   Alert.alert(
                     "Leave inspection?",
@@ -828,48 +1201,44 @@ export default function InspectionsScreen() {
               Scope: {scope === "global" ? "Global" : "Scoped"} | Items:{" "}
               {currentForm.items.length}
               {"\n"}
-              Achieved score: {currentAchievedScore}%
+              Achieved score: {currentAchievedScore}% | Overall:{" "}
+              {overallResult.toUpperCase()}
             </Text>
 
-            <TextInput
-              style={styles.input}
-              placeholder="Location"
-              placeholderTextColor="#aaa"
-              value={headerLocation}
-              onChangeText={setHeaderLocation}
+            <SelectField
+              label="Current location"
+              valueText={locationText || "Tap to capture current location"}
+              onPress={refreshLocation}
+              disabled={isSubmitting}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Project"
-              placeholderTextColor="#aaa"
-              value={headerProject}
-              onChangeText={setHeaderProject}
+            <SelectField
+              label="Project"
+              valueText={projectDisplay}
+              onPress={showProjectPicker}
+              disabled={!!scopedProjectId || isSubmitting}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Task"
-              placeholderTextColor="#aaa"
-              value={headerTask}
-              onChangeText={setHeaderTask}
+            <SelectField
+              label="Task"
+              valueText={taskDisplay}
+              onPress={showTaskPicker}
+              disabled={!!scopedTaskId || isSubmitting}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Milestone"
-              placeholderTextColor="#aaa"
-              value={headerMilestone}
-              onChangeText={setHeaderMilestone}
+            <SelectField
+              label="Milestone"
+              valueText={milestoneDisplay}
+              onPress={showMilestonePicker}
+              disabled={!!scopedMilestoneId || isSubmitting}
             />
 
-            <TextInput
-              style={styles.input}
-              placeholder="Subject"
-              placeholderTextColor="#aaa"
-              value={headerSubject}
-              onChangeText={setHeaderSubject}
-            />
+            <View style={styles.readonlyField}>
+              <Text style={styles.selectFieldLabel}>Subject</Text>
+              <Text style={styles.selectFieldValue}>
+                {headerSubject || "No specific subject"}
+              </Text>
+            </View>
 
             {currentForm.description ? (
               <Text style={styles.headerInfoText}>
@@ -913,6 +1282,8 @@ export default function InspectionsScreen() {
               const state = itemsState.find((s) => s.id === item.id) || {};
               const status = state.status || "pending";
               const isExpanded = expandedItemId === item.id;
+              const needsCorrective =
+                status === "fail" && state.requireCorrectiveOnFail;
 
               return (
                 <View key={item.id} style={styles.itemContainer}>
@@ -999,46 +1370,56 @@ export default function InspectionsScreen() {
                         </TouchableOpacity>
                       </View>
 
-                      <TextInput
-                        style={[styles.input, styles.textArea]}
-                        placeholder="Action / note"
-                        placeholderTextColor="#aaa"
-                        value={state.note || ""}
-                        onChangeText={(t) => setNoteForItem(item.id, t)}
-                        multiline
-                        editable={!isSubmitting}
-                      />
+                      {state.allowNote !== false && (
+                        <TextInput
+                          style={[styles.input, styles.textArea]}
+                          placeholder={
+                            needsCorrective
+                              ? "Corrective action (required)"
+                              : "Note / evidence / comment"
+                          }
+                          placeholderTextColor="#aaa"
+                          value={state.note || ""}
+                          onChangeText={(t) => setNoteForItem(item.id, t)}
+                          multiline
+                          editable={!isSubmitting}
+                        />
+                      )}
 
                       <View style={styles.actionRow}>
-                        <TouchableOpacity
-                          style={[
-                            styles.smallActionButton,
-                            isSubmitting && { opacity: 0.5 },
-                          ]}
-                          onPress={() => takePhotoForItem(item.id)}
-                          disabled={isSubmitting}
-                        >
-                          <Image
-                            source={require("../assets/camera.png")}
-                            style={styles.smallActionIcon}
-                          />
-                          <Text style={styles.smallActionText}>Photo</Text>
-                        </TouchableOpacity>
+                        {state.allowPhoto ? (
+                          <TouchableOpacity
+                            style={[
+                              styles.smallActionButton,
+                              isSubmitting && { opacity: 0.5 },
+                            ]}
+                            onPress={() => takePhotoForItem(item.id)}
+                            disabled={isSubmitting}
+                          >
+                            <Image
+                              source={require("../assets/camera.png")}
+                              style={styles.smallActionIcon}
+                            />
+                            <Text style={styles.smallActionText}>Photo</Text>
+                          </TouchableOpacity>
+                        ) : null}
 
-                        <TouchableOpacity
-                          style={[
-                            styles.smallActionButton,
-                            isSubmitting && { opacity: 0.5 },
-                          ]}
-                          onPress={() => markScanDoneForItem(item.id)}
-                          disabled={isSubmitting}
-                        >
-                          <Image
-                            source={require("../assets/barcode.png")}
-                            style={styles.smallActionIcon}
-                          />
-                          <Text style={styles.smallActionText}>Scan</Text>
-                        </TouchableOpacity>
+                        {state.allowScan ? (
+                          <TouchableOpacity
+                            style={[
+                              styles.smallActionButton,
+                              isSubmitting && { opacity: 0.5 },
+                            ]}
+                            onPress={() => markScanDoneForItem(item.id)}
+                            disabled={isSubmitting}
+                          >
+                            <Image
+                              source={require("../assets/barcode.png")}
+                              style={styles.smallActionIcon}
+                            />
+                            <Text style={styles.smallActionText}>Scan</Text>
+                          </TouchableOpacity>
+                        ) : null}
                       </View>
 
                       {state.photoUri ? (
@@ -1051,6 +1432,18 @@ export default function InspectionsScreen() {
                       {state.scanDone && (
                         <Text style={styles.scanDoneText}>Scan completed.</Text>
                       )}
+
+                      {needsCorrective && (
+                        <Text style={styles.requiredHint}>
+                          Corrective action is required for this failed item.
+                        </Text>
+                      )}
+
+                      {status === "fail" && state.requireEvidenceOnFail && (
+                        <Text style={styles.requiredHint}>
+                          Evidence is required for this failed item.
+                        </Text>
+                      )}
                     </View>
                   )}
                 </View>
@@ -1058,15 +1451,34 @@ export default function InspectionsScreen() {
             })}
           </View>
 
+          {overallResult === "fail" && (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Follow-up</Text>
+              <Text style={styles.cardSubtitle}>
+                Because this inspection result is fail, a follow-up date is
+                required.
+              </Text>
+
+              <TextInput
+                style={styles.input}
+                placeholder="Follow-up date (YYYY-MM-DD)"
+                placeholderTextColor="#aaa"
+                value={followUpDate}
+                onChangeText={setFollowUpDate}
+                editable={!isSubmitting}
+              />
+            </View>
+          )}
+
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Sign off</Text>
             <Text style={styles.cardSubtitle}>
-              This currently uses a typed name as signature.
+              Confirm accuracy and sign on the screen.
             </Text>
 
             <TextInput
               style={styles.input}
-              placeholder="Inspector name (signature)"
+              placeholder="Inspector name"
               placeholderTextColor="#aaa"
               value={inspectorName}
               onChangeText={setInspectorName}
@@ -1084,6 +1496,51 @@ export default function InspectionsScreen() {
             />
 
             <TouchableOpacity
+              style={styles.confirmRow}
+              onPress={() => setConfirmAccurate((v) => !v)}
+              disabled={isSubmitting}
+            >
+              <View
+                style={[
+                  styles.checkbox,
+                  confirmAccurate && styles.checkboxSelected,
+                ]}
+              >
+                {confirmAccurate ? (
+                  <Text style={styles.checkboxTick}>✓</Text>
+                ) : null}
+              </View>
+              <Text style={styles.confirmText}>
+                I confirm the above is accurate to the best of my knowledge.
+              </Text>
+            </TouchableOpacity>
+
+            <Text style={styles.signatureLabel}>Signature</Text>
+            <View style={styles.signatureBox}>
+              <SignatureScreen
+                ref={signatureRef}
+                onOK={handleSignatureOK}
+                onEmpty={() => setSignatureDataUrl("")}
+                onBegin={() => setPageScrollEnabled(false)}
+                onEnd={() => setPageScrollEnabled(true)}
+                webStyle={signaturePadStyle}
+                autoClear={false}
+                imageType="image/png"
+                descriptionText=""
+                clearText="Clear"
+                confirmText="Save Signature"
+              />
+            </View>
+
+            <TouchableOpacity
+              style={styles.clearSigButton}
+              onPress={clearSignature}
+              disabled={isSubmitting}
+            >
+              <Text style={styles.clearSigText}>Clear signature</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={[styles.primaryButton, isSubmitting && { opacity: 0.6 }]}
               onPress={handleSubmitInspection}
               disabled={isSubmitting}
@@ -1099,10 +1556,41 @@ export default function InspectionsScreen() {
   );
 }
 
+const signaturePadStyle = `
+.m-signature-pad {
+  box-shadow: none;
+  border: none;
+  height: 100%;
+}
+.m-signature-pad--body {
+  border: none;
+}
+.m-signature-pad--body canvas {
+  background-color: white;
+}
+.m-signature-pad--footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 70px;
+  padding: 10px;
+  margin: 0;
+}
+button {
+  background-color: #22a6b3;
+  color: white;
+  border-radius: 8px;
+  padding: 10px 14px;
+  border: none;
+  box-shadow: none;
+  font-size: 14px;
+}
+`;
+
 function getStatusBadgeStyle(status) {
   let backgroundColor = "#ccc";
   if (status === "pass") backgroundColor = "#27ae60";
-  else if (status === "na") backgroundColor = "#614410ff";
+  else if (status === "na") backgroundColor = "#7a5c19";
   else if (status === "fail") backgroundColor = "#e74c3c";
 
   return {
@@ -1173,8 +1661,16 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     backgroundColor: "#fafafa",
   },
+  readonlyField: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 6,
+    padding: 10,
+    marginBottom: 10,
+    backgroundColor: "#f1f1f1",
+  },
   disabledField: {
-    opacity: 0.5,
+    opacity: 0.55,
   },
   selectFieldLabel: {
     fontSize: 11,
@@ -1196,7 +1692,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   textArea: {
-    height: 70,
+    height: 90,
     textAlignVertical: "top",
   },
   emptyText: {
@@ -1320,8 +1816,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#e6f9f0",
   },
   statusButtonSelectedNA: {
-    borderColor: "#614410ff",
-    backgroundColor: "#ecf0f1",
+    borderColor: "#7a5c19",
+    backgroundColor: "#f4efe0",
   },
   statusButtonSelectedFail: {
     borderColor: "#e74c3c",
@@ -1370,6 +1866,70 @@ const styles = StyleSheet.create({
     color: "#555",
     marginTop: 4,
   },
+  requiredHint: {
+    fontSize: 11,
+    color: "#b03a2e",
+    marginTop: 4,
+    fontWeight: "600",
+  },
+  confirmRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 14,
+  },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderWidth: 1,
+    borderColor: "#999",
+    borderRadius: 4,
+    marginRight: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fff",
+  },
+  checkboxSelected: {
+    backgroundColor: THEME_COLOR,
+    borderColor: THEME_COLOR,
+  },
+  checkboxTick: {
+    color: "#fff",
+    fontWeight: "700",
+  },
+  confirmText: {
+    flex: 1,
+    fontSize: 13,
+    color: "#333",
+    lineHeight: 18,
+  },
+  signatureLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 8,
+  },
+  signatureBox: {
+    height: 320,
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    overflow: "hidden",
+    backgroundColor: "#fff",
+    marginBottom: 10,
+  },
+  clearSigButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: "#eee",
+    marginBottom: 12,
+  },
+  clearSigText: {
+    fontSize: 12,
+    color: "#333",
+    fontWeight: "600",
+  },
   primaryButton: {
     backgroundColor: THEME_COLOR,
     paddingVertical: 12,
@@ -1381,5 +1941,44 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 14,
     fontWeight: "600",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "center",
+    padding: 20,
+  },
+  modalCard: {
+    maxHeight: "75%",
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 16,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 12,
+    color: "#222",
+  },
+  modalRow: {
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#ddd",
+  },
+  modalRowText: {
+    fontSize: 14,
+    color: "#222",
+  },
+  modalCloseBtn: {
+    marginTop: 12,
+    backgroundColor: THEME_COLOR,
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  modalCloseBtnText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 13,
   },
 });

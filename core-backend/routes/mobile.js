@@ -15,10 +15,10 @@ const {
 } = require("../middleware/auth");
 
 /**
- * 🔎 Router version header so we can prove Render is running THIS file.
+ * Router version header so we can prove Render is running THIS file.
  * Change the string if you ever need to confirm another deploy.
  */
-const ROUTER_VERSION = "mobile-router-v2026-03-11-assets-01";
+const ROUTER_VERSION = "mobile-router-v2026-03-15-inspections-01";
 router.use((req, res, next) => {
   res.setHeader("x-mobile-router-version", ROUTER_VERSION);
   next();
@@ -349,6 +349,26 @@ function getUserRolesForMobile(userDoc) {
     .filter(Boolean);
 }
 
+function getInspectionScopeTypeForMobile(form) {
+  const raw = String(form?.scope?.type || form?.scope || "global")
+    .trim()
+    .toLowerCase();
+
+  if (
+    raw === "scoped" ||
+    raw === "project" ||
+    raw === "task" ||
+    raw === "milestone" ||
+    raw === "project-scoped" ||
+    raw === "task-scoped" ||
+    raw === "milestone-scoped"
+  ) {
+    return "scoped";
+  }
+
+  return "global";
+}
+
 function mobileUserCanRunInspectionForm(userDoc, form) {
   const allowed = Array.isArray(form?.rolesAllowed)
     ? form.rolesAllowed.map(normalizeMobileRole).filter(Boolean)
@@ -398,17 +418,34 @@ function getAssignedGroupIdsForMobile(userDoc) {
 
 function mobileUserMatchesInspectionAudience(userDoc, form) {
   const audience = form?.audience || {};
+
   const targetUserIds = Array.isArray(audience.userIds) ? audience.userIds : [];
   const targetGroupIds = Array.isArray(audience.groupIds)
     ? audience.groupIds
     : [];
+  const targetProjectIds = Array.isArray(audience.projectIds)
+    ? audience.projectIds
+    : [];
+  const targetTaskIds = Array.isArray(audience.taskIds) ? audience.taskIds : [];
+  const targetMilestoneIds = Array.isArray(audience.milestoneIds)
+    ? audience.milestoneIds
+    : [];
 
-  if (!targetUserIds.length && !targetGroupIds.length) {
+  const hasAnyAudienceRestriction =
+    targetUserIds.length ||
+    targetGroupIds.length ||
+    targetProjectIds.length ||
+    targetTaskIds.length ||
+    targetMilestoneIds.length;
+
+  if (!hasAnyAudienceRestriction) {
     return true;
   }
 
   const myUserId = String(userDoc?._id || userDoc?.id || "").trim();
   const myGroupIds = getAssignedGroupIdsForMobile(userDoc);
+  const myProjectIds = getAssignedProjectIdsForMobile(userDoc);
+  const myTaskIds = getAssignedTaskIdsForMobile(userDoc);
 
   if (targetUserIds.length && mobileArrayIncludesId(targetUserIds, myUserId)) {
     return true;
@@ -421,18 +458,38 @@ function mobileUserMatchesInspectionAudience(userDoc, form) {
     return true;
   }
 
+  if (
+    targetProjectIds.length &&
+    myProjectIds.some((pid) => mobileArrayIncludesId(targetProjectIds, pid))
+  ) {
+    return true;
+  }
+
+  if (
+    targetTaskIds.length &&
+    myTaskIds.some((tid) => mobileArrayIncludesId(targetTaskIds, tid))
+  ) {
+    return true;
+  }
+
+  if (targetMilestoneIds.length) {
+    return false;
+  }
+
   return false;
 }
 
 function mobileUserMatchesInspectionScope(userDoc, form) {
-  const scope = form?.scope || {};
-  if (String(scope.type || "global") !== "scoped") return true;
+  const scopeType = getInspectionScopeTypeForMobile(form);
+  if (scopeType !== "scoped") return true;
 
+  const scope = form?.scope || {};
   const myProjectIds = getAssignedProjectIdsForMobile(userDoc);
   const myTaskIds = getAssignedTaskIdsForMobile(userDoc);
 
   const formProjectId = String(scope.projectId || "").trim();
   const formTaskId = String(scope.taskId || "").trim();
+  const formMilestoneId = String(scope.milestoneId || "").trim();
 
   if (formTaskId) {
     return mobileArrayIncludesId(myTaskIds, formTaskId);
@@ -440,6 +497,10 @@ function mobileUserMatchesInspectionScope(userDoc, form) {
 
   if (formProjectId) {
     return mobileArrayIncludesId(myProjectIds, formProjectId);
+  }
+
+  if (formMilestoneId) {
+    return true;
   }
 
   return true;
@@ -1688,7 +1749,7 @@ router.post(
                       note: noteText,
                       photoUrl: inItem?.photoUri
                         ? String(inItem.photoUri)
-                        : uploadedEvidence[0]?.url || "",
+                        : sharedUploadedEvidence[0]?.url || "",
                       scanRef: inItem?.scanValue
                         ? String(inItem.scanValue)
                         : inItem?.scanDone
