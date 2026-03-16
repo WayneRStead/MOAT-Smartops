@@ -94,13 +94,6 @@ async function parseFetchResponse(res) {
   return json || { ok: true, stage: "received" };
 }
 
-function buildInspectionRunRequest(payload, row) {
-  return {
-    formId: payload?.formId || row?.entityRef || "",
-    run: payload?.payload || payload,
-  };
-}
-
 /**
  * Upload offline event to backend with optional files.
  * - JSON events use apiPost
@@ -111,15 +104,6 @@ async function postOfflineEventToServer({ row, payload, fileUris }) {
     .trim()
     .toLowerCase();
   const files = Array.isArray(fileUris) ? fileUris.filter(Boolean) : [];
-
-  // ✅ inspections go to their dedicated endpoint
-  if (eventType === "inspection-run") {
-    const body = buildInspectionRunRequest(payload, row);
-    return await apiPost(
-      `/api/inspections/forms/${encodeURIComponent(body.formId)}/run`,
-      body.run,
-    );
-  }
 
   const hasFiles = files.length > 0;
 

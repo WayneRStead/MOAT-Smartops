@@ -1,3 +1,4 @@
+// moat-smartops-mobile/refreshLists.jsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { apiGet } from "./apiClient";
 
@@ -50,7 +51,7 @@ export async function refreshListsFromServer() {
   const assets = safeArray(data?.assets);
   const documents = safeArray(data?.documents);
   const groups = safeArray(data?.groups);
-  const inspections = safeArray(data?.inspections);
+  const inspections = safeArray(data?.inspectionForms || data?.inspections);
   const vendors = safeArray(data?.vendors);
   const definitions = safeObject(data?.definitions);
 

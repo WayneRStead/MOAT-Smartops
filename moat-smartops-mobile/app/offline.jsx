@@ -23,6 +23,7 @@ const CACHE_KEYS = {
   definitions: "@moat:cache:definitions",
   projects: "@moat:cache:projects",
   tasks: "@moat:cache:tasks",
+  milestones: "@moat:cache:milestones",
   milestonesByTask: "@moat:cache:milestonesByTask",
   assets: "@moat:cache:assets",
   vehicles: "@moat:cache:vehicles",
@@ -250,9 +251,11 @@ export default function OfflineScreen() {
         ? mobileLists.vehicles
         : await fetchMaybeArray("/api/vehicles");
 
-      const inspections = Array.isArray(mobileLists?.inspections)
-        ? mobileLists.inspections
-        : await fetchMaybeArray("/api/inspection/forms");
+      const inspections = Array.isArray(mobileLists?.inspectionForms)
+        ? mobileLists.inspectionForms
+        : Array.isArray(mobileLists?.inspections)
+          ? mobileLists.inspections
+          : await fetchMaybeArray("/api/inspection/forms");
 
       const documents = Array.isArray(mobileLists?.documents)
         ? mobileLists.documents
@@ -282,6 +285,7 @@ export default function OfflineScreen() {
       await Promise.all([
         safeCacheSet(CACHE_KEYS.projects, projects),
         safeCacheSet(CACHE_KEYS.tasks, tasks),
+        safeCacheSet(CACHE_KEYS.milestones, milestones),
         safeCacheSetObject(CACHE_KEYS.milestonesByTask, milestonesByTask),
         safeCacheSet(CACHE_KEYS.assets, assets),
         safeCacheSet(CACHE_KEYS.vehicles, vehicles),
