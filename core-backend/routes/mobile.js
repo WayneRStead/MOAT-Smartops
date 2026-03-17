@@ -591,6 +591,24 @@ function normAssetCode(v) {
     .toUpperCase();
 }
 
+function normalizeAssetStatus(v) {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+
+  if (!s) return null;
+
+  if (["active", "maintenance", "retired", "lost", "stolen"].includes(s)) {
+    return s;
+  }
+
+  if (["maintanance", "maintainance"].includes(s)) return "maintenance";
+  if (["missing", "misplaced"].includes(s)) return "lost";
+  if (["theft", "reported stolen"].includes(s)) return "stolen";
+
+  return null;
+}
+
 function buildAssetOfflineAttachment(uploaded, noteText = "") {
   const fid = String(uploaded?.fileId || "").trim();
   if (!mongoose.isValidObjectId(fid)) return null;
@@ -3080,6 +3098,18 @@ router.post(
               );
 
               const noteText = String(payload?.note || "").trim();
+
+              const currentStatus = normalizeAssetStatus(
+                payload?.assetStatus ||
+                  payload?.currentStatus ||
+                  asset?.status ||
+                  "",
+              );
+
+              const nextStatus = normalizeAssetStatus(
+                payload?.nextStatus || payload?.status || "",
+              );
+
               const loc = payload?.location || {};
               const lat = toFiniteNumberOrNull(loc?.lat);
               const lng = toFiniteNumberOrNull(loc?.lng);
@@ -3095,9 +3125,18 @@ router.post(
               );
 
               if (!alreadyHasLog) {
+                const statusChangeText =
+                  nextStatus && currentStatus && nextStatus !== currentStatus
+                    ? `Status changed from ${currentStatus} to ${nextStatus}`
+                    : nextStatus && !currentStatus
+                      ? `Status set to ${nextStatus}`
+                      : "";
+
                 asset.maintenance.push({
                   date: when,
-                  note: noteText,
+                  note: [noteText, statusChangeText]
+                    .filter(Boolean)
+                    .join(" | "),
                   by:
                     req.user?.name ||
                     req.user?.email ||
@@ -3167,10 +3206,15 @@ router.post(
                 asset.lng = lng;
               }
 
+              if (nextStatus && asset.status !== nextStatus) {
+                asset.status = nextStatus;
+              }
+
               await asset.save();
 
               appliedTo.assetId = String(asset._id);
               appliedTo.assetCode = String(asset.code || assetCode);
+              appliedTo.assetStatus = String(asset.status || "");
               appliedTo.assetLogStatus = "applied";
             }
           }

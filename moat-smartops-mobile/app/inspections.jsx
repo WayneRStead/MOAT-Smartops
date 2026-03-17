@@ -2237,21 +2237,23 @@ export default function InspectionsScreen() {
               />
             </View>
 
-            <TouchableOpacity
-              style={styles.clearSigButton}
-              onPress={clearSignature}
-              disabled={isSubmitting}
-            >
-              <Text style={styles.clearSigText}>Clear signature</Text>
-            </TouchableOpacity>
+            <View style={styles.signatureButtonsRow}>
+              <TouchableOpacity
+                style={styles.clearSigButton}
+                onPress={clearSignature}
+                disabled={isSubmitting}
+              >
+                <Text style={styles.clearSigText}>Clear signature</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.saveSigButton}
-              onPress={handleSaveSignaturePress}
-              disabled={isSubmitting}
-            >
-              <Text style={styles.saveSigText}>Save signature</Text>
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveSigButton}
+                onPress={handleSaveSignaturePress}
+                disabled={isSubmitting}
+              >
+                <Text style={styles.saveSigText}>Save signature</Text>
+              </TouchableOpacity>
+            </View>
 
             <Text style={styles.signatureStatusText}>
               {signatureFileUri
@@ -2637,13 +2639,17 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     marginBottom: 10,
   },
+  signatureButtonsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
   clearSigButton: {
-    alignSelf: "flex-start",
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 6,
     backgroundColor: "#eee",
-    marginBottom: 12,
   },
   clearSigText: {
     fontSize: 12,
@@ -2651,12 +2657,10 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   saveSigButton: {
-    alignSelf: "flex-start",
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 6,
     backgroundColor: THEME_COLOR,
-    marginBottom: 12,
   },
   saveSigText: {
     fontSize: 12,

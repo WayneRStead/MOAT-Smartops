@@ -40,6 +40,14 @@ const CAN_CREATE_ROLES = new Set([
   "owner",
 ]);
 
+const ASSET_STATUS_OPTIONS = [
+  { id: "active", label: "Active" },
+  { id: "maintenance", label: "Maintenance" },
+  { id: "retired", label: "Retired" },
+  { id: "lost", label: "Lost" },
+  { id: "stolen", label: "Stolen" },
+];
+
 function formatNow() {
   const d = new Date();
   const pad = (n) => (n < 10 ? "0" + n : "" + n);
@@ -54,6 +62,31 @@ function formatNow() {
     ":" +
     pad(d.getMinutes())
   );
+}
+
+function normalizeAssetStatus(value, fallback = "active") {
+  const v = String(value || "")
+    .trim()
+    .toLowerCase();
+
+  if (v === "maintanance") return "maintenance";
+  if (
+    v === "active" ||
+    v === "maintenance" ||
+    v === "retired" ||
+    v === "lost" ||
+    v === "stolen"
+  ) {
+    return v;
+  }
+
+  return fallback;
+}
+
+function assetStatusLabel(value) {
+  const v = normalizeAssetStatus(value, "");
+  const found = ASSET_STATUS_OPTIONS.find((s) => s.id === v);
+  return found ? found.label : "";
 }
 
 async function getCurrentCoords() {
@@ -186,6 +219,10 @@ function normalizeAssetOption(input, fallbackCode = "") {
       "",
   ).trim();
 
+  const assetStatus = normalizeAssetStatus(
+    input?.assetStatus || input?.status || input?.presentStatus || "active",
+  );
+
   const lat =
     input?.location?.lat ??
     input?.lat ??
@@ -208,6 +245,7 @@ function normalizeAssetOption(input, fallbackCode = "") {
     assetProjectId: projectId || null,
     assetProject: assetProject || null,
     assetLocation,
+    assetStatus,
     lat: Number.isFinite(Number(lat)) ? Number(lat) : null,
     lng: Number.isFinite(Number(lng)) ? Number(lng) : null,
     label: assetName ? `${assetCode} — ${assetName}` : assetCode,
@@ -326,7 +364,6 @@ async function getCurrentUserMeta() {
 function parseAssetScan(scanValue) {
   if (scanValue == null) return null;
 
-  // if scanner passed an object directly
   if (typeof scanValue === "object") {
     const obj = scanValue;
 
@@ -516,6 +553,7 @@ export default function AssetsScreen() {
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [createProjectPickerOpen, setCreateProjectPickerOpen] = useState(false);
+  const [logStatusPickerOpen, setLogStatusPickerOpen] = useState(false);
 
   const canCreateAsset = CAN_CREATE_ROLES.has(
     String(userRole || "").toLowerCase(),
@@ -526,6 +564,7 @@ export default function AssetsScreen() {
   const [assetCategory, setAssetCategory] = useState("");
   const [assetProjectId, setAssetProjectId] = useState("");
   const [assetLocation, setAssetLocation] = useState("");
+  const [assetStatus, setAssetStatus] = useState("");
 
   const [createVisible, setCreateVisible] = useState(false);
   const [newCode, setNewCode] = useState("");
@@ -533,6 +572,7 @@ export default function AssetsScreen() {
   const [newCategory, setNewCategory] = useState("");
   const [newProjectId, setNewProjectId] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  const [newStatus, setNewStatus] = useState("active");
   const [pendingScanRaw, setPendingScanRaw] = useState(null);
   const [isSavingAssetCreate, setIsSavingAssetCreate] = useState(false);
 
@@ -540,6 +580,7 @@ export default function AssetsScreen() {
   const [logDateTime, setLogDateTime] = useState(formatNow());
   const [logNote, setLogNote] = useState("");
   const [logPhoto, setLogPhoto] = useState(null);
+  const [logStatus, setLogStatus] = useState("active");
   const [isSavingLog, setIsSavingLog] = useState(false);
 
   const effectiveCode = String(assetCode || "").trim();
@@ -606,6 +647,7 @@ export default function AssetsScreen() {
       setNewCategory(prefill.assetCategory || "");
       setNewProjectId(prefill.assetProjectId || "");
       setNewLocation(prefill.assetLocation || "");
+      setNewStatus(normalizeAssetStatus(prefill.assetStatus || "active"));
       setPendingScanRaw(prefill.raw || null);
       setCreateVisible(true);
     },
@@ -625,6 +667,7 @@ export default function AssetsScreen() {
     setAssetCategory(item.assetCategory || "");
     setAssetProjectId(item.assetProjectId || "");
     setAssetLocation(item.assetLocation || "");
+    setAssetStatus(normalizeAssetStatus(item.assetStatus || "active"));
   }, []);
 
   const applyAssetFromStore = useCallback(async (code) => {
@@ -657,6 +700,7 @@ export default function AssetsScreen() {
       }
 
       setAssetCode(parsedCode);
+      setAssetStatus("");
 
       if (!canCreateAsset) {
         Alert.alert(
@@ -669,6 +713,7 @@ export default function AssetsScreen() {
       openCreateModal({
         assetCode: parsedCode,
         raw: parsed.raw,
+        assetStatus: "active",
       });
     },
     [applyAssetFromStore, applySelectedAsset, canCreateAsset, openCreateModal],
@@ -783,6 +828,7 @@ export default function AssetsScreen() {
           ? pickProjectName(selectedCreateProjectObj)
           : null,
         assetLocation: String(newLocation || "").trim() || null,
+        assetStatus: normalizeAssetStatus(newStatus || "active"),
         assignedGeo: coords || null,
         createdAt: new Date().toISOString(),
         source: pendingScanRaw ? "scan" : "manual",
@@ -801,6 +847,7 @@ export default function AssetsScreen() {
       setAssetCategory(meta.assetCategory || "");
       setAssetProjectId(meta.assetProjectId || "");
       setAssetLocation(meta.assetLocation || "");
+      setAssetStatus(meta.assetStatus || "active");
 
       await saveAssetCreate({
         ...meta,
@@ -838,6 +885,9 @@ export default function AssetsScreen() {
       const existing = await applyAssetFromStore(assetCode);
       if (existing) {
         applySelectedAsset(existing);
+        setLogStatus(normalizeAssetStatus(existing.assetStatus || "active"));
+      } else {
+        setLogStatus(normalizeAssetStatus(assetStatus || "active"));
       }
     })();
 
@@ -854,6 +904,9 @@ export default function AssetsScreen() {
     try {
       const coords = await getCurrentCoords();
       const nowIso = new Date().toISOString();
+      const nextStatus = normalizeAssetStatus(
+        logStatus || assetStatus || "active",
+      );
 
       const selectedProjectObj =
         projects.find(
@@ -871,6 +924,8 @@ export default function AssetsScreen() {
           ? pickProjectName(selectedProjectObj)
           : null,
         assetLocation: String(assetLocation || "").trim() || null,
+        assetStatus: normalizeAssetStatus(assetStatus || "active"),
+        nextStatus,
         dateTime: logDateTime,
         note: logNote,
         photoUri: logPhoto,
@@ -878,6 +933,41 @@ export default function AssetsScreen() {
         createdAt: nowIso,
         updatedAt: nowIso,
       };
+
+      const currentMap = await loadAssetsMap();
+      const codeKey = normCode(assetCode);
+
+      currentMap[codeKey] = {
+        ...(currentMap[codeKey] || {}),
+        assetCode: codeKey,
+        assetName:
+          String(assetName || "").trim() ||
+          currentMap[codeKey]?.assetName ||
+          "",
+        assetCategory:
+          String(assetCategory || "").trim() ||
+          currentMap[codeKey]?.assetCategory ||
+          "",
+        assetProjectId:
+          String(assetProjectId || "").trim() ||
+          currentMap[codeKey]?.assetProjectId ||
+          null,
+        assetProject: selectedProjectObj
+          ? pickProjectName(selectedProjectObj)
+          : currentMap[codeKey]?.assetProject || null,
+        assetLocation:
+          String(assetLocation || "").trim() ||
+          currentMap[codeKey]?.assetLocation ||
+          null,
+        assetStatus: nextStatus,
+        updatedAt: nowIso,
+      };
+
+      await saveAssetsMap(currentMap);
+
+      const nextAssets = await refreshAssetsList();
+      setAssetsList(nextAssets);
+      setAssetStatus(nextStatus);
 
       const id = await saveAssetLog(payload);
       await tryImmediateSyncForAssets();
@@ -938,6 +1028,7 @@ export default function AssetsScreen() {
                     assetCategory,
                     assetProjectId,
                     assetLocation,
+                    assetStatus: assetStatus || "active",
                   })
                 }
               >
@@ -970,6 +1061,14 @@ export default function AssetsScreen() {
             placeholder="Category / type"
             placeholderTextColor="#aaa"
             value={assetCategory}
+            editable={false}
+          />
+
+          <TextInput
+            style={styles.input}
+            placeholder="Present status"
+            placeholderTextColor="#aaa"
+            value={assetStatus ? assetStatusLabel(assetStatus) : ""}
             editable={false}
           />
 
@@ -1048,6 +1147,21 @@ export default function AssetsScreen() {
         emptyText="No projects cached yet. Refresh offline lists."
       />
 
+      <SelectModal
+        visible={logStatusPickerOpen}
+        title="Update asset status"
+        items={ASSET_STATUS_OPTIONS}
+        selectedId={logStatus}
+        getId={(s) => s.id}
+        getLabel={(s) => s.label}
+        onSelect={(s) => {
+          setLogStatus(String(s?.id || "active"));
+          setLogStatusPickerOpen(false);
+        }}
+        onClose={() => setLogStatusPickerOpen(false)}
+        emptyText="No statuses available."
+      />
+
       <Modal
         visible={createVisible}
         transparent
@@ -1085,6 +1199,14 @@ export default function AssetsScreen() {
               value={newCategory}
               onChangeText={setNewCategory}
               editable={!isSavingAssetCreate}
+            />
+
+            <TextInput
+              style={styles.input}
+              placeholder="Initial status"
+              placeholderTextColor="#aaa"
+              value={assetStatusLabel(newStatus)}
+              editable={false}
             />
 
             <SelectField
@@ -1149,6 +1271,21 @@ export default function AssetsScreen() {
             <Text style={styles.modalSubtitle}>
               {assetName || assetCode || "Current asset"}
             </Text>
+
+            <TextInput
+              style={styles.input}
+              placeholder="Current status"
+              placeholderTextColor="#aaa"
+              value={assetStatus ? assetStatusLabel(assetStatus) : ""}
+              editable={false}
+            />
+
+            <SelectField
+              label="Update status"
+              valueText={assetStatusLabel(logStatus)}
+              onPress={() => setLogStatusPickerOpen(true)}
+              disabled={isSavingLog}
+            />
 
             <View style={styles.dateRow}>
               <TextInput
