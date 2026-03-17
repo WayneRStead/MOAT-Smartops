@@ -239,6 +239,11 @@ export async function saveInspectionRun(run) {
   const payload = run?.payload || run || {};
   const fileUris = [];
 
+  const signatureFileUri = payload?.signoff?.signatureFileUri || null;
+  if (signatureFileUri) {
+    fileUris.push(signatureFileUri);
+  }
+
   const items = Array.isArray(payload?.items) ? payload.items : [];
   for (const item of items) {
     const photoUri =

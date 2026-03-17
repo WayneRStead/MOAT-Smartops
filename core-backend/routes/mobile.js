@@ -1824,25 +1824,44 @@ router.post(
                     );
 
                     const noteText = String(
-                      inItem?.note ||
+                      inItem?.evidence?.note ||
+                        inItem?.note ||
                         inItem?.actionNote ||
                         inItem?.correctiveAction ||
                         "",
                     ).trim();
 
+                    const photoUrl = String(
+                      inItem?.evidence?.photoUrl || inItem?.photoUri || "",
+                    ).trim();
+
+                    const scanRef = String(
+                      inItem?.evidence?.scanRef ||
+                        inItem?.scanValue ||
+                        (inItem?.scanDone ? "mobile-scan-completed" : "") ||
+                        "",
+                    ).trim();
+
+                    const itemFiles = photoUrl
+                      ? sharedUploadedEvidence.filter((f) => {
+                          const url = String(f?.url || "").trim();
+                          const filename = String(f?.filename || "")
+                            .trim()
+                            .toLowerCase();
+                          const photoName =
+                            photoUrl.split("/").pop()?.toLowerCase() || "";
+                          return (
+                            url.includes(photoName) ||
+                            filename.includes(photoName)
+                          );
+                        })
+                      : [];
+
                     const evidence = {
                       note: noteText,
-                      photoUrl: inItem?.photoUri
-                        ? String(inItem.photoUri)
-                        : sharedUploadedEvidence[0]?.url || "",
-                      scanRef: inItem?.scanValue
-                        ? String(inItem.scanValue)
-                        : inItem?.scanDone
-                          ? "mobile-scan-completed"
-                          : "",
-                      files: sharedUploadedEvidence.length
-                        ? sharedUploadedEvidence
-                        : undefined,
+                      photoUrl: itemFiles[0]?.url || photoUrl || "",
+                      scanRef,
+                      files: itemFiles.length ? itemFiles : undefined,
                     };
 
                     return {

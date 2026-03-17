@@ -1,5 +1,7 @@
+// moat-smartops-mobile/inspections.jsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker from "@react-native-community/datetimepicker";
+import * as FileSystem from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -493,6 +495,34 @@ function computeOverallResult(itemsState, form) {
   return nonCriticalFails > 0 ? "fail" : "pass";
 }
 
+async function saveSignatureDataUrlToFile(dataUrl) {
+  const value = String(dataUrl || "").trim();
+  if (!value.startsWith("data:image")) return "";
+
+  const commaIndex = value.indexOf(",");
+  if (commaIndex < 0) return "";
+
+  const metaPart = value.slice(0, commaIndex);
+  const base64Part = value.slice(commaIndex + 1);
+
+  const ext = metaPart.includes("image/jpeg")
+    ? "jpg"
+    : metaPart.includes("image/svg")
+      ? "svg"
+      : "png";
+
+  const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+  if (!dir) return "";
+
+  const fileUri = `${dir}inspection-signature-${Date.now()}.${ext}`;
+
+  await FileSystem.writeAsStringAsync(fileUri, base64Part, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  return fileUri;
+}
+
 function SelectField({ label, valueText, onPress, disabled = false }) {
   return (
     <TouchableOpacity
@@ -590,6 +620,7 @@ export default function InspectionsScreen() {
   const [showFollowUpPicker, setShowFollowUpPicker] = useState(false);
   const [confirmAccurate, setConfirmAccurate] = useState(false);
   const [signatureDataUrl, setSignatureDataUrl] = useState("");
+  const [signatureFileUri, setSignatureFileUri] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [pickerVisible, setPickerVisible] = useState(false);
@@ -1129,6 +1160,7 @@ export default function InspectionsScreen() {
     setShowFollowUpPicker(false);
     setConfirmAccurate(false);
     setSignatureDataUrl("");
+    setSignatureFileUri("");
     setIsSubmitting(false);
     setPageScrollEnabled(true);
     setPendingScanItemId("");
@@ -1176,6 +1208,7 @@ export default function InspectionsScreen() {
     setFollowUpDate("");
     setConfirmAccurate(false);
     setSignatureDataUrl("");
+    setSignatureFileUri("");
     setMode("run");
 
     await refreshLocation();
@@ -1287,13 +1320,24 @@ export default function InspectionsScreen() {
     });
   };
 
-  const handleSignatureOK = (sig) => {
-    setSignatureDataUrl(sig || "");
+  const handleSignatureOK = async (sig) => {
+    const value = String(sig || "").trim();
+    setSignatureDataUrl(value);
+
+    try {
+      const uri = await saveSignatureDataUrlToFile(value);
+      setSignatureFileUri(uri || "");
+    } catch (e) {
+      console.log("[INSPECTIONS] failed to save signature file", e);
+      setSignatureFileUri("");
+    }
+
     setPageScrollEnabled(true);
   };
 
   const clearSignature = () => {
     setSignatureDataUrl("");
+    setSignatureFileUri("");
     signatureRef.current?.clearSignature?.();
   };
 
@@ -1343,12 +1387,14 @@ export default function InspectionsScreen() {
     }
 
     let finalSignature = signatureDataUrl;
+    let finalSignatureFileUri = signatureFileUri;
 
     if (!finalSignature) {
       try {
         signatureRef.current?.readSignature?.();
         await new Promise((resolve) => setTimeout(resolve, 700));
         finalSignature = signatureDataUrl;
+        finalSignatureFileUri = signatureFileUri;
       } catch {}
     }
 
@@ -1358,6 +1404,19 @@ export default function InspectionsScreen() {
         "Please sign in the signature box and tap Save Signature before submitting.",
       );
       return;
+    }
+
+    if (!finalSignatureFileUri && finalSignature) {
+      try {
+        finalSignatureFileUri =
+          await saveSignatureDataUrlToFile(finalSignature);
+        setSignatureFileUri(finalSignatureFileUri || "");
+      } catch (e) {
+        console.log(
+          "[INSPECTIONS] failed to build signature file during submit",
+          e,
+        );
+      }
     }
 
     setSignatureDataUrl(finalSignature);
@@ -1437,8 +1496,10 @@ export default function InspectionsScreen() {
           confirmed: true,
           name: String(inspectorName || "").trim(),
           date: submittedAt,
-          signatureDataUrl: finalSignature,
+          signatureDataUrl: "",
+          signatureFileUri: finalSignatureFileUri || "",
         },
+        signatureUploadIndex: finalSignatureFileUri ? 0 : -1,
         location: coords || undefined,
         coords: coords || undefined,
         items: itemsState.map((item) => ({
@@ -2018,7 +2079,10 @@ export default function InspectionsScreen() {
               <SignatureScreen
                 ref={signatureRef}
                 onOK={handleSignatureOK}
-                onEmpty={() => setSignatureDataUrl("")}
+                onEmpty={() => {
+                  setSignatureDataUrl("");
+                  setSignatureFileUri("");
+                }}
                 onBegin={() => setPageScrollEnabled(false)}
                 onEnd={() => setPageScrollEnabled(true)}
                 webStyle={signaturePadStyle}
