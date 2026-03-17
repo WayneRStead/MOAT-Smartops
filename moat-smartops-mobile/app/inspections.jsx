@@ -5,7 +5,7 @@ import * as FileSystem from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -579,6 +579,9 @@ function PickerModal({ visible, title, items, onSelect, onClose }) {
 export default function InspectionsScreen() {
   const router = useRouter();
   const signatureRef = useRef(null);
+  const latestSignatureDataUrlRef = useRef("");
+  const latestSignatureFileUriRef = useRef("");
+  const signatureCaptureResolverRef = useRef(null);
 
   const [mode, setMode] = useState("select");
   const [scope, setScope] = useState("global");
@@ -631,6 +634,14 @@ export default function InspectionsScreen() {
   const [pendingScanItemId, setPendingScanItemId] = useState("");
 
   const [pageScrollEnabled, setPageScrollEnabled] = useState(true);
+
+  useEffect(() => {
+    latestSignatureDataUrlRef.current = String(signatureDataUrl || "").trim();
+  }, [signatureDataUrl]);
+
+  useEffect(() => {
+    latestSignatureFileUriRef.current = String(signatureFileUri || "").trim();
+  }, [signatureFileUri]);
 
   const closePicker = () => {
     setPickerVisible(false);
@@ -1159,6 +1170,11 @@ export default function InspectionsScreen() {
     setFollowUpDate("");
     setShowFollowUpPicker(false);
     setConfirmAccurate(false);
+    latestSignatureDataUrlRef.current = "";
+    latestSignatureFileUriRef.current = "";
+    if (signatureCaptureResolverRef.current) {
+      signatureCaptureResolverRef.current = null;
+    }
     setSignatureDataUrl("");
     setSignatureFileUri("");
     setIsSubmitting(false);
@@ -1207,6 +1223,11 @@ export default function InspectionsScreen() {
     setRunDateTime(formatNow());
     setFollowUpDate("");
     setConfirmAccurate(false);
+    latestSignatureDataUrlRef.current = "";
+    latestSignatureFileUriRef.current = "";
+    if (signatureCaptureResolverRef.current) {
+      signatureCaptureResolverRef.current = null;
+    }
     setSignatureDataUrl("");
     setSignatureFileUri("");
     setMode("run");
@@ -1322,23 +1343,118 @@ export default function InspectionsScreen() {
 
   const handleSignatureOK = async (sig) => {
     const value = String(sig || "").trim();
+
+    latestSignatureDataUrlRef.current = value;
     setSignatureDataUrl(value);
 
+    let uri = "";
     try {
-      const uri = await saveSignatureDataUrlToFile(value);
-      setSignatureFileUri(uri || "");
+      uri = value ? await saveSignatureDataUrlToFile(value) : "";
     } catch (e) {
       console.log("[INSPECTIONS] failed to save signature file", e);
-      setSignatureFileUri("");
+      uri = "";
     }
 
+    latestSignatureFileUriRef.current = uri || "";
+    setSignatureFileUri(uri || "");
     setPageScrollEnabled(true);
+
+    if (signatureCaptureResolverRef.current) {
+      signatureCaptureResolverRef.current({
+        dataUrl: value,
+        fileUri: uri || "",
+      });
+      signatureCaptureResolverRef.current = null;
+    }
   };
 
   const clearSignature = () => {
+    latestSignatureDataUrlRef.current = "";
+    latestSignatureFileUriRef.current = "";
+    if (signatureCaptureResolverRef.current) {
+      signatureCaptureResolverRef.current = null;
+    }
     setSignatureDataUrl("");
     setSignatureFileUri("");
     signatureRef.current?.clearSignature?.();
+  };
+
+  const captureSignatureNow = async () => {
+    const existingDataUrl = String(
+      latestSignatureDataUrlRef.current || signatureDataUrl || "",
+    ).trim();
+    const existingFileUri = String(
+      latestSignatureFileUriRef.current || signatureFileUri || "",
+    ).trim();
+
+    if (existingDataUrl && existingFileUri) {
+      return {
+        dataUrl: existingDataUrl,
+        fileUri: existingFileUri,
+      };
+    }
+
+    return await new Promise((resolve) => {
+      let settled = false;
+
+      signatureCaptureResolverRef.current = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          dataUrl: String(result?.dataUrl || "").trim(),
+          fileUri: String(result?.fileUri || "").trim(),
+        });
+      };
+
+      try {
+        signatureRef.current?.readSignature?.();
+      } catch (e) {
+        console.log("[INSPECTIONS] readSignature failed", e);
+      }
+
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (signatureCaptureResolverRef.current) {
+          signatureCaptureResolverRef.current = null;
+        }
+        resolve({
+          dataUrl: String(
+            latestSignatureDataUrlRef.current || signatureDataUrl || "",
+          ).trim(),
+          fileUri: String(
+            latestSignatureFileUriRef.current || signatureFileUri || "",
+          ).trim(),
+        });
+      }, 1500);
+    });
+  };
+
+  const handleSaveSignaturePress = async () => {
+    try {
+      const captured = await captureSignatureNow();
+
+      const dataUrl = String(captured?.dataUrl || "").trim();
+      const fileUri = String(captured?.fileUri || "").trim();
+
+      if (!dataUrl) {
+        Alert.alert(
+          "No signature detected",
+          "Please sign inside the signature box first.",
+        );
+        return;
+      }
+
+      latestSignatureDataUrlRef.current = dataUrl;
+      latestSignatureFileUriRef.current = fileUri;
+      setSignatureDataUrl(dataUrl);
+      setSignatureFileUri(fileUri);
+
+      Alert.alert("Signature saved", "Your signature has been captured.");
+    } catch (e) {
+      console.log("[INSPECTIONS] handleSaveSignaturePress failed", e);
+      Alert.alert("Signature error", "Could not capture the signature.");
+    }
   };
 
   const handleSubmitInspection = async () => {
@@ -1386,22 +1502,32 @@ export default function InspectionsScreen() {
       return;
     }
 
-    let finalSignature = signatureDataUrl;
-    let finalSignatureFileUri = signatureFileUri;
+    let finalSignature = String(
+      latestSignatureDataUrlRef.current || signatureDataUrl || "",
+    ).trim();
 
-    if (!finalSignature) {
+    let finalSignatureFileUri = String(
+      latestSignatureFileUriRef.current || signatureFileUri || "",
+    ).trim();
+
+    if (!finalSignature || !finalSignatureFileUri) {
       try {
-        signatureRef.current?.readSignature?.();
-        await new Promise((resolve) => setTimeout(resolve, 700));
-        finalSignature = signatureDataUrl;
-        finalSignatureFileUri = signatureFileUri;
-      } catch {}
+        const captured = await captureSignatureNow();
+        finalSignature = String(
+          captured?.dataUrl || latestSignatureDataUrlRef.current || "",
+        ).trim();
+        finalSignatureFileUri = String(
+          captured?.fileUri || latestSignatureFileUriRef.current || "",
+        ).trim();
+      } catch (e) {
+        console.log("[INSPECTIONS] captureSignatureNow failed", e);
+      }
     }
 
     if (!finalSignature) {
       Alert.alert(
         "Signature required",
-        "Please sign in the signature box and tap Save Signature before submitting.",
+        "Please sign in the signature box before submitting.",
       );
       return;
     }
@@ -1410,16 +1536,19 @@ export default function InspectionsScreen() {
       try {
         finalSignatureFileUri =
           await saveSignatureDataUrlToFile(finalSignature);
-        setSignatureFileUri(finalSignatureFileUri || "");
       } catch (e) {
         console.log(
           "[INSPECTIONS] failed to build signature file during submit",
           e,
         );
+        finalSignatureFileUri = "";
       }
     }
 
+    latestSignatureDataUrlRef.current = finalSignature;
+    latestSignatureFileUriRef.current = finalSignatureFileUri || "";
     setSignatureDataUrl(finalSignature);
+    setSignatureFileUri(finalSignatureFileUri || "");
 
     const invalidFails = itemsState.filter(
       (i) =>
@@ -1496,7 +1625,7 @@ export default function InspectionsScreen() {
           confirmed: true,
           name: String(inspectorName || "").trim(),
           date: submittedAt,
-          signatureDataUrl: "",
+          signatureDataUrl: finalSignature || "",
           signatureFileUri: finalSignatureFileUri || "",
         },
         signatureUploadIndex: finalSignatureFileUri ? 0 : -1,
@@ -1522,10 +1651,6 @@ export default function InspectionsScreen() {
 
       const payloadForLocalSave = {
         ...payload,
-        signoff: {
-          ...(payload.signoff || {}),
-          signatureDataUrl: "",
-        },
       };
 
       const localId = await saveInspectionRun({
@@ -2080,11 +2205,29 @@ export default function InspectionsScreen() {
                 ref={signatureRef}
                 onOK={handleSignatureOK}
                 onEmpty={() => {
+                  latestSignatureDataUrlRef.current = "";
+                  latestSignatureFileUriRef.current = "";
+                  if (signatureCaptureResolverRef.current) {
+                    signatureCaptureResolverRef.current = null;
+                  }
                   setSignatureDataUrl("");
                   setSignatureFileUri("");
                 }}
                 onBegin={() => setPageScrollEnabled(false)}
-                onEnd={() => setPageScrollEnabled(true)}
+                onEnd={() => {
+                  setPageScrollEnabled(true);
+
+                  setTimeout(() => {
+                    try {
+                      signatureRef.current?.readSignature?.();
+                    } catch (e) {
+                      console.log(
+                        "[INSPECTIONS] auto readSignature onEnd failed",
+                        e,
+                      );
+                    }
+                  }, 250);
+                }}
                 webStyle={signaturePadStyle}
                 autoClear={false}
                 imageType="image/png"
@@ -2101,6 +2244,20 @@ export default function InspectionsScreen() {
             >
               <Text style={styles.clearSigText}>Clear signature</Text>
             </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.saveSigButton}
+              onPress={handleSaveSignaturePress}
+              disabled={isSubmitting}
+            >
+              <Text style={styles.saveSigText}>Save signature</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.signatureStatusText}>
+              {signatureFileUri
+                ? "Signature captured successfully."
+                : "Signature not yet captured."}
+            </Text>
 
             <TouchableOpacity
               style={[styles.primaryButton, isSubmitting && { opacity: 0.6 }]}
@@ -2134,9 +2291,10 @@ const signaturePadStyle = `
   display: flex;
   justify-content: space-between;
   align-items: center;
-  height: 70px;
+  height: 80px;
   padding: 10px;
   margin: 0;
+  background: #ffffff;
 }
 button {
   background-color: #22a6b3;
@@ -2471,7 +2629,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   signatureBox: {
-    height: 320,
+    height: 420,
     borderWidth: 1,
     borderColor: "#ccc",
     borderRadius: 8,
@@ -2491,6 +2649,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#333",
     fontWeight: "600",
+  },
+  saveSigButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: THEME_COLOR,
+    marginBottom: 12,
+  },
+  saveSigText: {
+    fontSize: 12,
+    color: "#fff",
+    fontWeight: "600",
+  },
+  signatureStatusText: {
+    fontSize: 12,
+    color: "#555",
+    marginBottom: 12,
   },
   primaryButton: {
     backgroundColor: THEME_COLOR,
