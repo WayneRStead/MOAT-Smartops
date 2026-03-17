@@ -1,4 +1,3 @@
-// core-frontend/src/pages/InspectionSubmissionView.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
@@ -8,7 +7,6 @@ import {
   getSubmission,
   hardDeleteSubmission,
   restoreSubmission,
-  // submission admin actions
   softDeleteSubmission,
 } from "../lib/inspectionApi";
 
@@ -21,10 +19,11 @@ const CANON_ROLES = [
   "admin",
   "superadmin",
 ];
+
 function normalizeRole(r) {
   if (!r) return "";
   let s = String(r).trim().toLowerCase();
-  s = s.replace(/[_\s]+/g, "-"); // "Project Manager" -> "project-manager"
+  s = s.replace(/[_\s]+/g, "-");
   if (s === "groupleader") s = "group-leader";
   if (s === "pm") s = "project-manager";
   if (s === "super-admin") s = "superadmin";
@@ -32,13 +31,14 @@ function normalizeRole(r) {
   if (s === "owner") s = "admin";
   return CANON_ROLES.includes(s) ? s : "";
 }
+
 function uniq(arr) {
   return Array.from(new Set(arr));
 }
+
 function getCurrentUserSafe() {
-  // 1) Window
   let u = window.__CURRENT_USER__ || {};
-  // 2) JWT fallback if window user looks empty
+
   if (!u || (!u._id && !u.id && !u.userId && !u.email && !u.name)) {
     try {
       const tok = localStorage.getItem("token");
@@ -58,19 +58,22 @@ function getCurrentUserSafe() {
       }
     } catch {}
   }
-  // 3) Normalize roles
+
   const rawRoles = []
     .concat(u?.role ? [u.role] : [])
     .concat(Array.isArray(u?.roles) ? u.roles : [])
     .concat(u?.isAdmin ? ["admin"] : []);
+
   const roles = uniq(
     rawRoles
       .flatMap((v) => String(v).split(","))
       .map(normalizeRole)
       .filter(Boolean),
   );
+
   return { ...(u || {}), roles };
 }
+
 function isElevated(u) {
   return (u?.roles || []).some((r) =>
     ["project-manager", "manager", "admin", "superadmin"].includes(r),
@@ -86,12 +89,14 @@ function extractLocation(sub) {
     sub?.gps,
     sub?.metadata?.location,
     sub?.subjectAtRun?.location,
+    sub?.locationMeta?.location,
   ].filter(Boolean);
 
   for (const loc of candidates) {
-    const lat = Number(loc.lat ?? loc.latitude);
-    const lng = Number(loc.lng ?? loc.lon ?? loc.longitude);
-    const accuracy = Number(loc.accuracy ?? loc.acc);
+    const lat = Number(loc?.lat ?? loc?.latitude);
+    const lng = Number(loc?.lng ?? loc?.lon ?? loc?.longitude);
+    const accuracy = Number(loc?.accuracy ?? loc?.acc);
+
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
       return {
         lat,
@@ -99,9 +104,23 @@ function extractLocation(sub) {
         accuracy: Number.isFinite(accuracy) ? accuracy : undefined,
       };
     }
+
+    if (
+      loc?.type === "Point" &&
+      Array.isArray(loc?.coordinates) &&
+      loc.coordinates.length >= 2
+    ) {
+      const geoLng = Number(loc.coordinates[0]);
+      const geoLat = Number(loc.coordinates[1]);
+      if (Number.isFinite(geoLat) && Number.isFinite(geoLng)) {
+        return { lat: geoLat, lng: geoLng };
+      }
+    }
   }
+
   return null;
 }
+
 function formatLocation(loc) {
   if (!loc) return "";
   const acc = Number.isFinite(loc.accuracy)
@@ -109,6 +128,7 @@ function formatLocation(loc) {
     : "";
   return `${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}${acc}`;
 }
+
 function mapsHrefFrom(loc) {
   if (!loc) return "#";
   return `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
@@ -121,14 +141,71 @@ function safeString(v) {
 function isRenderableImageSrc(v) {
   const s = safeString(v);
   if (!s) return false;
-  if (s.startsWith("file://")) return false; // mobile local path is never renderable on web
+  if (s.startsWith("file://")) return false;
   if (s.startsWith("data:image/")) return true;
   if (/^https?:\/\//i.test(s)) return true;
-  if (s.startsWith("/")) return true; // includes /api/mobile/offline-files/...
+  if (s.startsWith("/")) return true;
   if (s.startsWith("files/")) return true;
   if (s.startsWith("uploads/")) return true;
   if (s.startsWith("org/")) return true;
+  if (s.startsWith("api/")) return true;
   return false;
+}
+
+/* ===== Backend-aware URL normalizer (fixes Vercel vs Render /files/*) ===== */
+function backendOrigin() {
+  try {
+    const b = (import.meta?.env?.VITE_API_BASE || "").trim();
+    if (b) return b.replace(/\/$/, "");
+  } catch {}
+  try {
+    const w = typeof window !== "undefined" ? window : {};
+    if (w.__API_BASE__) return String(w.__API_BASE__).replace(/\/$/, "");
+  } catch {}
+  return "";
+}
+
+function appendBust(u, bust) {
+  const v = String(bust || "").trim();
+  if (!v) return u;
+  return u.includes("?")
+    ? `${u}&v=${encodeURIComponent(v)}`
+    : `${u}?v=${encodeURIComponent(v)}`;
+}
+
+function toBackendUrl(url, bust) {
+  const s = String(url || "").trim();
+  if (!s) return "";
+
+  if (/^https?:\/\//i.test(s)) return bust ? appendBust(s, bust) : s;
+  if (s.startsWith("data:image/")) return s;
+
+  const base = backendOrigin();
+
+  if (s.startsWith("/")) {
+    const out = base ? `${base}${s}` : s;
+    return bust ? appendBust(out, bust) : out;
+  }
+
+  if (s.startsWith("api/")) {
+    const out = base ? `${base}/${s}` : `/${s}`;
+    return bust ? appendBust(out, bust) : out;
+  }
+
+  const out = base ? `${base}/files/${s}` : `/files/${s}`;
+  return bust ? appendBust(out, bust) : out;
+}
+
+/* ===== Legacy logo path helper (turns org/.. into /files/org/..) ===== */
+function resolveLogoPath(u) {
+  const s = String(u || "").trim();
+  if (!s) return "";
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  if (s.startsWith("/")) return s;
+  if (s.startsWith("files/")) return `/${s}`;
+  if (s.startsWith("uploads/")) return `/${s}`;
+  if (s.startsWith("org/")) return `/files/${s}`;
+  return `/files/${s}`;
 }
 
 function fileRefToUrl(file, bust = "") {
@@ -138,6 +215,9 @@ function fileRefToUrl(file, bust = "") {
     safeString(file.url) ||
     safeString(file.path) ||
     safeString(file.downloadUrl) ||
+    safeString(file.mobileUrl) ||
+    safeString(file.src) ||
+    safeString(file.href) ||
     (safeString(file.downloadKey)
       ? `/files/${safeString(file.downloadKey)}`
       : "") ||
@@ -150,26 +230,47 @@ function fileRefToUrl(file, bust = "") {
 function getEvidencePhotoSrc(item, submission) {
   const bust = submission?.updatedAt || submission?.createdAt || Date.now();
 
-  const photoUrl = safeString(item?.evidence?.photoUrl);
+  const directCandidates = [
+    item?.evidence?.photoUrl,
+    item?.evidence?.imageUrl,
+    item?.evidence?.photo,
+    item?.evidence?.image,
+    item?.photoUrl,
+    item?.imageUrl,
+    item?.photo,
+    item?.image,
+    item?.attachmentUrl,
+    item?.fileUrl,
+  ]
+    .map(safeString)
+    .filter(Boolean);
 
-  // 1) inline/base64 or real backend/public URL
-  if (isRenderableImageSrc(photoUrl)) {
-    return toBackendUrl(photoUrl, bust);
+  for (const raw of directCandidates) {
+    if (raw.startsWith("file://")) continue;
+    if (isRenderableImageSrc(raw)) {
+      return toBackendUrl(raw, bust);
+    }
   }
 
-  // 2) ignore local mobile file:// paths on web
-  if (photoUrl.startsWith("file://")) {
-    // try files fallback instead
-  }
-
-  // 3) evidence.files[]
-  const files = Array.isArray(item?.evidence?.files) ? item.evidence.files : [];
-  if (files.length) {
-    const resolved = fileRefToUrl(files[0], bust);
+  const evidenceFiles = Array.isArray(item?.evidence?.files)
+    ? item.evidence.files
+    : [];
+  for (const f of evidenceFiles) {
+    const resolved = fileRefToUrl(f, bust);
     if (resolved) return resolved;
   }
 
-  // 4) optional future support: uploadIndex -> submission.uploadedFiles[]
+  const itemFiles = Array.isArray(item?.files) ? item.files : [];
+  for (const f of itemFiles) {
+    const resolved = fileRefToUrl(f, bust);
+    if (resolved) return resolved;
+  }
+
+  if (item?.file && typeof item.file === "object") {
+    const resolved = fileRefToUrl(item.file, bust);
+    if (resolved) return resolved;
+  }
+
   const uploadIndex = Number(item?.evidence?.uploadIndex);
   if (
     Number.isInteger(uploadIndex) &&
@@ -186,74 +287,35 @@ function getEvidencePhotoSrc(item, submission) {
 function getSignatureSrc(submission) {
   const bust = submission?.updatedAt || submission?.createdAt || Date.now();
 
-  const sigUrl = safeString(submission?.signoff?.signatureDataUrl);
+  const directCandidates = [
+    submission?.signoff?.signatureDataUrl,
+    submission?.signoff?.signature,
+    submission?.signoff?.imageUrl,
+    submission?.signatureDataUrl,
+    submission?.signature,
+    submission?.imageUrl,
+  ]
+    .map(safeString)
+    .filter(Boolean);
 
-  // 1) direct usable image url/data url/backend relative url
-  if (isRenderableImageSrc(sigUrl)) {
-    return toBackendUrl(sigUrl, bust);
+  for (const raw of directCandidates) {
+    if (raw.startsWith("file://")) continue;
+    if (isRenderableImageSrc(raw)) {
+      return toBackendUrl(raw, bust);
+    }
   }
 
-  // 2) ignore mobile local file paths
-  if (sigUrl.startsWith("file://")) {
-    // fall through to signatureFile
-  }
+  const fileCandidates = [
+    submission?.signoff?.signatureFile,
+    submission?.signatureFile,
+  ].filter((v) => v && typeof v === "object");
 
-  // 3) signatureFile object fallback
-  const sigFile = submission?.signoff?.signatureFile;
-  const fromFile = fileRefToUrl(sigFile, bust);
-  if (fromFile) return fromFile;
+  for (const f of fileCandidates) {
+    const resolved = fileRefToUrl(f, bust);
+    if (resolved) return resolved;
+  }
 
   return "";
-}
-
-/* ===== Backend-aware URL normalizer (fixes Vercel vs Render /files/*) ===== */
-function backendOrigin() {
-  try {
-    const b = (import.meta?.env?.VITE_API_BASE || "").trim();
-    if (b) return b.replace(/\/$/, "");
-  } catch {}
-  try {
-    const w = typeof window !== "undefined" ? window : {};
-    if (w.__API_BASE__) return String(w.__API_BASE__).replace(/\/$/, "");
-  } catch {}
-  return "";
-}
-function appendBust(u, bust) {
-  const v = String(bust || "").trim();
-  if (!v) return u;
-  return u.includes("?")
-    ? `${u}&v=${encodeURIComponent(v)}`
-    : `${u}?v=${encodeURIComponent(v)}`;
-}
-function toBackendUrl(url, bust) {
-  const s = String(url || "").trim();
-  if (!s) return "";
-
-  // Absolute already
-  if (/^https?:\/\//i.test(s)) return bust ? appendBust(s, bust) : s;
-
-  // Relative: MUST be routed to backend origin, not frontend origin
-  const base = backendOrigin();
-  if (s.startsWith("/")) {
-    const out = base ? `${base}${s}` : s;
-    return bust ? appendBust(out, bust) : out;
-  }
-
-  // Legacy: treat as file path
-  const out = base ? `${base}/files/${s}` : `/files/${s}`;
-  return bust ? appendBust(out, bust) : out;
-}
-
-/* ===== Legacy logo path helper (turns org/.. into /files/org/..) ===== */
-function resolveLogoPath(u) {
-  const s = String(u || "").trim();
-  if (!s) return "";
-  if (s.startsWith("http://") || s.startsWith("https://")) return s;
-  if (s.startsWith("/")) return s;
-  if (s.startsWith("files/")) return `/${s}`;
-  if (s.startsWith("uploads/")) return `/${s}`;
-  if (s.startsWith("org/")) return `/files/${s}`; // -> /files/org/<orgId>/logo
-  return `/files/${s}`;
 }
 
 export default function InspectionSubmissionView() {
@@ -266,23 +328,16 @@ export default function InspectionSubmissionView() {
   const [formMeta, setFormMeta] = useState(null);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
-
-  // backfill names (project/task/milestone)
   const [names, setNames] = useState({ project: "", task: "", milestone: "" });
-
-  // manager comment draft
   const [mgrNote, setMgrNote] = useState("");
   const [savingComment, setSavingComment] = useState(false);
   const [commentErr, setCommentErr] = useState("");
-
-  // org branding (logo + name)
   const [orgName, setOrgName] = useState("");
   const [orgLogoUrl, setOrgLogoUrl] = useState("");
 
-  // current user + permissions
   const me = getCurrentUserSafe();
   const canComment = isElevated(me);
-  const canAdminSub = canComment; // same gate for delete/restore
+  const canAdminSub = canComment;
 
   useEffect(() => {
     load();
@@ -295,7 +350,6 @@ export default function InspectionSubmissionView() {
       if (cancelled) return;
       if (name) setOrgName(name);
       if (logo) {
-        // Ensure logo is loaded from backend origin (Render) not frontend (Vercel)
         const normalized = toBackendUrl(
           resolveLogoPath(logo),
           bust || Date.now(),
@@ -320,6 +374,8 @@ export default function InspectionSubmissionView() {
           const fm = await getForm(data.formId);
           setFormMeta(fm || null);
         } catch {}
+      } else {
+        setFormMeta(null);
       }
 
       backfillNames(data?.links || {});
@@ -340,12 +396,14 @@ export default function InspectionSubmissionView() {
         }));
       }
     } catch {}
+
     try {
       if (taskId) {
         const { data } = await api.get(`/tasks/${taskId}`);
         setNames((n) => ({ ...n, task: labelOf(data) || String(taskId) }));
       }
     } catch {}
+
     try {
       if (taskId && milestoneId) {
         const { data } = await api.get(`/tasks/${taskId}/milestones`);
@@ -381,7 +439,6 @@ export default function InspectionSubmissionView() {
     }
   }
 
-  // delete / restore actions
   async function onSoftDelete() {
     if (!sub?._id) return;
     if (!confirm("Soft delete this submission?")) return;
@@ -392,6 +449,7 @@ export default function InspectionSubmissionView() {
       alert(e?.response?.data?.error || e.message);
     }
   }
+
   async function onHardDelete() {
     if (!sub?._id) return;
     if (!confirm("This will permanently delete the submission. Continue?"))
@@ -403,6 +461,7 @@ export default function InspectionSubmissionView() {
       alert(e?.response?.data?.error || e.message);
     }
   }
+
   async function onRestore() {
     if (!sub?._id) return;
     try {
@@ -422,11 +481,11 @@ export default function InspectionSubmissionView() {
         : "chip chip-na";
   }, [sub]);
 
-  // Unified comments (managerComments preferred; legacy comments fallback)
   const comments = useMemo(() => {
     if (!sub) return [];
-    if (Array.isArray(sub.managerComments) && sub.managerComments.length)
+    if (Array.isArray(sub.managerComments) && sub.managerComments.length) {
       return sub.managerComments;
+    }
     if (Array.isArray(sub.comments)) {
       return sub.comments.map((c) => ({
         comment: c.comment,
@@ -437,7 +496,6 @@ export default function InspectionSubmissionView() {
     return [];
   }, [sub]);
 
-  // Friendly scoring rule label
   const ruleLabel = (sc) => {
     if (!sc) return "";
     const mode = String(sc.mode || "any-fail");
@@ -455,9 +513,9 @@ export default function InspectionSubmissionView() {
     return "Any FAIL ⇒ overall FAIL (critical auto-fail)";
   };
 
-  // Achieved score label
   const achievedLabel = useMemo(() => {
     if (!sub) return "";
+
     if (sub.scoringSummary?.percentScore != null) {
       const pct = (
         Math.round(sub.scoringSummary.percentScore * 10) / 10
@@ -470,10 +528,10 @@ export default function InspectionSubmissionView() {
       }
       return `${pct}%`;
     }
-    // fallback compute
+
     const items = Array.isArray(sub.items) ? sub.items : [];
     const applicable = items.filter(
-      (r) => (r.result || "").toLowerCase() !== "na",
+      (r) => String(r.result || "").toLowerCase() !== "na",
     );
     const totalApplicable = applicable.length;
     const passCount = applicable.filter((r) => r.result === "pass").length;
@@ -482,12 +540,14 @@ export default function InspectionSubmissionView() {
     ).length;
     const percent = totalApplicable ? (passCount / totalApplicable) * 100 : 100;
     const pct = (Math.round(percent * 10) / 10).toFixed(1);
+
     if (formMeta?.scoring?.mode === "tolerance") {
       const max = Number.isFinite(+formMeta.scoring.maxNonCriticalFails)
         ? +formMeta.scoring.maxNonCriticalFails
         : 0;
       return `${pct}% • Non-critical fails ${nonCriticalFailCount}/${max}`;
     }
+
     return `${pct}%`;
   }, [sub, formMeta]);
 
@@ -515,13 +575,11 @@ export default function InspectionSubmissionView() {
           : "Performance";
   const subjectLabel = sub?.subjectAtRun?.label;
 
-  // Location (if available)
   const loc = extractLocation(sub);
   const locTxt = formatLocation(loc);
 
   return (
     <div className="max-w-7xl mx-auto p-4 print-container">
-      {/* Local styles — screen unchanged; print-only adjusts layout */}
       <style>{`
         :root{--border:#e5e7eb;--muted:#6b7280}
         .card{border:1px solid var(--border); border-radius:12px; padding:12px; background:#fff}
@@ -543,25 +601,16 @@ export default function InspectionSubmissionView() {
         .btn-primary{border-color:#111827;background:#111827;color:#fff;border-radius:8px;padding:.5rem .75rem}
         .pill{display:inline-flex;align-items:center;font-size:12px;border:1px solid var(--border);padding:2px 6px;border-radius:9999px;color:#374151;background:#f9fafb}
 
-        /* PRINT-ONLY */
         @media print {
           @page { margin: 10mm; }
           html, body { font-size: 11.5px; }
-
-          /* Hide screen-only bits */
           .no-print{ display: none !important; }
-
-          /* Use full width on paper: override Tailwind layout utilities */
           .max-w-7xl { max-width: none !important; }
           .mx-auto { margin-left: 0 !important; margin-right: 0 !important; }
           .p-4 { padding: 0 !important; }
-
-          /* If the app shell is a 2-col grid, span all columns for print */
           main, .main, .app-content, .content, #root > * {
             grid-column: 1 / -1 !important;
           }
-
-          /* Kill any leftover left offset from the shell */
           html, body, main, .main, .app-content, .content, #root > * {
             margin-left: 0 !important;
             padding-left: 0 !important;
@@ -571,24 +620,17 @@ export default function InspectionSubmissionView() {
             width: 100% !important;
             max-width: none !important;
           }
-
-          /* Keep cards tidy for page breaks */
           .card{ padding: 10px !important; page-break-inside: avoid; break-inside: avoid; }
           .mt-3{ margin-top: 6px !important; }
           h1, h2 { margin: 6px 0 !important; }
           .row { gap: 8px !important; }
           .items-evidence img { max-height: 84px !important; }
-
-          /* Print header on, screen header off (duplicate guard) */
           .print-header{ display: block; margin-bottom: 10px; }
           .hide-outcome-on-print{ display: none !important; }
-
-          /* Ensure the container has no internal padding */
           .print-container{ padding: 0 !important; }
         }
       `}</style>
 
-      {/* Title row (hide whole bar on print to avoid duplicate) */}
       <div className="row no-print">
         <div className="flex items-center gap-3">
           <Link to="/inspections" className="btn" title="Back to list">
@@ -622,7 +664,6 @@ export default function InspectionSubmissionView() {
         </div>
       </div>
 
-      {/* Print header */}
       <div className="print-header">
         <div
           style={{
@@ -647,7 +688,6 @@ export default function InspectionSubmissionView() {
         </div>
       </div>
 
-      {/* Meta card */}
       <div className="card mt-3">
         <div className="row" style={{ alignItems: "flex-start" }}>
           <div>
@@ -666,7 +706,6 @@ export default function InspectionSubmissionView() {
           </div>
         </div>
 
-        {/* Scope */}
         <div className="grid-3 mt-3">
           <div>
             <b>Project</b>: {headerProject}
@@ -679,7 +718,6 @@ export default function InspectionSubmissionView() {
           </div>
         </div>
 
-        {/* Subject + Label */}
         <div className="mt-3 subject-row">
           <div>
             <b>Subject</b>: {subjectNice}
@@ -689,7 +727,6 @@ export default function InspectionSubmissionView() {
           </div>
         </div>
 
-        {/* Location block (if available) */}
         {loc && (
           <div className="mt-3">
             <b>Location</b>:{" "}
@@ -713,7 +750,6 @@ export default function InspectionSubmissionView() {
           </div>
         ) : null}
 
-        {/* Scoring rule + Achieved */}
         {formMeta?.scoring ? (
           <div className="mt-3 row">
             <div>
@@ -737,7 +773,6 @@ export default function InspectionSubmissionView() {
           </div>
         </div>
 
-        {/* Admin actions: delete/restore (screen only) */}
         {canAdminSub && (
           <div className="mt-3 row no-print">
             <div className="muted">Admin</div>
@@ -762,7 +797,6 @@ export default function InspectionSubmissionView() {
         )}
       </div>
 
-      {/* Items */}
       <div className="card mt-3">
         <h2 className="text-lg font-semibold">Items</h2>
         <div className="mt-2">
@@ -783,7 +817,6 @@ export default function InspectionSubmissionView() {
                 </div>
               </div>
 
-              {/* Evidence */}
               <div className="grid-3 items-evidence mt-2">
                 <div className="ev-photo">
                   <div className="muted">Photo</div>
@@ -825,6 +858,7 @@ export default function InspectionSubmissionView() {
                   <div>{it.correctiveAction || "—"}</div>
                 </div>
               )}
+
               {it.criticalTriggered && (
                 <div className="mt-2 text-sm" style={{ color: "#991B1B" }}>
                   Critical failure
@@ -835,7 +869,6 @@ export default function InspectionSubmissionView() {
         </div>
       </div>
 
-      {/* Inspector Sign-Off */}
       <div className="card mt-3">
         <h2 className="text-lg font-semibold">Inspector Sign-Off</h2>
         <div className="mt-2">
@@ -846,30 +879,28 @@ export default function InspectionSubmissionView() {
         </div>
         <div className="grid-3 mt-2">
           <div>
-            <div>
-              <div className="muted">Signature</div>
-              {(() => {
-                const sigSrc = getSignatureSrc(sub);
-                return sigSrc ? (
-                  <img
-                    src={sigSrc}
-                    alt="signature"
-                    style={{
-                      maxHeight: 96,
-                      width: "auto",
-                      objectFit: "contain",
-                      borderRadius: 8,
-                      border: "1px solid var(--border)",
-                    }}
-                    onError={(e) => {
-                      e.currentTarget.style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <div>—</div>
-                );
-              })()}
-            </div>
+            <div className="muted">Signature</div>
+            {(() => {
+              const sigSrc = getSignatureSrc(sub);
+              return sigSrc ? (
+                <img
+                  src={sigSrc}
+                  alt="signature"
+                  style={{
+                    maxHeight: 96,
+                    width: "auto",
+                    objectFit: "contain",
+                    borderRadius: 8,
+                    border: "1px solid var(--border)",
+                  }}
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                  }}
+                />
+              ) : (
+                <div>—</div>
+              );
+            })()}
           </div>
           <div>
             <div className="muted">Name</div>
@@ -896,11 +927,9 @@ export default function InspectionSubmissionView() {
         )}
       </div>
 
-      {/* Project Manager Comments */}
       <div className="card mt-3">
         <h2 className="text-lg font-semibold">Project Manager Comments</h2>
 
-        {/* Existing comments */}
         {comments.length ? (
           <div className="mt-2">
             {comments.map((c, i) => (
@@ -925,7 +954,6 @@ export default function InspectionSubmissionView() {
           <div className="muted mt-1">No comments yet.</div>
         )}
 
-        {/* Add new (screen only) */}
         <div className="mt-3 no-print">
           {commentErr ? (
             <div className="text-red-600 mb-2">{commentErr}</div>
@@ -967,7 +995,6 @@ export default function InspectionSubmissionView() {
         </div>
       </div>
 
-      {/* Footer */}
       <div className="mt-6 row" style={{ fontSize: 12 }}>
         <div>
           © {new Date().getFullYear()} {orgName || ""}
@@ -982,6 +1009,7 @@ export default function InspectionSubmissionView() {
 function labelOf(x) {
   return x?.name || x?.title || x?.label || "";
 }
+
 function badgeFor(result) {
   const r = String(result || "").toLowerCase();
   return r === "fail"
@@ -990,6 +1018,7 @@ function badgeFor(result) {
       ? "chip chip-pass"
       : "chip chip-na";
 }
+
 function niceCase(s) {
   const t = String(s || "").toLowerCase();
   if (t === "signoff") return "Sign-off";
@@ -999,7 +1028,6 @@ function niceCase(s) {
 
 /** Try to resolve org branding from window, token, or API (best-effort, safe failures). */
 async function resolveOrgBranding() {
-  // ✅ Prefer canonical endpoint first (returns stable logoUrl)
   try {
     const { data } = await api.get("/org", { params: { _ts: Date.now() } });
     const { name, logo } = extractOrgFields(data || {});
@@ -1045,6 +1073,7 @@ async function resolveOrgBranding() {
     "/organization",
     "/org/current",
   ];
+
   for (const ep of endpoints) {
     try {
       const { data } = await api.get(ep, { params: { _ts: Date.now() } });
@@ -1058,7 +1087,6 @@ async function resolveOrgBranding() {
 }
 
 function extractOrgFields(obj) {
-  // ✅ handle nested shapes: { org: {...} } or { organization: {...} }
   const o =
     obj && typeof obj === "object" && obj.org && typeof obj.org === "object"
       ? obj.org
@@ -1079,6 +1107,7 @@ function extractOrgFields(obj) {
     o.settings?.name,
     o.profile?.name,
   );
+
   const logo = pickFirst(
     o.logoUrl,
     o.logo,
@@ -1088,14 +1117,17 @@ function extractOrgFields(obj) {
     o.images?.logo,
     o.settings?.logoUrl,
   );
+
   return { name: stringOrEmpty(name), logo: stringOrEmpty(logo) };
 }
+
 function pickFirst(...vals) {
   for (const v of vals) {
     if (typeof v === "string" && v.trim()) return v;
   }
   return "";
 }
+
 function stringOrEmpty(v) {
   return typeof v === "string" && v.trim() ? v : "";
 }
@@ -1109,9 +1141,11 @@ function crc32(buf) {
   }
   return ~c >>> 0;
 }
+
 function strToUint8(str) {
   return new TextEncoder().encode(str);
 }
+
 function u32(n) {
   const b = new Uint8Array(4);
   b[0] = n & 0xff;
@@ -1120,12 +1154,14 @@ function u32(n) {
   b[3] = (n >>> 24) & 0xff;
   return b;
 }
+
 function u16(n) {
   const b = new Uint8Array(2);
   b[0] = n & 0xff;
   b[1] = (n >>> 8) & 0xff;
   return b;
 }
+
 function concatU8(arrs) {
   const len = arrs.reduce((n, a) => n + a.length, 0);
   const out = new Uint8Array(len);
@@ -1136,6 +1172,7 @@ function concatU8(arrs) {
   }
   return out;
 }
+
 function makeKmz(kmlString, innerName = "doc.kml") {
   const fileNameBytes = strToUint8(innerName);
   const data = strToUint8(kmlString);
@@ -1144,9 +1181,9 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const sigEnd = strToUint8("PK\u0005\u0006");
   const version = u16(20);
   const flags = u16(0);
-  const methodStore = u16(0); // no compression
-  const time = u16(0),
-    date = u16(0);
+  const methodStore = u16(0);
+  const time = u16(0);
+  const date = u16(0);
   const crc = u32(crc32(data));
   const size = u32(data.length);
   const nameLen = u16(fileNameBytes.length);
@@ -1155,7 +1192,7 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const diskNum = u16(0);
   const intAttr = u16(0);
   const extAttr = u32(0);
-  const relOffset = u32(0); // always 0 (single file)
+  const relOffset = u32(0);
 
   const localHeader = concatU8([
     sigLocal,
@@ -1171,6 +1208,7 @@ function makeKmz(kmlString, innerName = "doc.kml") {
     extraLen,
     fileNameBytes,
   ]);
+
   const localOffset = 0;
   const afterLocalLen = localHeader.length + data.length;
 
@@ -1215,7 +1253,6 @@ function makeKmz(kmlString, innerName = "doc.kml") {
 
 /* ===== Export helpers (KMZ backend, KMZ fallback) ===== */
 async function exportKmz(realId, submission, names) {
-  // 1) Try backend KMZ first
   try {
     const res = await api.get(`/inspections/${realId}/export.kmz`, {
       responseType: "blob",
@@ -1233,9 +1270,7 @@ async function exportKmz(realId, submission, names) {
     a.remove();
     URL.revokeObjectURL(url);
     return;
-  } catch {
-    // 2) Fallback to client-built KMZ
-  }
+  } catch {}
 
   const kml = buildKmlFromSubmission(submission, names || {});
   const blob = makeKmz(kml, "inspection.kml");
