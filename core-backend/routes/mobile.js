@@ -1788,7 +1788,7 @@ router.post(
                     (_f, idx) => idx !== signatureUploadIndex,
                   );
 
-                  const sharedUploadedEvidence =
+                  const evidenceFiles =
                     buildInspectionEvidenceFiles(evidenceUploads);
 
                   const signatureFile = signatureUpload
@@ -1809,6 +1809,10 @@ router.post(
                   const payloadItems = Array.isArray(payload?.items)
                     ? payload.items
                     : [];
+
+                  // IMPORTANT: assign uploaded evidence files in ITEM ORDER
+                  let evidenceCursor = 0;
+
                   const normalizedItems = payloadItems.map((inItem, idx) => {
                     const itemIdStr = String(
                       inItem?.itemId || inItem?.id || "",
@@ -1831,7 +1835,7 @@ router.post(
                         "",
                     ).trim();
 
-                    const photoUrl = String(
+                    const originalPhotoUrl = String(
                       inItem?.evidence?.photoUrl || inItem?.photoUri || "",
                     ).trim();
 
@@ -1842,26 +1846,22 @@ router.post(
                         "",
                     ).trim();
 
-                    const itemFiles = photoUrl
-                      ? sharedUploadedEvidence.filter((f) => {
-                          const url = String(f?.url || "").trim();
-                          const filename = String(f?.filename || "")
-                            .trim()
-                            .toLowerCase();
-                          const photoName =
-                            photoUrl.split("/").pop()?.toLowerCase() || "";
-                          return (
-                            url.includes(photoName) ||
-                            filename.includes(photoName)
-                          );
-                        })
-                      : [];
+                    // If item has a mobile/local photo, consume the NEXT uploaded evidence file
+                    let mappedFile = null;
+                    if (originalPhotoUrl) {
+                      mappedFile = evidenceFiles[evidenceCursor] || null;
+                      if (mappedFile) evidenceCursor += 1;
+                    }
 
                     const evidence = {
                       note: noteText,
-                      photoUrl: itemFiles[0]?.url || photoUrl || "",
+                      // Save backend/public URL only — never save file:/// into final submission
+                      photoUrl: mappedFile?.url || "",
                       scanRef,
-                      files: itemFiles.length ? itemFiles : undefined,
+                      ...(mappedFile ? { files: [mappedFile] } : {}),
+                      ...(originalPhotoUrl
+                        ? { originalLocalPhotoUrl: originalPhotoUrl }
+                        : {}),
                     };
 
                     return {
@@ -1878,7 +1878,9 @@ router.post(
                       ).trim(),
                       result,
                       evidence,
-                      correctiveAction: result === "fail" ? noteText : "",
+                      correctiveAction:
+                        String(inItem?.correctiveAction || "").trim() ||
+                        (result === "fail" ? noteText : ""),
                       criticalTriggered:
                         result === "fail" && !!tpl?.criticalOnFail,
                     };
@@ -2029,9 +2031,12 @@ router.post(
                         req.user?.email ||
                         "",
                       date: submittedAt.toISOString(),
-                      signatureDataUrl: String(
-                        payload?.signoff?.signatureDataUrl || "",
-                      ).trim(),
+                      signatureDataUrl:
+                        String(
+                          payload?.signoff?.signatureDataUrl || "",
+                        ).trim() ||
+                        signatureFile?.url ||
+                        "",
                       ...(signatureFile ? { signatureFile } : {}),
                     },
                     sourceOfflineEventId: doc._id,

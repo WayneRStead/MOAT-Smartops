@@ -1,15 +1,15 @@
 // core-frontend/src/pages/InspectionSubmissionView.jsx
 import { useEffect, useMemo, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import {
-  getSubmission,
   addSubmissionComment,
   getForm,
-  // submission admin actions
-  softDeleteSubmission,
+  getSubmission,
   hardDeleteSubmission,
   restoreSubmission,
+  // submission admin actions
+  softDeleteSubmission,
 } from "../lib/inspectionApi";
 
 /* ===== Robust role handling (window + JWT + synonyms) ===== */
@@ -67,13 +67,13 @@ function getCurrentUserSafe() {
     rawRoles
       .flatMap((v) => String(v).split(","))
       .map(normalizeRole)
-      .filter(Boolean)
+      .filter(Boolean),
   );
   return { ...(u || {}), roles };
 }
 function isElevated(u) {
   return (u?.roles || []).some((r) =>
-    ["project-manager", "manager", "admin", "superadmin"].includes(r)
+    ["project-manager", "manager", "admin", "superadmin"].includes(r),
   );
 }
 
@@ -104,12 +104,106 @@ function extractLocation(sub) {
 }
 function formatLocation(loc) {
   if (!loc) return "";
-  const acc = Number.isFinite(loc.accuracy) ? ` ±${Math.round(loc.accuracy)}m` : "";
+  const acc = Number.isFinite(loc.accuracy)
+    ? ` ±${Math.round(loc.accuracy)}m`
+    : "";
   return `${loc.lat.toFixed(6)}, ${loc.lng.toFixed(6)}${acc}`;
 }
 function mapsHrefFrom(loc) {
   if (!loc) return "#";
   return `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+}
+
+function safeString(v) {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function isRenderableImageSrc(v) {
+  const s = safeString(v);
+  if (!s) return false;
+  if (s.startsWith("file://")) return false; // mobile local path is never renderable on web
+  if (s.startsWith("data:image/")) return true;
+  if (/^https?:\/\//i.test(s)) return true;
+  if (s.startsWith("/")) return true; // includes /api/mobile/offline-files/...
+  if (s.startsWith("files/")) return true;
+  if (s.startsWith("uploads/")) return true;
+  if (s.startsWith("org/")) return true;
+  return false;
+}
+
+function fileRefToUrl(file, bust = "") {
+  if (!file || typeof file !== "object") return "";
+
+  const raw =
+    safeString(file.url) ||
+    safeString(file.path) ||
+    safeString(file.downloadUrl) ||
+    (safeString(file.downloadKey)
+      ? `/files/${safeString(file.downloadKey)}`
+      : "") ||
+    (safeString(file.fileId) ? `/files/${safeString(file.fileId)}` : "") ||
+    "";
+
+  return raw ? toBackendUrl(raw, bust) : "";
+}
+
+function getEvidencePhotoSrc(item, submission) {
+  const bust = submission?.updatedAt || submission?.createdAt || Date.now();
+
+  const photoUrl = safeString(item?.evidence?.photoUrl);
+
+  // 1) inline/base64 or real backend/public URL
+  if (isRenderableImageSrc(photoUrl)) {
+    return toBackendUrl(photoUrl, bust);
+  }
+
+  // 2) ignore local mobile file:// paths on web
+  if (photoUrl.startsWith("file://")) {
+    // try files fallback instead
+  }
+
+  // 3) evidence.files[]
+  const files = Array.isArray(item?.evidence?.files) ? item.evidence.files : [];
+  if (files.length) {
+    const resolved = fileRefToUrl(files[0], bust);
+    if (resolved) return resolved;
+  }
+
+  // 4) optional future support: uploadIndex -> submission.uploadedFiles[]
+  const uploadIndex = Number(item?.evidence?.uploadIndex);
+  if (
+    Number.isInteger(uploadIndex) &&
+    Array.isArray(submission?.uploadedFiles) &&
+    submission.uploadedFiles[uploadIndex]
+  ) {
+    const resolved = fileRefToUrl(submission.uploadedFiles[uploadIndex], bust);
+    if (resolved) return resolved;
+  }
+
+  return "";
+}
+
+function getSignatureSrc(submission) {
+  const bust = submission?.updatedAt || submission?.createdAt || Date.now();
+
+  const sigUrl = safeString(submission?.signoff?.signatureDataUrl);
+
+  // 1) direct usable image url/data url/backend relative url
+  if (isRenderableImageSrc(sigUrl)) {
+    return toBackendUrl(sigUrl, bust);
+  }
+
+  // 2) ignore mobile local file paths
+  if (sigUrl.startsWith("file://")) {
+    // fall through to signatureFile
+  }
+
+  // 3) signatureFile object fallback
+  const sigFile = submission?.signoff?.signatureFile;
+  const fromFile = fileRefToUrl(sigFile, bust);
+  if (fromFile) return fromFile;
+
+  return "";
 }
 
 /* ===== Backend-aware URL normalizer (fixes Vercel vs Render /files/*) ===== */
@@ -202,7 +296,10 @@ export default function InspectionSubmissionView() {
       if (name) setOrgName(name);
       if (logo) {
         // Ensure logo is loaded from backend origin (Render) not frontend (Vercel)
-        const normalized = toBackendUrl(resolveLogoPath(logo), bust || Date.now());
+        const normalized = toBackendUrl(
+          resolveLogoPath(logo),
+          bust || Date.now(),
+        );
         setOrgLogoUrl(normalized);
       }
     });
@@ -237,7 +334,10 @@ export default function InspectionSubmissionView() {
     try {
       if (projectId) {
         const { data } = await api.get(`/projects/${projectId}`);
-        setNames((n) => ({ ...n, project: labelOf(data) || String(projectId) }));
+        setNames((n) => ({
+          ...n,
+          project: labelOf(data) || String(projectId),
+        }));
       }
     } catch {}
     try {
@@ -250,7 +350,7 @@ export default function InspectionSubmissionView() {
       if (taskId && milestoneId) {
         const { data } = await api.get(`/tasks/${taskId}/milestones`);
         const m = (Array.isArray(data) ? data : []).find(
-          (x) => String(x._id || x.id) === String(milestoneId)
+          (x) => String(x._id || x.id) === String(milestoneId),
         );
         setNames((n) => ({
           ...n,
@@ -294,7 +394,8 @@ export default function InspectionSubmissionView() {
   }
   async function onHardDelete() {
     if (!sub?._id) return;
-    if (!confirm("This will permanently delete the submission. Continue?")) return;
+    if (!confirm("This will permanently delete the submission. Continue?"))
+      return;
     try {
       await hardDeleteSubmission(sub._id);
       nav("/inspections");
@@ -317,8 +418,8 @@ export default function InspectionSubmissionView() {
     return r === "fail"
       ? "chip chip-fail"
       : r === "pass"
-      ? "chip chip-pass"
-      : "chip chip-na";
+        ? "chip chip-pass"
+        : "chip chip-na";
   }, [sub]);
 
   // Unified comments (managerComments preferred; legacy comments fallback)
@@ -341,7 +442,10 @@ export default function InspectionSubmissionView() {
     if (!sc) return "";
     const mode = String(sc.mode || "any-fail");
     if (mode === "percent") {
-      const pct = Math.max(0, Math.min(100, parseInt(sc.minPassPercent ?? 100, 10)));
+      const pct = Math.max(
+        0,
+        Math.min(100, parseInt(sc.minPassPercent ?? 100, 10)),
+      );
       return `≥ ${pct}% Pass (critical fail auto-fail)`;
     }
     if (mode === "tolerance") {
@@ -355,7 +459,9 @@ export default function InspectionSubmissionView() {
   const achievedLabel = useMemo(() => {
     if (!sub) return "";
     if (sub.scoringSummary?.percentScore != null) {
-      const pct = (Math.round(sub.scoringSummary.percentScore * 10) / 10).toFixed(1);
+      const pct = (
+        Math.round(sub.scoringSummary.percentScore * 10) / 10
+      ).toFixed(1);
       if (formMeta?.scoring?.mode === "tolerance") {
         const max = Number.isFinite(+formMeta.scoring.maxNonCriticalFails)
           ? +formMeta.scoring.maxNonCriticalFails
@@ -366,11 +472,13 @@ export default function InspectionSubmissionView() {
     }
     // fallback compute
     const items = Array.isArray(sub.items) ? sub.items : [];
-    const applicable = items.filter((r) => (r.result || "").toLowerCase() !== "na");
+    const applicable = items.filter(
+      (r) => (r.result || "").toLowerCase() !== "na",
+    );
     const totalApplicable = applicable.length;
     const passCount = applicable.filter((r) => r.result === "pass").length;
     const nonCriticalFailCount = applicable.filter(
-      (r) => r.result === "fail" && !r.criticalTriggered
+      (r) => r.result === "fail" && !r.criticalTriggered,
     ).length;
     const percent = totalApplicable ? (passCount / totalApplicable) * 100 : 100;
     const pct = (Math.round(percent * 10) / 10).toFixed(1);
@@ -401,10 +509,10 @@ export default function InspectionSubmissionView() {
     subjectType === "none"
       ? "General"
       : subjectType === "vehicle"
-      ? "Vehicle"
-      : subjectType === "asset"
-      ? "Asset"
-      : "Performance";
+        ? "Vehicle"
+        : subjectType === "asset"
+          ? "Asset"
+          : "Performance";
   const subjectLabel = sub?.subjectAtRun?.label;
 
   // Location (if available)
@@ -516,7 +624,13 @@ export default function InspectionSubmissionView() {
 
       {/* Print header */}
       <div className="print-header">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             {orgLogoUrl ? (
               <img
@@ -582,7 +696,12 @@ export default function InspectionSubmissionView() {
             <span className="pill" title={locTxt}>
               📍 {locTxt}
             </span>{" "}
-            <a className="muted" href={mapsHrefFrom(loc)} target="_blank" rel="noreferrer">
+            <a
+              className="muted"
+              href={mapsHrefFrom(loc)}
+              target="_blank"
+              rel="noreferrer"
+            >
               Open in Maps
             </a>
           </div>
@@ -612,7 +731,9 @@ export default function InspectionSubmissionView() {
           </div>
           <div className="right hide-outcome-on-print">
             <b>Outcome</b>:{" "}
-            <span className={chip}>{(sub.overallResult || "—").toUpperCase()}</span>
+            <span className={chip}>
+              {(sub.overallResult || "—").toUpperCase()}
+            </span>
           </div>
         </div>
 
@@ -648,34 +769,45 @@ export default function InspectionSubmissionView() {
           {(sub.items || []).map((it, idx) => (
             <div
               key={it.itemId || idx}
-              style={{ padding: "10px 0", borderBottom: "1px solid var(--border)" }}
+              style={{
+                padding: "10px 0",
+                borderBottom: "1px solid var(--border)",
+              }}
             >
               <div className="row">
                 <div className="font-medium">
                   {idx + 1}. {it.label}
                 </div>
-                <div className={badgeFor(it.result)}>{(it.result || "NA").toUpperCase()}</div>
+                <div className={badgeFor(it.result)}>
+                  {(it.result || "NA").toUpperCase()}
+                </div>
               </div>
 
               {/* Evidence */}
               <div className="grid-3 items-evidence mt-2">
                 <div className="ev-photo">
                   <div className="muted">Photo</div>
-                  {it.evidence?.photoUrl ? (
-                    <img
-                      src={it.evidence.photoUrl}
-                      alt="evidence"
-                      style={{
-                        maxHeight: 96,
-                        width: "auto",
-                        objectFit: "contain",
-                        borderRadius: 8,
-                        border: "1px solid var(--border)",
-                      }}
-                    />
-                  ) : (
-                    <div>—</div>
-                  )}
+                  {(() => {
+                    const photoSrc = getEvidencePhotoSrc(it, sub);
+                    return photoSrc ? (
+                      <img
+                        src={photoSrc}
+                        alt="evidence"
+                        style={{
+                          maxHeight: 96,
+                          width: "auto",
+                          objectFit: "contain",
+                          borderRadius: 8,
+                          border: "1px solid var(--border)",
+                        }}
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                        }}
+                      />
+                    ) : (
+                      <div>—</div>
+                    );
+                  })()}
                 </div>
                 <div className="ev-scan">
                   <div className="muted">Scan Ref</div>
@@ -708,26 +840,36 @@ export default function InspectionSubmissionView() {
         <h2 className="text-lg font-semibold">Inspector Sign-Off</h2>
         <div className="mt-2">
           <div className="muted">Confirmation</div>
-          <div>I confirm the above is accurate to the best of my knowledge.</div>
+          <div>
+            I confirm the above is accurate to the best of my knowledge.
+          </div>
         </div>
         <div className="grid-3 mt-2">
           <div>
-            <div className="muted">Signature</div>
-            {sub.signoff?.signatureDataUrl ? (
-              <img
-                src={sub.signoff.signatureDataUrl}
-                alt="signature"
-                style={{
-                  maxHeight: 96,
-                  width: "auto",
-                  objectFit: "contain",
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                }}
-              />
-            ) : (
-              <div>—</div>
-            )}
+            <div>
+              <div className="muted">Signature</div>
+              {(() => {
+                const sigSrc = getSignatureSrc(sub);
+                return sigSrc ? (
+                  <img
+                    src={sigSrc}
+                    alt="signature"
+                    style={{
+                      maxHeight: 96,
+                      width: "auto",
+                      objectFit: "contain",
+                      borderRadius: 8,
+                      border: "1px solid var(--border)",
+                    }}
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
+                  />
+                ) : (
+                  <div>—</div>
+                );
+              })()}
+            </div>
           </div>
           <div>
             <div className="muted">Name</div>
@@ -736,7 +878,9 @@ export default function InspectionSubmissionView() {
           <div>
             <div className="muted">Date</div>
             <div>
-              {sub.signoff?.date ? new Date(sub.signoff.date).toLocaleDateString() : "—"}
+              {sub.signoff?.date
+                ? new Date(sub.signoff.date).toLocaleDateString()
+                : "—"}
             </div>
           </div>
         </div>
@@ -744,7 +888,9 @@ export default function InspectionSubmissionView() {
           <div className="mt-2">
             <div className="muted">Follow-up inspection date</div>
             <div>
-              {sub.followUpDate ? new Date(sub.followUpDate).toLocaleDateString() : "—"}
+              {sub.followUpDate
+                ? new Date(sub.followUpDate).toLocaleDateString()
+                : "—"}
             </div>
           </div>
         )}
@@ -758,7 +904,13 @@ export default function InspectionSubmissionView() {
         {comments.length ? (
           <div className="mt-2">
             {comments.map((c, i) => (
-              <div key={i} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+              <div
+                key={i}
+                style={{
+                  padding: "8px 0",
+                  borderBottom: "1px solid var(--border)",
+                }}
+              >
                 <div>
                   <b>{c.by?.name || "Manager"}</b>{" "}
                   <small className="muted">
@@ -775,15 +927,25 @@ export default function InspectionSubmissionView() {
 
         {/* Add new (screen only) */}
         <div className="mt-3 no-print">
-          {commentErr ? <div className="text-red-600 mb-2">{commentErr}</div> : null}
+          {commentErr ? (
+            <div className="text-red-600 mb-2">{commentErr}</div>
+          ) : null}
           <textarea
             className="w-full"
             rows={3}
-            placeholder={canComment ? "Add a manager note…" : "You don’t have permission to comment"}
+            placeholder={
+              canComment
+                ? "Add a manager note…"
+                : "You don’t have permission to comment"
+            }
             value={mgrNote}
             onChange={(e) => setMgrNote(e.target.value)}
             disabled={!canComment}
-            style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: 10,
+            }}
           />
           <div className="row mt-2">
             <Link to="/inspections" className="muted">
@@ -793,7 +955,11 @@ export default function InspectionSubmissionView() {
               className="btn-primary"
               onClick={saveComment}
               disabled={!mgrNote.trim() || savingComment || !canComment}
-              title={canComment ? "" : "You need project-manager/manager/admin role to add comments"}
+              title={
+                canComment
+                  ? ""
+                  : "You need project-manager/manager/admin role to add comments"
+              }
             >
               {savingComment ? "Saving…" : "Save comment"}
             </button>
@@ -818,7 +984,11 @@ function labelOf(x) {
 }
 function badgeFor(result) {
   const r = String(result || "").toLowerCase();
-  return r === "fail" ? "chip chip-fail" : r === "pass" ? "chip chip-pass" : "chip chip-na";
+  return r === "fail"
+    ? "chip chip-fail"
+    : r === "pass"
+      ? "chip chip-pass"
+      : "chip chip-na";
 }
 function niceCase(s) {
   const t = String(s || "").toLowerCase();
@@ -856,16 +1026,25 @@ async function resolveOrgBranding() {
     if (tok && tok.split(".").length === 3) {
       const payload = JSON.parse(atob(tok.split(".")[1] || ""));
       const { name, logo } = extractOrgFields(
-        payload?.org || payload?.organization || payload || {}
+        payload?.org || payload?.organization || payload || {},
       );
       if (name || logo) return { name, logo, bust: payload?.updatedAt || "" };
       if (payload?.orgName && typeof payload.orgName === "string") {
-        return { name: payload.orgName, logo: "", bust: payload?.updatedAt || "" };
+        return {
+          name: payload.orgName,
+          logo: "",
+          bust: payload?.updatedAt || "",
+        };
       }
     }
   } catch {}
 
-  const endpoints = ["/admin/org", "/settings/org", "/organization", "/org/current"];
+  const endpoints = [
+    "/admin/org",
+    "/settings/org",
+    "/organization",
+    "/org/current",
+  ];
   for (const ep of endpoints) {
     try {
       const { data } = await api.get(ep, { params: { _ts: Date.now() } });
@@ -884,11 +1063,11 @@ function extractOrgFields(obj) {
     obj && typeof obj === "object" && obj.org && typeof obj.org === "object"
       ? obj.org
       : obj &&
-        typeof obj === "object" &&
-        obj.organization &&
-        typeof obj.organization === "object"
-      ? obj.organization
-      : obj;
+          typeof obj === "object" &&
+          obj.organization &&
+          typeof obj.organization === "object"
+        ? obj.organization
+        : obj;
 
   if (!o || typeof o !== "object") return { name: "", logo: "" };
 
@@ -898,7 +1077,7 @@ function extractOrgFields(obj) {
     o.company,
     o.displayName,
     o.settings?.name,
-    o.profile?.name
+    o.profile?.name,
   );
   const logo = pickFirst(
     o.logoUrl,
@@ -907,7 +1086,7 @@ function extractOrgFields(obj) {
     o.branding?.logo,
     o.assets?.logo,
     o.images?.logo,
-    o.settings?.logoUrl
+    o.settings?.logoUrl,
   );
   return { name: stringOrEmpty(name), logo: stringOrEmpty(logo) };
 }
@@ -923,12 +1102,12 @@ function stringOrEmpty(v) {
 
 /* ---- Minimal KMZ packer (store-only ZIP) ---- */
 function crc32(buf) {
-  let c = (~0) >>> 0;
+  let c = ~0 >>> 0;
   for (let i = 0; i < buf.length; i++) {
     c ^= buf[i];
-    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
   }
-  return (~c) >>> 0;
+  return ~c >>> 0;
 }
 function strToUint8(str) {
   return new TextEncoder().encode(str);
@@ -1019,7 +1198,16 @@ function makeKmz(kmlString, innerName = "doc.kml") {
   const cdSize = u32(cdHeader.length);
   const cdOffset = u32(afterLocalLen);
   const total = u16(1);
-  const end = concatU8([sigEnd, diskNum, diskNum, total, total, cdSize, cdOffset, commentLen]);
+  const end = concatU8([
+    sigEnd,
+    diskNum,
+    diskNum,
+    total,
+    total,
+    cdSize,
+    cdOffset,
+    commentLen,
+  ]);
 
   const zip = concatU8([localHeader, data, cdHeader, end]);
   return new Blob([zip], { type: "application/vnd.google-earth.kmz" });
@@ -1029,7 +1217,9 @@ function makeKmz(kmlString, innerName = "doc.kml") {
 async function exportKmz(realId, submission, names) {
   // 1) Try backend KMZ first
   try {
-    const res = await api.get(`/inspections/${realId}/export.kmz`, { responseType: "blob" });
+    const res = await api.get(`/inspections/${realId}/export.kmz`, {
+      responseType: "blob",
+    });
     const blob =
       res.data instanceof Blob
         ? res.data
@@ -1063,7 +1253,12 @@ function buildKmlFromSubmission(s, names = {}) {
   const loc = extractLocation(s);
   const title = s?.formTitle || s?.title || "Inspection";
 
-  const whenRaw = s?.submittedAt || s?.createdAt || s?.completedAt || s?.finishedAt || s?.updatedAt;
+  const whenRaw =
+    s?.submittedAt ||
+    s?.createdAt ||
+    s?.completedAt ||
+    s?.finishedAt ||
+    s?.updatedAt;
   const whenIso = whenRaw ? new Date(whenRaw).toISOString() : "";
   const whenHuman = whenRaw ? new Date(whenRaw).toLocaleString() : "";
 
@@ -1077,19 +1272,24 @@ function buildKmlFromSubmission(s, names = {}) {
     subjectTypeRaw === "none"
       ? "General"
       : subjectTypeRaw === "vehicle"
-      ? "Vehicle"
-      : subjectTypeRaw === "asset"
-      ? "Asset"
-      : "Performance";
+        ? "Vehicle"
+        : subjectTypeRaw === "asset"
+          ? "Asset"
+          : "Performance";
   const subjectLabel = s?.subjectAtRun?.label || "";
 
   const inspector =
-    s?.runBy?.name || s?.signoff?.name || s?.runBy?.email || s?.signoff?.email || "";
+    s?.runBy?.name ||
+    s?.signoff?.name ||
+    s?.runBy?.email ||
+    s?.signoff?.email ||
+    "";
 
   const items = Array.isArray(s?.items) ? s.items : [];
   const answers = Array.isArray(s?.answers) ? s.answers : items;
   const anyFail = answers.some(
-    (a) => String(a?.result || "").toLowerCase() === "fail" || a?.pass === false
+    (a) =>
+      String(a?.result || "").toLowerCase() === "fail" || a?.pass === false,
   );
 
   let status = String(s?.overallResult || "").toLowerCase();
