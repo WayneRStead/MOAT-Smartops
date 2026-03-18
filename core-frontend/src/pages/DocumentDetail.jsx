@@ -1,6 +1,5 @@
-// src/pages/DocumentDetail.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, fileUrl } from "../lib/api";
 
 const MOBILE_FOLDER_OPTIONS = ["policies", "safety", "general"];
@@ -8,7 +7,11 @@ const DETAIL_CHANNEL_OPTIONS = ["mobile-library", "vault-only"];
 
 function TagEditor({ tags = [], onChange }) {
   const [val, setVal] = useState((tags || []).join(", "));
-  useEffect(() => setVal((tags || []).join(", ")), [tags]);
+
+  useEffect(() => {
+    setVal((tags || []).join(", "));
+  }, [tags]);
+
   return (
     <input
       className="border p-2 w-full"
@@ -26,17 +29,10 @@ function TagEditor({ tags = [], onChange }) {
   );
 }
 
-function Pill({ children }) {
-  return (
-    <span className="text-xs px-2 py-1 rounded bg-gray-100 border">
-      {children}
-    </span>
-  );
-}
-
 export default function DocumentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+
   const [doc, setDoc] = useState(null);
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
@@ -50,34 +46,87 @@ export default function DocumentDetail() {
     tags: [],
   });
 
-  // Generic link adder (by ID)
   const [newLink, setNewLink] = useState({ type: "project", refId: "" });
 
-  // Quick-link pickers
   const [projects, setProjects] = useState([]);
   const [users, setUsers] = useState([]);
   const [pickProject, setPickProject] = useState("");
   const [pickUser, setPickUser] = useState("");
 
-  // Resolved names for linked IDs
   const [projectMap, setProjectMap] = useState(new Map());
   const [userMap, setUserMap] = useState(new Map());
 
-  // ---- Inline preview state ----
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewMime, setPreviewMime] = useState("");
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewErr, setPreviewErr] = useState("");
 
+  async function resolveLinkedLookups(document) {
+    const links = Array.isArray(document?.links) ? document.links : [];
+
+    const projIds = [
+      ...new Set(
+        links
+          .filter((l) => (l.type || l.module) === "project")
+          .map((l) => String(l.refId)),
+      ),
+    ];
+
+    const userIds = [
+      ...new Set(
+        links
+          .filter((l) => (l.type || l.module) === "user")
+          .map((l) => String(l.refId)),
+      ),
+    ];
+
+    try {
+      if (projIds.length) {
+        const { data } = await api.get("/projects", {
+          params: { limit: 500, includeDeleted: 1 },
+        });
+
+        const map = new Map(projectMap);
+        (Array.isArray(data) ? data : []).forEach((p) => {
+          map.set(String(p._id), p);
+        });
+
+        setProjectMap(map);
+        if (!projects.length) setProjects(Array.isArray(data) ? data : []);
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      if (userIds.length) {
+        const { data } = await api.get("/users", {
+          params: { limit: 1000 },
+        });
+
+        const map = new Map(userMap);
+        (Array.isArray(data) ? data : []).forEach((u) => {
+          map.set(String(u._id), u);
+        });
+
+        setUserMap(map);
+        if (!users.length) setUsers(Array.isArray(data) ? data : []);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function load() {
     setErr("");
     setInfo("");
+
     try {
       const { data } = await api.get(`/documents/${id}`);
       setDoc(data);
       setPendingMeta({
         title: data.title || "",
-        channel: data.channe|
+        channel: data.channel || "vault-only",
         folder: data.folder || "",
         tags: data.tags || [],
       });
@@ -88,10 +137,10 @@ export default function DocumentDetail() {
   }
 
   useEffect(() => {
-    load(); /* eslint-disable-next-line */
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Preview: try doc.latest.url first, then API fallbacks (download/file). Fetch as blob and render via object URL.
   useEffect(() => {
     let cancelled = false;
     let objUrl = "";
@@ -100,21 +149,25 @@ export default function DocumentDetail() {
     async function getFirstWorkingBlob(urls) {
       for (const u of urls) {
         if (!u) continue;
+
         try {
           const res = await fetch(u, {
             credentials: "include",
             signal: controller.signal,
           });
+
           if (!res.ok) continue;
+
           const mime = String(
             res.headers.get("content-type") || "",
           ).toLowerCase();
           const blob = await res.blob();
           return { blob, mime };
         } catch {
-          /* try next */
+          // try next
         }
       }
+
       throw new Error("No previewable URL");
     }
 
@@ -125,8 +178,6 @@ export default function DocumentDetail() {
       setPreviewMime("");
 
       const primary = doc?.latest?.url ? fileUrl(doc.latest.url) : "";
-
-      // Expanded fallbacks: prefer /download (redirects to latest), but keep /file for older servers
       const fallbacks = [`/api/documents/${id}/file`, `/documents/${id}/file`];
 
       try {
@@ -134,7 +185,9 @@ export default function DocumentDetail() {
           primary,
           ...fallbacks,
         ]);
+
         if (cancelled) return;
+
         objUrl = URL.createObjectURL(blob);
         setPreviewUrl(objUrl);
         setPreviewMime(
@@ -155,55 +208,6 @@ export default function DocumentDetail() {
     };
   }, [id, doc?.latest?.url, doc?.latest?.uploadedAt, doc?.latest?.mime]);
 
-  async function resolveLinkedLookups(document) {
-    const links = Array.isArray(document?.links) ? document.links : [];
-    const projIds = [
-      ...new Set(
-        links
-          .filter((l) => (l.type || l.module) === "project")
-          .map((l) => String(l.refId)),
-      ),
-    ];
-    const userIds = [
-      ...new Set(
-        links
-          .filter((l) => (l.type || l.module) === "user")
-          .map((l) => String(l.refId)),
-      ),
-    ];
-
-    try {
-      if (projIds.length) {
-        const { data } = await api.get("/projects", {
-          params: { limit: 500, includeDeleted: 1 },
-        });
-        const map = new Map(projectMap);
-        (Array.isArray(data) ? data : []).forEach((p) =>
-          map.set(String(p._id), p),
-        );
-        setProjectMap(map);
-        if (!projects.length) setProjects(Array.isArray(data) ? data : []);
-      }
-    } catch {
-      /* ignore */
-    }
-
-    try {
-      if (userIds.length) {
-        const { data } = await api.get("/users", { params: { limit: 1000 } });
-        const map = new Map(userMap);
-        (Array.isArray(data) ? data : []).forEach((u) =>
-          map.set(String(u._id), u),
-        );
-        setUserMap(map);
-        if (!users.length) setUsers(Array.isArray(data) ? data : []);
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // preload pickers list
   useEffect(() => {
     (async () => {
       try {
@@ -214,9 +218,12 @@ export default function DocumentDetail() {
           setProjects(Array.isArray(data) ? data : []);
         }
       } catch {}
+
       try {
         if (!users.length) {
-          const { data } = await api.get("/users", { params: { limit: 1000 } });
+          const { data } = await api.get("/users", {
+            params: { limit: 1000 },
+          });
           setUsers(Array.isArray(data) ? data : []);
         }
       } catch {}
@@ -243,15 +250,19 @@ export default function DocumentDetail() {
 
   async function uploadVersion() {
     if (!file) return;
+
     setUploading(true);
     setErr("");
     setInfo("");
+
     try {
       const fd = new FormData();
       fd.append("file", file);
+
       const { data } = await api.post(`/documents/${id}/upload`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+
       setDoc(data);
       setFile(null);
       setInfo("Version uploaded.");
@@ -263,9 +274,10 @@ export default function DocumentDetail() {
   }
 
   async function deleteDoc() {
-    if (!confirm("Delete this document?")) return;
+    if (!window.confirm("Delete this document?")) return;
+
     try {
-      await api.delete(`/documents/${id}`); // soft delete
+      await api.delete(`/documents/${id}`);
       setInfo("Deleted");
       navigate("/vault");
     } catch (e) {
@@ -273,10 +285,10 @@ export default function DocumentDetail() {
     }
   }
 
-  // Robust restore: try PATCH /restore; if missing, inform user gracefully
   async function restoreDoc() {
     setErr("");
     setInfo("");
+
     try {
       const { data } = await api.patch(`/documents/${id}/restore`);
       setDoc(data);
@@ -294,7 +306,8 @@ export default function DocumentDetail() {
   }
 
   async function deleteVersion(idx) {
-    if (!confirm("Delete this version?")) return;
+    if (!window.confirm("Delete this version?")) return;
+
     try {
       await api.delete(`/documents/${id}/versions/${idx}`);
       await load();
@@ -305,7 +318,9 @@ export default function DocumentDetail() {
 
   async function restoreVersion(idx, setLatest = false) {
     try {
-      const url = `/documents/${id}/versions/${idx}/restore${setLatest ? "?setLatest=1" : ""}`;
+      const url = `/documents/${id}/versions/${idx}/restore${
+        setLatest ? "?setLatest=1" : ""
+      }`;
       const { data } = await api.patch(url);
       setDoc(data);
       setInfo("Version restored");
@@ -314,13 +329,11 @@ export default function DocumentDetail() {
     }
   }
 
-  // ---------- Links (robust with fallback) ----------
   function normalizeLink(l) {
     const type = l.type || l.module;
     return { ...l, type, module: type, refId: l.refId };
   }
 
-  // Fallback helper: rewrite entire links array via PUT
   async function rewriteLinks(nextLinks) {
     const norm = (nextLinks || []).map(normalizeLink);
     const { data } = await api.put(`/documents/${id}`, { links: norm });
@@ -330,9 +343,12 @@ export default function DocumentDetail() {
 
   async function addLink() {
     if (!newLink.refId) return;
+
     setErr("");
     setInfo("");
+
     const body = normalizeLink({ type: newLink.type, refId: newLink.refId });
+
     try {
       const { data } = await api.post(`/documents/${id}/links`, body);
       setDoc((prev) => ({ ...prev, links: data }));
@@ -340,13 +356,14 @@ export default function DocumentDetail() {
       await resolveLinkedLookups({ links: data });
     } catch (e) {
       const code = e?.response?.status;
+
       if (code === 404 || code === 405 || code === 501) {
-        // Fallback: add locally then PUT full array
         const exists = (doc?.links || []).some(
           (l) =>
             (l.type || l.module) === body.type &&
             String(l.refId) === String(body.refId),
         );
+
         const next = exists ? doc.links : [...(doc?.links || []), body];
         await rewriteLinks(next);
         setNewLink({ ...newLink, refId: "" });
@@ -361,6 +378,7 @@ export default function DocumentDetail() {
   async function removeLink(type, refId) {
     setErr("");
     setInfo("");
+
     try {
       const { data } = await api.delete(`/documents/${id}/links`, {
         data: { type, refId },
@@ -368,6 +386,7 @@ export default function DocumentDetail() {
       setDoc((prev) => ({ ...prev, links: data }));
     } catch (e) {
       const code = e?.response?.status;
+
       if (code === 404 || code === 405 || code === 501) {
         const next = (doc?.links || []).filter(
           (l) =>
@@ -382,17 +401,18 @@ export default function DocumentDetail() {
     }
   }
 
-  // Quick linkers
   async function linkProject() {
     if (!pickProject) return;
     await addLinkWith({ type: "project", refId: pickProject });
     setPickProject("");
   }
+
   async function linkUser() {
     if (!pickUser) return;
     await addLinkWith({ type: "user", refId: pickUser });
     setPickUser("");
   }
+
   async function addLinkWith(l) {
     const prev = { ...newLink };
     setNewLink({ type: l.type, refId: l.refId });
@@ -404,12 +424,12 @@ export default function DocumentDetail() {
     () => (doc?.links || []).filter((l) => (l.type || l.module) === "project"),
     [doc],
   );
+
   const userLinks = useMemo(
     () => (doc?.links || []).filter((l) => (l.type || l.module) === "user"),
     [doc],
   );
 
-  // Pretty “For” label (first linked user, or comma-joined)
   const forLabel = useMemo(() => {
     if (!userLinks.length) return "—";
     const names = userLinks.map((l) => {
@@ -419,7 +439,6 @@ export default function DocumentDetail() {
     return names.join(", ");
   }, [userLinks, userMap]);
 
-  // Preview type checks
   const isImg = previewMime.startsWith("image/");
   const isPdf = previewMime === "application/pdf";
   const isAudio = previewMime.startsWith("audio/");
@@ -428,12 +447,13 @@ export default function DocumentDetail() {
     previewMime.startsWith("text/") ||
     ["application/json", "application/xml"].includes(previewMime);
 
-  if (!doc)
+  if (!doc) {
     return (
       <div className="p-4">
         Loading… {err && <span style={{ color: "crimson" }}>({err})</span>}
       </div>
     );
+  }
 
   return (
     <div className="p-4 space-y-4">
@@ -461,9 +481,7 @@ export default function DocumentDetail() {
       {err && <div className="text-red-600">{err}</div>}
       {info && <div className="text-green-700">{info}</div>}
 
-      {/* Meta + Latest */}
       <div className="grid md:grid-cols-2 gap-4">
-        {/* Meta */}
         <div className="border rounded p-3 space-y-2">
           <label className="block text-sm">
             Title
@@ -578,9 +596,9 @@ export default function DocumentDetail() {
           </div>
         </div>
 
-        {/* Latest */}
         <div className="border rounded p-3 space-y-2">
           <div className="font-semibold">Latest</div>
+
           {!doc.latest ? (
             <div className="text-sm text-gray-600">No versions yet.</div>
           ) : (
@@ -599,15 +617,14 @@ export default function DocumentDetail() {
                   {Math.round((doc.latest.size || 0) / 1024)} KB)
                 </span>
               </div>
+
               <div className="text-xs text-gray-600">
                 Uploaded {new Date(doc.latest.uploadedAt).toLocaleString()} by{" "}
                 {String(doc.latest.uploadedBy || "")}
               </div>
 
-              {/* Quick who/when summary for proofs (first linked user) */}
               <div className="text-xs text-gray-600">For: {forLabel}</div>
 
-              {/* Direct download via server helper if available */}
               <div className="text-xs">
                 <a
                   className="underline"
@@ -639,13 +656,13 @@ export default function DocumentDetail() {
         </div>
       </div>
 
-      {/* Inline Preview */}
       <div className="border rounded p-3 space-y-2">
         <div className="font-semibold">Preview</div>
 
         {previewLoading && (
           <div className="text-sm text-gray-600">Loading preview…</div>
         )}
+
         {previewErr && (
           <div className="text-sm text-red-600">
             {previewErr}{" "}
@@ -663,6 +680,7 @@ export default function DocumentDetail() {
             )}
           </div>
         )}
+
         {!previewLoading && !previewErr && !previewUrl && (
           <div className="text-sm text-gray-600">
             No file uploaded for this document.
@@ -678,6 +696,7 @@ export default function DocumentDetail() {
                 className="max-w-full h-auto rounded"
               />
             )}
+
             {isPdf && (
               <iframe
                 title="pdf"
@@ -686,7 +705,9 @@ export default function DocumentDetail() {
                 style={{ height: "80vh", border: "none" }}
               />
             )}
+
             {isAudio && <audio controls src={previewUrl} className="w-full" />}
+
             {isVideo && (
               <video
                 controls
@@ -695,6 +716,7 @@ export default function DocumentDetail() {
                 style={{ maxHeight: "80vh" }}
               />
             )}
+
             {isText && !isPdf && !isImg && !isAudio && !isVideo && (
               <iframe
                 title="text"
@@ -703,6 +725,7 @@ export default function DocumentDetail() {
                 style={{ height: "70vh", border: "none" }}
               />
             )}
+
             {!isImg && !isPdf && !isAudio && !isVideo && !isText && (
               <div className="text-sm">
                 This file type can’t be previewed inline.&nbsp;
@@ -724,9 +747,9 @@ export default function DocumentDetail() {
         )}
       </div>
 
-      {/* Versions */}
       <div className="border rounded p-3">
         <div className="font-semibold mb-2">All Versions</div>
+
         {!Array.isArray(doc.versions) || doc.versions.length === 0 ? (
           <div className="text-sm text-gray-600">No versions.</div>
         ) : (
@@ -737,10 +760,13 @@ export default function DocumentDetail() {
                 v &&
                 doc.latest.filename === v.filename &&
                 doc.latest.uploadedAt === v.uploadedAt;
+
               return (
                 <div
                   key={i}
-                  className={`flex flex-wrap items-center justify-between border p-2 rounded ${v.deletedAt ? "opacity-60" : ""}`}
+                  className={`flex flex-wrap items-center justify-between border p-2 rounded ${
+                    v.deletedAt ? "opacity-60" : ""
+                  }`}
                 >
                   <div className="space-y-1">
                     <div className="text-sm">
@@ -756,18 +782,21 @@ export default function DocumentDetail() {
                       ) : (
                         v.filename
                       )}
+
                       {isLatest && (
                         <span className="ml-2 text-xs bg-gray-200 px-2 py-0.5 rounded">
                           latest
                         </span>
                       )}
                     </div>
+
                     <div className="text-xs text-gray-600">
                       {v.mime || v.mimeType || "file"} •{" "}
                       {Math.round((v.size || 0) / 1024)} KB •{" "}
                       {new Date(v.uploadedAt).toLocaleString()}
                     </div>
                   </div>
+
                   <div className="flex gap-2">
                     {!v.deletedAt ? (
                       <>
@@ -777,6 +806,7 @@ export default function DocumentDetail() {
                         >
                           Delete
                         </button>
+
                         {!isLatest && (
                           <button
                             className="px-2 py-1 border rounded"
@@ -802,11 +832,9 @@ export default function DocumentDetail() {
         )}
       </div>
 
-      {/* Links — grouped with resolved names */}
       <div className="border rounded p-3 space-y-3">
         <div className="font-semibold">Links</div>
 
-        {/* Quick linkers */}
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-sm">
             Link project
@@ -824,6 +852,7 @@ export default function DocumentDetail() {
               ))}
             </select>
           </label>
+
           <button
             className="px-3 py-2 border rounded"
             onClick={linkProject}
@@ -848,6 +877,7 @@ export default function DocumentDetail() {
               ))}
             </select>
           </label>
+
           <button
             className="px-3 py-2 border rounded"
             onClick={linkUser}
@@ -857,7 +887,6 @@ export default function DocumentDetail() {
           </button>
         </div>
 
-        {/* Advanced: raw link by ID */}
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-sm">
             Type
@@ -875,6 +904,7 @@ export default function DocumentDetail() {
               <option value="clocking">clocking</option>
             </select>
           </label>
+
           <label className="text-sm">
             Ref ID
             <input
@@ -887,6 +917,7 @@ export default function DocumentDetail() {
               style={{ minWidth: 260 }}
             />
           </label>
+
           <button
             className="px-3 py-2 border rounded"
             onClick={addLink}
@@ -896,16 +927,17 @@ export default function DocumentDetail() {
           </button>
         </div>
 
-        {/* Display grouped links */}
         <div className="grid md:grid-cols-2 gap-3">
           <div>
             <div className="text-sm font-medium mb-1">Projects</div>
+
             {projectLinks.length === 0 ? (
               <div className="text-sm text-gray-600">No project links.</div>
             ) : (
               <div className="grid gap-2">
                 {projectLinks.map((l, idx) => {
                   const p = projectMap.get(String(l.refId));
+
                   return (
                     <div
                       key={idx}
@@ -922,6 +954,7 @@ export default function DocumentDetail() {
                           </span>
                         )}
                       </div>
+
                       <button
                         className="px-2 py-1 border rounded"
                         onClick={() => removeLink(l.type || l.module, l.refId)}
@@ -937,6 +970,7 @@ export default function DocumentDetail() {
 
           <div>
             <div className="text-sm font-medium mb-1">Users</div>
+
             {userLinks.length === 0 ? (
               <div className="text-sm text-gray-600">No user links.</div>
             ) : (
@@ -946,12 +980,14 @@ export default function DocumentDetail() {
                   const label = u
                     ? u.name || u.email || u.username
                     : String(l.refId);
+
                   return (
                     <div
                       key={idx}
                       className="flex items-center justify-between border p-2 rounded"
                     >
                       <div className="text-sm">{label}</div>
+
                       <button
                         className="px-2 py-1 border rounded"
                         onClick={() => removeLink(l.type || l.module, l.refId)}
