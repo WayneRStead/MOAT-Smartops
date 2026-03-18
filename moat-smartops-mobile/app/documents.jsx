@@ -1,5 +1,6 @@
-import { useRouter } from 'expo-router';
-import { useState } from 'react';
+//moat-smartops-mobile/app/documents.jsx
+import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Image,
@@ -9,96 +10,111 @@ import {
   Text,
   TouchableOpacity,
   View,
-} from 'react-native';
-import { saveDocumentRead } from '../database'; // ✅ NEW: wire to local DB stub
+} from "react-native";
+import {
+  fetchMobileLibraryDocuments,
+  getAuthHeaders,
+  getStoredUserId,
+} from "../apiClient";
+import { saveDocumentRead } from "../database";
 
-const THEME_COLOR = '#22a6b3';
+const THEME_COLOR = "#22a6b3";
 
-// Demo categories & documents – later this comes from backend / document vault
-const DOCUMENT_CATEGORIES = [
+// categories & documents
+const EMPTY_DOCUMENT_CATEGORIES = [
   {
-    id: 'policies',
-    name: 'Policies',
-    icon: require('../assets/policies.png'),
-    documents: [
-      {
-        id: 'pol-001',
-        title: 'Health & Safety Policy',
-        type: 'PDF',
-        updatedAt: '2025-10-01',
-        description:
-          'Company-wide health and safety policy, roles and responsibilities.',
-      },
-      {
-        id: 'pol-002',
-        title: 'Code of Conduct',
-        type: 'PDF',
-        updatedAt: '2025-09-15',
-        description:
-          'Behaviour standards, disciplinary procedures and reporting channels.',
-      },
-    ],
+    id: "policies",
+    name: "Policies",
+    icon: require("../assets/policies.png"),
+    documents: [],
   },
   {
-    id: 'safety',
-    name: 'Safety',
-    icon: require('../assets/safety.png'),
-    documents: [
-      {
-        id: 'safe-001',
-        title: 'Working at Heights Procedure',
-        type: 'PDF',
-        updatedAt: '2025-09-20',
-        description:
-          'Safe system of work for ladders, scaffolding and elevated platforms.',
-      },
-      {
-        id: 'safe-002',
-        title: 'PPE Requirements',
-        type: 'PDF',
-        updatedAt: '2025-08-05',
-        description:
-          'Required personal protective equipment per task / area.',
-      },
-    ],
+    id: "safety",
+    name: "Safety",
+    icon: require("../assets/safety.png"),
+    documents: [],
   },
   {
-    id: 'general',
-    name: 'General',
-    icon: require('../assets/general.png'),
-    documents: [
-      {
-        id: 'gen-001',
-        title: 'Site Induction Guide',
-        type: 'PDF',
-        updatedAt: '2025-07-10',
-        description:
-          'Overview of site rules, facilities, emergency information and contacts.',
-      },
-      {
-        id: 'gen-002',
-        title: 'Environmental Policy',
-        type: 'PDF',
-        updatedAt: '2025-06-30',
-        description:
-          'Company commitment to environmental protection and waste management.',
-      },
-    ],
+    id: "general",
+    name: "General",
+    icon: require("../assets/general.png"),
+    documents: [],
   },
 ];
 
-const THEME_BG = '#f5f5f5';
+function guessDocType(doc) {
+  const mime = String(doc?.latest?.mime || "").toLowerCase();
+  const filename = String(doc?.latest?.filename || "").toLowerCase();
+
+  if (mime.includes("pdf") || filename.endsWith(".pdf")) return "PDF";
+  if (mime.startsWith("image/")) return "IMAGE";
+  if (mime.startsWith("video/")) return "VIDEO";
+  if (mime.startsWith("audio/")) return "AUDIO";
+  if (
+    mime.includes("word") ||
+    filename.endsWith(".doc") ||
+    filename.endsWith(".docx")
+  )
+    return "WORD";
+  if (
+    mime.includes("excel") ||
+    filename.endsWith(".xls") ||
+    filename.endsWith(".xlsx")
+  )
+    return "EXCEL";
+  return "FILE";
+}
+
+function buildCategoriesFromBackend(docs = []) {
+  const categories = EMPTY_DOCUMENT_CATEGORIES.map((c) => ({
+    ...c,
+    documents: [],
+  }));
+
+  for (const raw of docs) {
+    const folder = String(raw?.folder || "")
+      .trim()
+      .toLowerCase();
+    const bucket = categories.find((c) => c.id === folder);
+    if (!bucket) continue;
+
+    bucket.documents.push({
+      id: raw?.id || raw?._id,
+      backendId: raw?.id || raw?._id,
+      title: raw?.title || "Untitled document",
+      type: guessDocType(raw),
+      updatedAt: raw?.updatedAt || raw?.createdAt || "",
+      description:
+        Array.isArray(raw?.tags) && raw.tags.length
+          ? `Tags: ${raw.tags.join(", ")}`
+          : "Library document",
+      latest: raw?.latest || null,
+      folder,
+      channel: raw?.channel || "mobile-library",
+    });
+  }
+
+  return categories;
+}
+
+const THEME_BG = "#f5f5f5";
 
 export default function DocumentsScreen() {
   const router = useRouter();
 
-  const [selectedCategoryId, setSelectedCategoryId] = useState('policies');
-  const [viewDoc, setViewDoc] = useState(null); // the document being viewed
-  const [readTimestamps, setReadTimestamps] = useState({}); // { [docId]: 'YYYY-MM-DD HH:mm' }
+  const [selectedCategoryId, setSelectedCategoryId] = useState("policies");
+  const [viewDoc, setViewDoc] = useState(null);
+  const [readTimestamps, setReadTimestamps] = useState({});
+  const [documentCategories, setDocumentCategories] = useState(
+    EMPTY_DOCUMENT_CATEGORIES,
+  );
+  const [loadingDocs, setLoadingDocs] = useState(true);
+  const [documentsError, setDocumentsError] = useState("");
 
   const selectedCategory =
-    DOCUMENT_CATEGORIES.find((c) => c.id === selectedCategoryId) ||
-    DOCUMENT_CATEGORIES[0];
+    documentCategories.find((c) => c.id === selectedCategoryId) ||
+    documentCategories[0] ||
+    EMPTY_DOCUMENT_CATEGORIES[0];
 
   const handleOpenDoc = (doc) => {
     setViewDoc(doc);
@@ -106,19 +122,63 @@ export default function DocumentsScreen() {
 
   const formatNow = () => {
     const d = new Date();
-    const pad = (n) => (n < 10 ? '0' + n : '' + n);
+    const pad = (n) => (n < 10 ? "0" + n : "" + n);
     return (
       d.getFullYear() +
-      '-' +
+      "-" +
       pad(d.getMonth() + 1) +
-      '-' +
+      "-" +
       pad(d.getDate()) +
-      ' ' +
+      " " +
       pad(d.getHours()) +
-      ':' +
+      ":" +
       pad(d.getMinutes())
     );
   };
+
+  const formatDisplayDate = (value) => {
+    if (!value) return "-";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    const pad = (n) => (n < 10 ? "0" + n : "" + n);
+    return (
+      d.getFullYear() +
+      "-" +
+      pad(d.getMonth() + 1) +
+      "-" +
+      pad(d.getDate()) +
+      " " +
+      pad(d.getHours()) +
+      ":" +
+      pad(d.getMinutes())
+    );
+  };
+
+  const loadDocuments = async () => {
+    try {
+      setLoadingDocs(true);
+      setDocumentsError("");
+
+      const data = await fetchMobileLibraryDocuments();
+      const rows = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.documents)
+          ? data.documents
+          : [];
+
+      setDocumentCategories(buildCategoriesFromBackend(rows));
+    } catch (e) {
+      console.log("Failed to load mobile library documents", e);
+      setDocumentsError(e?.message || "Failed to load documents");
+      setDocumentCategories(EMPTY_DOCUMENT_CATEGORIES);
+    } finally {
+      setLoadingDocs(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDocuments();
+  }, []);
 
   // ✅ Now async and wired to DB stub
   const handleMarkAsRead = async () => {
@@ -134,30 +194,40 @@ export default function DocumentsScreen() {
 
     // Build payload for DB / sync
     const nowIso = new Date().toISOString();
+    const auth = await getAuthHeaders({ json: true });
+    const userId = await getStoredUserId();
+
     const payload = {
-      orgId: 'demo-org',        // 🔁 later from logged-in org
-      userId: 'demo-user',      // 🔁 later from logged-in user
-      documentId: viewDoc.id,
+      orgId: auth?.orgId || "",
+      userId: userId || "",
+      documentId: viewDoc.backendId || viewDoc.id,
       categoryId: selectedCategoryId,
       title: viewDoc.title,
       type: viewDoc.type,
       docUpdatedAt: viewDoc.updatedAt,
-      readAt: timestamp,        // user-facing time
+      readAt: timestamp,
       createdAt: nowIso,
       updatedAt: nowIso,
-      syncStatus: 'pending',    // ready for offline sync engine
+      syncStatus: "pending",
     };
 
     try {
       const localId = await saveDocumentRead(payload);
-      console.log('Document marked as read and saved locally with id:', localId);
+      console.log(
+        "Document marked as read and saved locally with id:",
+        localId,
+      );
 
-      Alert.alert('Marked as read', 'Your read time has been recorded (demo).');
-    } catch (e) {
-      console.log('Failed to save document read', e);
+      setViewDoc(null);
       Alert.alert(
-        'Error',
-        'Could not record the read time on this device. It will still show as read in this session.'
+        "Marked as read",
+        "Your read time has been recorded on this device.",
+      );
+    } catch (e) {
+      console.log("Failed to save document read", e);
+      Alert.alert(
+        "Error",
+        "Could not record the read time on this device. It will still show as read in this session.",
       );
     }
   };
@@ -168,16 +238,16 @@ export default function DocumentsScreen() {
         {/* Top bar with Documents logo + home */}
         <View style={styles.topBar}>
           <Image
-            source={require('../assets/documents-screen.png')}
+            source={require("../assets/documents-screen.png")}
             style={styles.topBarLogo}
             resizeMode="contain"
           />
           <TouchableOpacity
             style={styles.homeButton}
-            onPress={() => router.replace('/home')}
+            onPress={() => router.replace("/home")}
           >
             <Image
-              source={require('../assets/home.png')}
+              source={require("../assets/home.png")}
               style={styles.homeIcon}
             />
           </TouchableOpacity>
@@ -193,7 +263,7 @@ export default function DocumentsScreen() {
           </Text>
 
           <View style={styles.categoryRow}>
-            {DOCUMENT_CATEGORIES.map((cat) => {
+            {documentCategories.map((cat) => {
               const selected = cat.id === selectedCategoryId;
               return (
                 <TouchableOpacity
@@ -224,9 +294,17 @@ export default function DocumentsScreen() {
 
         {/* Document list for selected category */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>{selectedCategory.name} documents</Text>
+          <Text style={styles.cardTitle}>
+            {selectedCategory.name} documents
+          </Text>
 
-          {selectedCategory.documents.length === 0 ? (
+          {loadingDocs ? (
+            <Text style={styles.emptyText}>Loading documents…</Text>
+          ) : documentsError ? (
+            <Text style={styles.emptyText}>{documentsError}</Text>
+          ) : null}
+
+          {loadingDocs ? null : selectedCategory.documents.length === 0 ? (
             <Text style={styles.emptyText}>No documents in this folder.</Text>
           ) : (
             selectedCategory.documents.map((doc) => {
@@ -239,25 +317,24 @@ export default function DocumentsScreen() {
                 >
                   <View style={styles.docIconWrapper}>
                     <Image
-                      source={require('../assets/app-icon.png')}
+                      source={require("../assets/app-icon.png")}
                       style={styles.docTypeIcon}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.docTitle}>{doc.title}</Text>
                     <Text style={styles.docMeta}>
-                      Type: {doc.type} | Updated: {doc.updatedAt}
+                      Type: {doc.type} | Updated:{" "}
+                      {formatDisplayDate(doc.updatedAt)}
                     </Text>
                     {lastRead ? (
-                      <Text style={styles.docRead}>
-                        Last read: {lastRead}
-                      </Text>
+                      <Text style={styles.docRead}>Last read: {lastRead}</Text>
                     ) : (
                       <Text style={styles.docNotRead}>Not read yet</Text>
                     )}
                   </View>
                   <Image
-                    source={require('../assets/trip.png')}
+                    source={require("../assets/trip.png")}
                     style={styles.docOpenIcon}
                   />
                 </TouchableOpacity>
@@ -280,7 +357,8 @@ export default function DocumentsScreen() {
               <>
                 <Text style={styles.modalTitle}>{viewDoc.title}</Text>
                 <Text style={styles.modalMeta}>
-                  Type: {viewDoc.type} | Updated: {viewDoc.updatedAt}
+                  Type: {viewDoc.type} | Updated:{" "}
+                  {formatDisplayDate(viewDoc.updatedAt)}
                 </Text>
 
                 <Text style={styles.modalDescription}>
@@ -288,10 +366,8 @@ export default function DocumentsScreen() {
                 </Text>
 
                 <Text style={styles.modalHint}>
-                  In the final version this will open the full document (PDF /
-                  image / HTML) from the MOAT Document Vault. For now this is a
-                  preview placeholder so we can wire the flows and read
-                  tracking.
+                  This document is now being loaded from the backend mobile
+                  library. The full file open / preview step can be wired next.
                 </Text>
 
                 <View style={styles.modalButtonsRow}>
@@ -325,9 +401,9 @@ const styles = StyleSheet.create({
     backgroundColor: THEME_BG,
   },
   topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 8,
   },
   topBarLogo: {
@@ -343,7 +419,7 @@ const styles = StyleSheet.create({
     height: 32,
   },
   card: {
-    backgroundColor: '#ffffff',
+    backgroundColor: "#ffffff",
     borderRadius: 10,
     padding: 16,
     marginBottom: 16,
@@ -351,37 +427,37 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 4,
   },
   cardSubtitle: {
     fontSize: 12,
-    color: '#666',
+    color: "#666",
     marginBottom: 12,
   },
   emptyText: {
     fontSize: 12,
-    color: '#999',
+    color: "#999",
   },
   // Categories
   categoryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    justifyContent: "space-between",
   },
   categoryButton: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#ccc',
+    borderColor: "#ccc",
     borderRadius: 8,
     paddingVertical: 10,
     paddingHorizontal: 8,
     marginHorizontal: 4,
-    alignItems: 'center',
-    backgroundColor: '#fafafa',
+    alignItems: "center",
+    backgroundColor: "#fafafa",
   },
   categoryButtonSelected: {
     borderColor: THEME_COLOR,
-    backgroundColor: '#e6f9fb',
+    backgroundColor: "#e6f9fb",
   },
   categoryIcon: {
     width: 40,
@@ -390,31 +466,31 @@ const styles = StyleSheet.create({
   },
   categoryText: {
     fontSize: 13,
-    color: '#555',
-    fontWeight: '500',
+    color: "#555",
+    fontWeight: "500",
   },
   categoryTextSelected: {
     color: THEME_COLOR,
   },
   categoryCount: {
     fontSize: 11,
-    color: '#777',
+    color: "#777",
     marginTop: 2,
   },
   // Docs list
   docRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#ddd',
+    borderBottomColor: "#ddd",
   },
   docIconWrapper: {
     width: 32,
     height: 32,
     marginRight: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   docTypeIcon: {
     width: 28,
@@ -423,21 +499,21 @@ const styles = StyleSheet.create({
   },
   docTitle: {
     fontSize: 14,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   docMeta: {
     fontSize: 11,
-    color: '#777',
+    color: "#777",
     marginTop: 2,
   },
   docRead: {
     fontSize: 11,
-    color: '#27ae60',
+    color: "#27ae60",
     marginTop: 2,
   },
   docNotRead: {
     fontSize: 11,
-    color: '#999',
+    color: "#999",
     marginTop: 2,
   },
   docOpenIcon: {
@@ -448,39 +524,39 @@ const styles = StyleSheet.create({
   // Modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: 'center',
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "center",
     paddingHorizontal: 24,
   },
   modalCard: {
-    backgroundColor: '#fff',
+    backgroundColor: "#fff",
     borderRadius: 10,
     padding: 20,
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     marginBottom: 4,
-    textAlign: 'center',
+    textAlign: "center",
   },
   modalMeta: {
     fontSize: 12,
-    color: '#666',
+    color: "#666",
     marginBottom: 12,
-    textAlign: 'center',
+    textAlign: "center",
   },
   modalDescription: {
     fontSize: 13,
-    color: '#333',
+    color: "#333",
     marginBottom: 12,
   },
   modalHint: {
     fontSize: 11,
-    color: '#777',
+    color: "#777",
     marginBottom: 16,
   },
   modalButtonsRow: {
-    flexDirection: 'row',
+    flexDirection: "row",
     marginTop: 4,
   },
   modalButton: {
@@ -491,25 +567,25 @@ const styles = StyleSheet.create({
     backgroundColor: THEME_COLOR,
     paddingVertical: 10,
     borderRadius: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   primaryButtonText: {
-    color: '#fff',
+    color: "#fff",
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   secondaryButton: {
     borderWidth: 1,
     borderColor: THEME_COLOR,
     paddingVertical: 10,
     borderRadius: 6,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   secondaryButtonText: {
     color: THEME_COLOR,
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
   },
 });

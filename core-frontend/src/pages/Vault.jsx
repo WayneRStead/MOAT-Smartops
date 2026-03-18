@@ -2,8 +2,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, fileUrl } from "../lib/api";
 
+const MOBILE_FOLDER_OPTIONS = ["policies", "safety", "general"];
+const VAULT_CHANNEL_OPTIONS = ["mobile-library", "vault-only"];
+
 /** --- id helper (handles _id or id) --- **/
-const docIdOf = (d) => (d && (d._id || d.id)) ? String(d._id || d.id) : "";
+const docIdOf = (d) => (d && (d._id || d.id) ? String(d._id || d.id) : "");
 
 /** --- filetype helpers --- **/
 function guessMimeFromName(name = "") {
@@ -48,7 +51,11 @@ function isTextLike(mime = "") {
 
 /** --- small UI helpers --- **/
 function TagOrDash({ value }) {
-  return value?.length ? value.join(", ") : <span className="text-gray-500">—</span>;
+  return value?.length ? (
+    value.join(", ")
+  ) : (
+    <span className="text-gray-500">—</span>
+  );
 }
 function Dash({ value }) {
   return value ? value : <span className="text-gray-500">—</span>;
@@ -75,7 +82,9 @@ function Modal({ open, onClose, children, title, width = 760 }) {
       >
         <div className="flex items-center justify-between p-4 border-b">
           <h3 className="text-lg font-semibold m-0">{title}</h3>
-          <button className="text-xl" onClick={onClose} aria-label="Close">✕</button>
+          <button className="text-xl" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
         </div>
         <div className="p-4">{children}</div>
       </div>
@@ -94,13 +103,20 @@ export default function Vault() {
 
   // create modal
   const [showCreate, setShowCreate] = useState(false);
-  const [creating, setCreating] = useState({ title: "", folder: "", tags: "" });
+  const [creating, setCreating] = useState({
+    title: "",
+    channel: "vault-only",
+    folder: "",
+    tags: "",
+  });
   const [createFile, setCreateFile] = useState(null);
   const [createSaving, setCreateSaving] = useState(false);
 
   // edit modal
   const [editDoc, setEditDoc] = useState(null);
   const [editTitle, setEditTitle] = useState("");
+  const [editChannel, setEditChannel] = useState("vault-only");
+  const [editFolder, setEditFolder] = useState("");
   const [editFile, setEditFile] = useState(null);
   const [editSaving, setEditSaving] = useState(false);
 
@@ -108,7 +124,7 @@ export default function Vault() {
   const [previewDoc, setPreviewDoc] = useState(null); // a full doc row
   const [pvLoading, setPvLoading] = useState(false);
   const [pvErr, setPvErr] = useState("");
-  const [pvUrl, setPvUrl] = useState("");   // object URL for media/pdf
+  const [pvUrl, setPvUrl] = useState(""); // object URL for media/pdf
   const [pvText, setPvText] = useState(""); // text preview (for text/*)
 
   // debounce search
@@ -118,25 +134,31 @@ export default function Vault() {
   }, [q]);
 
   async function load() {
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
       const params = {};
       if (qDeb) params.q = qDeb;
       if (includeDeleted) params.includeDeleted = 1;
-      const { data } = await api.get("/documents", { params });
+      const { data } = awaitps });
       setDocs(data || []);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [includeDeleted, qDeb]);
+  useEffect(() => {
+    load(); /* eslint-disable-next-line */
+  }, [includeDeleted, qDeb]);
 
   async function doRename(id, title) {
     const safeId = String(id || "");
     if (!safeId) return;
     try {
-      const { data: updated } = await api.put(`/documents/${encodeURIComponent(safeId)}`, { title });
+      const { data: updated } = await api.put(
+        `/documents/${encodeURIComponent(safeId)}`,
+        { title },
+      );
       setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
       setInfo("Title updated.");
     } catch (e) {
@@ -150,9 +172,13 @@ export default function Vault() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const { data: updated } = await api.post(`/documents/${encodeURIComponent(safeId)}/upload`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      const { data: updated } = await api.post(
+        `/documents/${encodeURIComponent(safeId)}/upload`,
+        fd,
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+        },
+      );
       setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? updated : d)));
       setInfo("Version uploaded.");
       return updated;
@@ -164,12 +190,25 @@ export default function Vault() {
 
   async function doCreate(e) {
     e.preventDefault();
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     setCreateSaving(true);
+
+    const safeChannel =
+      creating.channel === "mobile-library" ? "mobile-library" : "vault-only";
+
+    const safeFolder =
+      safeChannel === "mobile-library" &&
+      MOBILE_FOLDER_OPTIONS.includes(
+        (creating.folder || "").trim().toLowerCase(),
+      )
+        ? (creating.folder || "").trim().toLowerCase()
+        : "";
 
     const body = {
       title: (creating.title || "").trim(),
-      folder: (creating.folder || "").trim(),
+      channel: safeChannel,
+      folder: safeFolder,
       tags: (creating.tags || "")
         .split(",")
         .map((s) => s.trim())
@@ -178,6 +217,13 @@ export default function Vault() {
     if (!body.title) {
       setCreateSaving(false);
       return setErr("Title required");
+    }
+
+    if (body.channel === "mobile-library" && !body.folder) {
+      setCreateSaving(false);
+      return setErr(
+        "Mobile library documents must use folder: policies, safety, or general.",
+      );
     }
 
     try {
@@ -193,10 +239,19 @@ export default function Vault() {
 
       // 3) Update list + reset form
       setDocs((prev) => [finalDoc, ...prev]);
-      setCreating({ title: "", folder: "", tags: "" });
+      setCreating({
+        title: "",
+        channel: "vault-only",
+        folder: "",
+        tags: "",
+      });
       setCreateFile(null);
 
-      setInfo(createFile ? "Document created and file uploaded." : "Document created.");
+      setInfo(
+        createFile
+          ? "Document created and file uploaded."
+          : "Document created.",
+      );
       setShowCreate(false);
     } catch (e2) {
       setErr(e2?.response?.data?.error || String(e2));
@@ -221,9 +276,16 @@ export default function Vault() {
   async function doHardDelete(id) {
     const safeId = String(id || "");
     if (!safeId) return;
-    if (!confirm("Permanently delete this document and all its versions? This cannot be undone.")) return;
+    if (
+      !confirm(
+        "Permanently delete this document and all its versions? This cannot be undone.",
+      )
+    )
+      return;
     try {
-      await api.delete(`/documents/${encodeURIComponent(safeId)}`, { params: { hard: 1 } });
+      await api.delete(`/documents/${encodeURIComponent(safeId)}`, {
+        params: { hard: 1 },
+      });
       await load();
       setInfo("Document permanently deleted.");
     } catch (e) {
@@ -235,8 +297,12 @@ export default function Vault() {
     const safeId = String(id || "");
     if (!safeId) return;
     try {
-      const { data: restored } = await api.patch(`/documents/${encodeURIComponent(safeId)}/restore`);
-      setDocs((prev) => prev.map((d) => (docIdOf(d) === safeId ? restored : d)));
+      const { data: restored } = await api.patch(
+        `/documents/${encodeURIComponent(safeId)}/restore`,
+      );
+      setDocs((prev) =>
+        prev.map((d) => (docIdOf(d) === safeId ? restored : d)),
+      );
       setInfo("Document restored.");
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
@@ -249,7 +315,9 @@ export default function Vault() {
     setPvErr("");
     setPvText("");
     if (pvUrl) {
-      try { URL.revokeObjectURL(pvUrl); } catch {}
+      try {
+        URL.revokeObjectURL(pvUrl);
+      } catch {}
     }
     setPvUrl("");
 
@@ -264,7 +332,9 @@ export default function Vault() {
     }
 
     if (!isPreviewable(declaredMime)) {
-      setPvErr("Preview for this file type isn’t supported. Use Download in the preview.");
+      setPvErr(
+        "Preview for this file type isn’t supported. Use Download in the preview.",
+      );
       return;
     }
 
@@ -272,7 +342,10 @@ export default function Vault() {
     try {
       const res = await fetch(absUrl, { credentials: "include" });
       if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
-      const ct = res.headers.get("content-type") || declaredMime || "application/octet-stream";
+      const ct =
+        res.headers.get("content-type") ||
+        declaredMime ||
+        "application/octet-stream";
       if (isTextLike(ct)) {
         const text = await res.text();
         setPvText(text);
@@ -290,7 +363,9 @@ export default function Vault() {
 
   function closePreview() {
     if (pvUrl) {
-      try { URL.revokeObjectURL(pvUrl); } catch {}
+      try {
+        URL.revokeObjectURL(pvUrl);
+      } catch {}
     }
     setPreviewDoc(null);
     setPvUrl("");
@@ -307,38 +382,81 @@ export default function Vault() {
   }, [previewDoc]);
 
   const isPdf = useMemo(() => previewMime === "application/pdf", [previewMime]);
-  const isImage = useMemo(() => previewMime.startsWith("image/"), [previewMime]);
-  const isVideo = useMemo(() => previewMime.startsWith("video/"), [previewMime]);
-  const isAudio = useMemo(() => previewMime.startsWith("audio/"), [previewMime]);
+  const isImage = useMemo(
+    () => previewMime.startsWith("image/"),
+    [previewMime],
+  );
+  const isVideo = useMemo(
+    () => previewMime.startsWith("video/"),
+    [previewMime],
+  );
+  const isAudio = useMemo(
+    () => previewMime.startsWith("audio/"),
+    [previewMime],
+  );
   const textLike = useMemo(() => isTextLike(previewMime), [previewMime]);
 
   // ---------- Edit modal helpers ----------
   function openEditModal(doc) {
     setEditDoc(doc);
     setEditTitle(doc?.title || "");
+    setEditChannel(doc?.channel || "vault-only");
+    setEditFolder(doc?.folder || "");
     setEditFile(null);
     setEditSaving(false);
   }
   function closeEditModal() {
     setEditDoc(null);
     setEditTitle("");
+    setEditChannel("vault-only");
+    setEditFolder("");
     setEditFile(null);
     setEditSaving(false);
   }
   async function saveEditModal() {
     if (!editDoc) return;
     setEditSaving(true);
-    setErr(""); setInfo("");
+    setErr("");
+    setInfo("");
     try {
       const id = docIdOf(editDoc);
 
-      // rename if changed
-      const trimmed = (editTitle || "").trim();
-      if (trimmed && trimmed !== (editDoc.title || "")) {
-        await doRename(id, trimmed);
+      const trimmedTitle = (editTitle || "").trim();
+      const safeChannel =
+        editChannel === "mobile-library" ? "mobile-library" : "vault-only";
+
+      const safeFolder =
+        safeChannel === "mobile-library" &&
+        MOBILE_FOLDER_OPTIONS.includes((editFolder || "").trim().toLowerCase())
+          ? (editFolder || "").trim().toLowerCase()
+          : "";
+
+      if (safeChannel === "mobile-library" && !safeFolder) {
+        throw new Error(
+          "Mobile library documents must use folder: policies, safety, or general.",
+        );
       }
 
-      // upload if selected
+      const metaChanged =
+        trimmedTitle !== (editDoc.title || "") ||
+        safeChannel !== (editDoc.channel || "vault-only") ||
+        safeFolder !== (editDoc.folder || "");
+
+      if (metaChanged) {
+        const { data: updated } = await api.put(
+          `/documents/${encodeURIComponent(id)}`,
+          {
+            title: trimmedTitle,
+            channel: safeChannel,
+            folder: safeFolder,
+          },
+        );
+
+        setDocs((prev) => prev.map((d) => (docIdOf(d) === id ? updated : d)));
+        setEditDoc(updated);
+        setInfo("Document updated.");
+      }
+
       if (editFile) {
         await doUploadVersion(id, editFile);
       }
@@ -389,9 +507,12 @@ export default function Vault() {
               <th style={{ width: 320 }}>Title</th>
               <th style={{ width: 360 }}>Latest</th>
               <th>Tags</th>
+              <th>Channel</th>
               <th>Folder</th>
               <th>Updated</th>
-              <th className="text-right" style={{ width: 220 }}>Actions</th>
+              <th className="text-right" style={{ width: 220 }}>
+                Actions
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -400,19 +521,27 @@ export default function Vault() {
                 const id = docIdOf(d);
                 const latestAbs = d?.latest?.url ? fileUrl(d.latest.url) : "";
                 return (
-                  <tr key={id || `row-${idx}`} className={d.deletedAt ? "opacity-60" : ""}>
+                  <tr
+                    key={id || `row-${idx}`}
+                    className={d.deletedAt ? "opacity-60" : ""}
+                  >
                     <td className="align-top">
                       <input
                         className="border p-2 w-full"
                         value={d.title || ""}
                         onChange={(e) =>
                           setDocs((prev) =>
-                            prev.map((x) => (docIdOf(x) === id ? { ...x, title: e.target.value } : x))
+                            prev.map((x) =>
+                              docIdOf(x) === id
+                                ? { ...x, title: e.target.value }
+                                : x,
+                            ),
                           )
                         }
                         onBlur={(e) => {
                           const newTitle = (e.target.value || "").trim();
-                          if (id && newTitle && newTitle !== d.title) doRename(id, newTitle);
+                          if (id && newTitle && newTitle !== d.title)
+                            doRename(id, newTitle);
                         }}
                       />
                       {d.deletedAt && (
@@ -440,10 +569,17 @@ export default function Vault() {
                       ) : (
                         <span className="text-gray-500">—</span>
                       )}
-                     </td>
+                    </td>
 
-                    <td className="align-top"><TagOrDash value={d.tags} /></td>
-                    <td className="align-top"><Dash value={d.folder} /></td>
+                    <td className="align-top">
+                      <TagOrDash value={d.tags} />
+                    </td>
+                    <td className="align-top">
+                      <Dash value={d.channel} />
+                    </td>
+                    <td className="align-top">
+                      <Dash value={d.folder} />
+                    </td>
                     <td className="align-top">
                       {new Date(d.updatedAt || d.createdAt).toLocaleString()}
                     </td>
@@ -451,17 +587,36 @@ export default function Vault() {
                     <td className="text-right align-top">
                       {!d.deletedAt ? (
                         <div className="inline-flex gap-2">
-                          <button className="btn btn-sm" onClick={() => openEditModal(d)}>Edit</button>
-                          <button className="btn btn-sm" onClick={() => doDelete(id)}>Delete</button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => openEditModal(d)}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => doDelete(id)}
+                          >
+                            Delete
+                          </button>
                         </div>
                       ) : (
                         <div className="inline-flex flex-col gap-2 items-end">
-                          <button className="btn btn-sm" onClick={() => doRestore(id)}>Restore</button>
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => doRestore(id)}
+                          >
+                            Restore
+                          </button>
                           <button
                             className="btn btn-sm"
                             onClick={() => doHardDelete(id)}
                             title="Admin only"
-                            style={{ background: "#b91c1c", color: "white", border: "1px solid #7f1d1d" }}
+                            style={{
+                              background: "#b91c1c",
+                              color: "white",
+                              border: "1px solid #7f1d1d",
+                            }}
                           >
                             Hard Delete
                           </button>
@@ -473,7 +628,7 @@ export default function Vault() {
               })
             ) : (
               <tr>
-                <td className="p-4 text-gray-600" colSpan={6}>
+                <td className="p-4 text-gray-600" colSpan={7}>
                   No documents yet.
                 </td>
               </tr>
@@ -483,32 +638,80 @@ export default function Vault() {
       </div>
 
       {/* Create Modal */}
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="New Document">
+      <Modal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        title="New Document"
+      >
         <form onSubmit={doCreate} className="grid md:grid-cols-2 gap-3">
           <label className="text-sm md:col-span-2">
             Title
             <input
               className="border p-2 w-full"
               value={creating.title}
-              onChange={(e) => setCreating({ ...creating, title: e.target.value })}
+              onChange={(e) =>
+                setCreating({ ...creating, title: e.target.value })
+              }
               required
             />
           </label>
           <label className="text-sm">
-            Folder
-            <input
+            Channel
+            <select
               className="border p-2 w-full"
-              value={creating.folder}
-              onChange={(e) => setCreating({ ...creating, folder: e.target.value })}
-              placeholder="Policies/Health & Safety"
-            />
+              value={creating.channel}
+              onChange={(e) =>
+                setCreating((prev) => ({
+                  ...prev,
+                  channel: e.target.value,
+                  folder:
+                    e.target.value === "mobile-library"
+                      ? prev.folder || "policies"
+                      : "",
+                }))
+              }
+            >
+              <option value="vault-only">vault-only</option>
+              <option value="mobile-library">mobile-library</option>
+            </select>
+            <div className="text-xs text-gray-600 mt-1">
+              Use mobile-library only for documents that must appear in the
+              mobile app.
+            </div>
+          </label>
+
+          <label className="text-sm">
+            Folder
+            <select
+              className="border p-2 w-full"
+              value={
+                creating.channel === "mobile-library" ? creating.folder : ""
+              }
+              disabled={creating.channel !== "mobile-library"}
+              onChange={(e) =>
+                setCreating((prev) => ({
+                  ...prev,
+                  folder: e.target.value,
+                }))
+              }
+            >
+              <option value="">— none —</option>
+              <option value="policies">policies</option>
+              <option value="safety">safety</option>
+              <option value="general">general</option>
+            </select>
+            <div className="text-xs text-gray-600 mt-1">
+              Folder is only used when channel = mobile-library.
+            </div>
           </label>
           <label className="text-sm">
             Tags (comma-separated)
             <input
               className="border p-2 w-full"
               value={creating.tags}
-              onChange={(e) => setCreating({ ...creating, tags: e.target.value })}
+              onChange={(e) =>
+                setCreating({ ...creating, tags: e.target.value })
+              }
               placeholder="safety, onboarding"
             />
           </label>
@@ -522,7 +725,8 @@ export default function Vault() {
               onChange={(e) => setCreateFile(e.target.files?.[0] || null)}
             />
             <div className="text-xs text-gray-600 mt-1">
-              If you choose a file here, it will be uploaded immediately after the document is created.
+              If you choose a file here, it will be uploaded immediately after
+              the document is created.
             </div>
           </label>
 
@@ -540,6 +744,12 @@ export default function Vault() {
               onClick={() => {
                 setShowCreate(false);
                 setCreateFile(null);
+                setCreating({
+                  title: "",
+                  channel: "vault-only",
+                  folder: "",
+                  tags: "",
+                });
               }}
               disabled={createSaving}
             >
@@ -562,6 +772,42 @@ export default function Vault() {
                   onChange={(e) => setEditTitle(e.target.value)}
                 />
               </label>
+
+              <label className="text-sm">
+                Channel
+                <select
+                  className="border p-2 w-full"
+                  value={editChannel}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setEditChannel(next);
+                    if (next !== "mobile-library") {
+                      setEditFolder("");
+                    } else if (!editFolder) {
+                      setEditFolder("policies");
+                    }
+                  }}
+                >
+                  <option value="vault-only">vault-only</option>
+                  <option value="mobile-library">mobile-library</option>
+                </select>
+              </label>
+
+              <label className="text-sm">
+                Folder
+                <select
+                  className="border p-2 w-full"
+                  value={editChannel === "mobile-library" ? editFolder : ""}
+                  disabled={editChannel !== "mobile-library"}
+                  onChange={(e) => setEditFolder(e.target.value)}
+                >
+                  <option value="">— none —</option>
+                  <option value="policies">policies</option>
+                  <option value="safety">safety</option>
+                  <option value="general">general</option>
+                </select>
+              </label>
+
               <label className="text-sm md:col-span-2">
                 Upload / Replace file
                 <input
@@ -583,7 +829,10 @@ export default function Vault() {
               >
                 {editSaving ? "Saving…" : "Save"}
               </button>
-              <button className="px-3 py-2 border rounded" onClick={closeEditModal}>
+              <button
+                className="px-3 py-2 border rounded"
+                onClick={closeEditModal}
+              >
                 Cancel
               </button>
 
@@ -636,29 +885,42 @@ export default function Vault() {
             {/* header */}
             <div className="flex items-center justify-between p-3 border-b">
               <div className="min-w-0">
-                <div className="font-medium truncate" title={previewDoc.latest?.filename || previewDoc.title}>
-                  {previewDoc.title || previewDoc.latest?.filename || "Document"}
+                <div
+                  className="font-medium truncate"
+                  title={previewDoc.latest?.filename || previewDoc.title}
+                >
+                  {previewDoc.title ||
+                    previewDoc.latest?.filename ||
+                    "Document"}
                 </div>
-                <div className="text-xs text-gray-600">Type: {previewMime || "unknown"}</div>
+                <div className="text-xs text-gray-600">
+                  Type: {previewMime || "unknown"}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {previewDoc?.latest?.url && (
                   <a
                     className="btn btn-sm"
-                    href={fileUrl(previewDoc.latest.url)}  // ✅ backend origin
+                    href={fileUrl(previewDoc.latest.url)} // ✅ backend origin
                     target="_blank"
                     rel="noreferrer"
                   >
                     Download
                   </a>
                 )}
-                <button className="btn btn-sm" onClick={closePreview}>Close</button>
+                <button className="btn btn-sm" onClick={closePreview}>
+                  Close
+                </button>
               </div>
             </div>
 
             {/* body */}
             <div style={{ flex: 1, overflow: "auto", background: "#f7f7f7" }}>
-              {pvLoading && <div className="p-4 text-gray-700 text-sm">Loading preview…</div>}
+              {pvLoading && (
+                <div className="p-4 text-gray-700 text-sm">
+                  Loading preview…
+                </div>
+              )}
               {pvErr && <div className="p-4 text-red-600 text-sm">{pvErr}</div>}
 
               {!pvLoading && !pvErr && (
@@ -703,7 +965,12 @@ export default function Vault() {
                       <video
                         src={pvUrl}
                         controls
-                        style={{ width: "100%", maxHeight: "75vh", background: "black", borderRadius: 8 }}
+                        style={{
+                          width: "100%",
+                          maxHeight: "75vh",
+                          background: "black",
+                          borderRadius: 8,
+                        }}
                       />
                     </div>
                   )}
@@ -716,13 +983,18 @@ export default function Vault() {
 
                   {isPdf && pvUrl && (
                     <div style={{ height: "75vh" }}>
-                      <iframe title="PDF preview" src={pvUrl} style={{ width: "100%", height: "100%", border: 0 }} />
+                      <iframe
+                        title="PDF preview"
+                        src={pvUrl}
+                        style={{ width: "100%", height: "100%", border: 0 }}
+                      />
                     </div>
                   )}
 
                   {!textLike && !isImage && !isVideo && !isAudio && !isPdf && (
                     <div className="p-4 text-gray-700 text-sm">
-                      Preview not available. Use <b>Download</b> to open the file.
+                      Preview not available. Use <b>Download</b> to open the
+                      file.
                     </div>
                   )}
                 </>
