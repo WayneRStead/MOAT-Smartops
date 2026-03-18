@@ -3,6 +3,9 @@ const mongoose = require("mongoose");
 
 const { Schema, Types } = mongoose;
 
+const MOBILE_FOLDERS = ["policies", "safety", "general"];
+const DOC_CHANNELS = ["mobile-library", "private-user", "vault-only"];
+
 /**
  * Version schema (with legacy field compatibility)
  * Canonical fields: filename, url, fileId, mime, size, uploadedBy, uploadedAt, deletedAt, deletedBy, sha256, thumbUrl
@@ -30,7 +33,7 @@ const VersionSchema = new Schema(
     path: String, // mirror of url
     mimeType: String, // mirror of mime
   },
-  { _id: false, strict: true }
+  { _id: false, strict: true },
 );
 
 // Keep canonical <-> legacy fields in sync
@@ -79,7 +82,7 @@ const LinkSchema = new Schema(
     module: { type: String }, // legacy/canonical alias
     refId: { type: Schema.Types.Mixed, required: true }, // ObjectId or String
   },
-  { _id: false, strict: true }
+  { _id: false, strict: true },
 );
 
 const DocumentSchema = new Schema(
@@ -87,7 +90,21 @@ const DocumentSchema = new Schema(
     orgId: { type: Types.ObjectId, ref: "Org", index: true },
 
     title: { type: String, required: true },
-    folder: { type: String, index: true }, // e.g., "Site A/Contracts"
+
+    channel: {
+      type: String,
+      enum: DOC_CHANNELS,
+      default: "vault-only",
+      index: true,
+    },
+
+    folder: {
+      type: String,
+      enum: [...MOBILE_FOLDERS, ""],
+      default: "",
+      index: true,
+    },
+
     tags: [{ type: String, index: true }],
 
     // Flexible access object (e.g., { visibility: 'org', owners: [...] })
@@ -133,7 +150,7 @@ const DocumentSchema = new Schema(
         return ret;
       },
     },
-  }
+  },
 );
 
 // ---------- Indexes ----------
@@ -156,7 +173,8 @@ function normalizeLink(l) {
   if (!l) return null;
   const out = {
     type: typeof l.type === "string" ? l.type.trim().toLowerCase() : l.type,
-    module: typeof l.module === "string" ? l.module.trim().toLowerCase() : l.module,
+    module:
+      typeof l.module === "string" ? l.module.trim().toLowerCase() : l.module,
     refId: l.refId,
   };
   // keep type/module in sync if one missing
@@ -183,12 +201,30 @@ DocumentSchema.pre("validate", function normalizeFields(next) {
   // Ensure title trimmed
   if (typeof this.title === "string") this.title = this.title.trim();
 
-  // Normalize folder (keep as-is but trim spaces)
-  if (typeof this.folder === "string") this.folder = this.folder.trim();
+  if (typeof this.channel === "string") {
+    this.channel = this.channel.trim().toLowerCase();
+  }
+
+  if (typeof this.folder === "string") {
+    this.folder = this.folder.trim().toLowerCase();
+  }
+
+  if (this.channel === "mobile-library") {
+    if (!MOBILE_FOLDERS.includes(this.folder)) {
+      this.invalidate(
+        "folder",
+        "Mobile library documents must use policies, safety, or general",
+      );
+    }
+  } else {
+    this.folder = "";
+  }
 
   // Normalize/dedupe tags
   if (Array.isArray(this.tags)) {
-    const dedup = Array.from(new Set(this.tags.map(normalizeTag).filter(Boolean)));
+    const dedup = Array.from(
+      new Set(this.tags.map(normalizeTag).filter(Boolean)),
+    );
     this.tags = dedup;
   }
 
@@ -284,7 +320,10 @@ DocumentSchema.methods.restore = function restore(actor) {
 };
 
 // Soft delete a specific version by array index; recompute latest
-DocumentSchema.methods.softDeleteVersion = function softDeleteVersion(index, actor) {
+DocumentSchema.methods.softDeleteVersion = function softDeleteVersion(
+  index,
+  actor,
+) {
   if (!Array.isArray(this.versions)) return this;
   const i = Number(index);
   if (Number.isInteger(i) && i >= 0 && i < this.versions.length) {
@@ -329,13 +368,20 @@ DocumentSchema.methods.addLink = function addLink({ type, module, refId }) {
 };
 
 // Remove a link (by type+refId)
-DocumentSchema.methods.removeLink = function removeLink({ type, module, refId }) {
+DocumentSchema.methods.removeLink = function removeLink({
+  type,
+  module,
+  refId,
+}) {
   const t = (type || module || "").toString().toLowerCase();
   const r = refId != null ? String(refId) : null;
   if (!t || r == null) return this;
-  this.links = (this.links || []).filter((l) => !(String(l.type).toLowerCase() === t && String(l.refId) === r));
+  this.links = (this.links || []).filter(
+    (l) => !(String(l.type).toLowerCase() === t && String(l.refId) === r),
+  );
   this.updatedAt = new Date();
   return this;
 };
 
-module.exports = mongoose.models.Document || mongoose.model("Document", DocumentSchema);
+module.exports =
+  mongoose.models.Document || mongoose.model("Document", DocumentSchema);
