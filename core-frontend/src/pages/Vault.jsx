@@ -4,10 +4,8 @@ import { api, fileUrl } from "../lib/api";
 const MOBILE_FOLDER_OPTIONS = ["policies", "safety", "general"];
 const VAULT_CHANNEL_OPTIONS = ["mobile-library", "vault-only"];
 
-/** --- id helper (handles _id or id) --- **/
 const docIdOf = (d) => (d && (d._id || d.id) ? String(d._id || d.id) : "");
 
-/** --- filetype helpers --- **/
 function guessMimeFromName(name = "") {
   const ext = String(name).toLowerCase().split(".").pop();
   const map = {
@@ -34,7 +32,7 @@ function guessMimeFromName(name = "") {
 }
 
 function isPreviewable(mime = "") {
-  const m = mime.toLowerCase();
+  const m = String(mime || "").toLowerCase();
   return (
     m.startsWith("image/") ||
     m.startsWith("video/") ||
@@ -46,11 +44,27 @@ function isPreviewable(mime = "") {
 }
 
 function isTextLike(mime = "") {
-  const m = mime.toLowerCase();
+  const m = String(mime || "").toLowerCase();
   return m.startsWith("text/") || /\/(json|csv)$/.test(m);
 }
 
-/** --- small UI helpers --- **/
+function normalizeChannel(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase() === "mobile-library"
+    ? "mobile-library"
+    : "vault-only";
+}
+
+function normalizeFolder(v, channel) {
+  const safeChannel = normalizeChannel(channel);
+  const safeFolder = String(v || "")
+    .trim()
+    .toLowerCase();
+  if (safeChannel !== "mobile-library") return "";
+  return MOBILE_FOLDER_OPTIONS.includes(safeFolder) ? safeFolder : "";
+}
+
 function TagOrDash({ value }) {
   return value?.length ? (
     value.join(", ")
@@ -63,7 +77,6 @@ function Dash({ value }) {
   return value ? value : <span className="text-gray-500">—</span>;
 }
 
-/* ---------- Small, shared Modal ---------- */
 function Modal({ open, onClose, children, title, width = 760 }) {
   if (!open) return null;
 
@@ -109,7 +122,6 @@ export default function Vault() {
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
 
-  // create modal
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState({
     title: "",
@@ -120,7 +132,6 @@ export default function Vault() {
   const [createFile, setCreateFile] = useState(null);
   const [createSaving, setCreateSaving] = useState(false);
 
-  // edit modal
   const [editDoc, setEditDoc] = useState(null);
   const [editTitle, setEditTitle] = useState("");
   const [editChannel, setEditChannel] = useState("vault-only");
@@ -128,7 +139,6 @@ export default function Vault() {
   const [editFile, setEditFile] = useState(null);
   const [editSaving, setEditSaving] = useState(false);
 
-  // preview modal state
   const [previewDoc, setPreviewDoc] = useState(null);
   const [pvLoading, setPvLoading] = useState(false);
   const [pvErr, setPvErr] = useState("");
@@ -143,14 +153,12 @@ export default function Vault() {
   async function load() {
     setErr("");
     setInfo("");
-
     try {
       const params = {};
       if (qDeb) params.q = qDeb;
       if (includeDeleted) params.includeDeleted = 1;
-
       const { data } = await api.get("/documents", { params });
-      setDocs(data || []);
+      setDocs(Array.isArray(data) ? data : []);
     } catch (e) {
       setErr(e?.response?.data?.error || String(e));
     }
@@ -208,22 +216,14 @@ export default function Vault() {
     setInfo("");
     setCreateSaving(true);
 
-    const safeChannel =
-      creating.channel === "mobile-library" ? "mobile-library" : "vault-only";
-
-    const safeFolder =
-      safeChannel === "mobile-library" &&
-      MOBILE_FOLDER_OPTIONS.includes(
-        (creating.folder || "").trim().toLowerCase(),
-      )
-        ? (creating.folder || "").trim().toLowerCase()
-        : "";
+    const safeChannel = normalizeChannel(creating.channel);
+    const safeFolder = normalizeFolder(creating.folder, safeChannel);
 
     const body = {
-      title: (creating.title || "").trim(),
+      title: String(creating.title || "").trim(),
       channel: safeChannel,
       folder: safeFolder,
-      tags: (creating.tags || "")
+      tags: String(creating.tags || "")
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
@@ -231,21 +231,22 @@ export default function Vault() {
 
     if (!body.title) {
       setCreateSaving(false);
-      return setErr("Title required");
+      setErr("Title required");
+      return;
     }
 
     if (body.channel === "mobile-library" && !body.folder) {
       setCreateSaving(false);
-      return setErr(
+      setErr(
         "Mobile library documents must use folder: policies, safety, or general.",
       );
+      return;
     }
 
     try {
       const { data: doc } = await api.post("/documents", body);
 
       let finalDoc = doc;
-
       if (createFile) {
         finalDoc = await doUploadVersion(docIdOf(doc), createFile);
       }
@@ -258,15 +259,15 @@ export default function Vault() {
         tags: "",
       });
       setCreateFile(null);
+      setShowCreate(false);
 
       setInfo(
         createFile
           ? "Document created and file uploaded."
           : "Document created.",
       );
-      setShowCreate(false);
-    } catch (e2) {
-      setErr(e2?.response?.data?.error || String(e2));
+    } catch (e) {
+      setErr(e?.response?.data?.error || String(e));
     } finally {
       setCreateSaving(false);
     }
@@ -335,7 +336,6 @@ export default function Vault() {
         URL.revokeObjectURL(pvUrl);
       } catch {}
     }
-
     setPvUrl("");
 
     const rawUrl = doc?.latest?.url;
@@ -356,7 +356,6 @@ export default function Vault() {
     }
 
     setPvLoading(true);
-
     try {
       const res = await fetch(absUrl, { credentials: "include" });
       if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
@@ -387,7 +386,6 @@ export default function Vault() {
         URL.revokeObjectURL(pvUrl);
       } catch {}
     }
-
     setPreviewDoc(null);
     setPvUrl("");
     setPvText("");
@@ -418,10 +416,15 @@ export default function Vault() {
   const textLike = useMemo(() => isTextLike(previewMime), [previewMime]);
 
   function openEditModal(doc) {
+    const currentChannel = normalizeChannel(doc?.channel || "vault-only");
+    const currentFolder = normalizeFolder(doc?.folder || "", currentChannel);
+
     setEditDoc(doc);
     setEditTitle(doc?.title || "");
-    setEditChannel(doc?.channel || "vault-only");
-    setEditFolder(doc?.folder || "");
+    setEditChannel(currentChannel);
+    setEditFolder(
+      currentChannel === "mobile-library" ? currentFolder || "policies" : "",
+    );
     setEditFile(null);
     setEditSaving(false);
   }
@@ -444,15 +447,13 @@ export default function Vault() {
 
     try {
       const id = docIdOf(editDoc);
-      const trimmedTitle = (editTitle || "").trim();
-      const safeChannel =
-        editChannel === "mobile-library" ? "mobile-library" : "vault-only";
+      const trimmedTitle = String(editTitle || "").trim();
+      const safeChannel = normalizeChannel(editChannel);
+      const safeFolder = normalizeFolder(editFolder, safeChannel);
 
-      const safeFolder =
-        safeChannel === "mobile-library" &&
-        MOBILE_FOLDER_OPTIONS.includes((editFolder || "").trim().toLowerCase())
-          ? (editFolder || "").trim().toLowerCase()
-          : "";
+      if (!trimmedTitle) {
+        throw new Error("Title required");
+      }
 
       if (safeChannel === "mobile-library" && !safeFolder) {
         throw new Error(
@@ -460,31 +461,24 @@ export default function Vault() {
         );
       }
 
-      const metaChanged =
-        trimmedTitle !== (editDoc.title || "") ||
-        safeChannel !== (editDoc.channel || "vault-only") ||
-        safeFolder !== (editDoc.folder || "");
+      const { data: updated } = await api.put(
+        `/documents/${encodeURIComponent(id)}`,
+        {
+          title: trimmedTitle,
+          channel: safeChannel,
+          folder: safeFolder,
+        },
+      );
 
-      if (metaChanged) {
-        const { data: updated } = await api.put(
-          `/documents/${encodeURIComponent(id)}`,
-          {
-            title: trimmedTitle,
-            channel: safeChannel,
-            folder: safeFolder,
-          },
-        );
-
-        setDocs((prev) => prev.map((d) => (docIdOf(d) === id ? updated : d)));
-        setEditDoc(updated);
-        setInfo("Document updated.");
-      }
+      setDocs((prev) => prev.map((d) => (docIdOf(d) === id ? updated : d)));
+      setEditDoc(updated);
 
       if (editFile) {
         await doUploadVersion(id, editFile);
       }
 
       closeEditModal();
+      setInfo("Document updated.");
     } catch (e) {
       setErr(e?.response?.data?.error || e?.message || String(e));
     } finally {
@@ -560,7 +554,7 @@ export default function Vault() {
                           )
                         }
                         onBlur={(e) => {
-                          const newTitle = (e.target.value || "").trim();
+                          const newTitle = String(e.target.value || "").trim();
                           if (id && newTitle && newTitle !== d.title) {
                             doRename(id, newTitle);
                           }
@@ -671,7 +665,10 @@ export default function Vault() {
               className="border p-2 w-full"
               value={creating.title}
               onChange={(e) =>
-                setCreating({ ...creating, title: e.target.value })
+                setCreating((prev) => ({
+                  ...prev,
+                  title: e.target.value,
+                }))
               }
               required
             />
@@ -683,14 +680,17 @@ export default function Vault() {
               className="border p-2 w-full"
               value={creating.channel}
               onChange={(e) =>
-                setCreating((prev) => ({
-                  ...prev,
-                  channel: e.target.value,
-                  folder:
-                    e.target.value === "mobile-library"
-                      ? prev.folder || "policies"
-                      : "",
-                }))
+                setCreating((prev) => {
+                  const nextChannel = normalizeChannel(e.target.value);
+                  return {
+                    ...prev,
+                    channel: nextChannel,
+                    folder:
+                      nextChannel === "mobile-library"
+                        ? prev.folder || "policies"
+                        : "",
+                  };
+                })
               }
             >
               {VAULT_CHANNEL_OPTIONS.map((opt) => (
@@ -710,7 +710,9 @@ export default function Vault() {
             <select
               className="border p-2 w-full"
               value={
-                creating.channel === "mobile-library" ? creating.folder : ""
+                creating.channel === "mobile-library"
+                  ? creating.folder || "policies"
+                  : ""
               }
               disabled={creating.channel !== "mobile-library"}
               onChange={(e) =>
@@ -732,13 +734,16 @@ export default function Vault() {
             </div>
           </label>
 
-          <label className="text-sm">
+          <label className="text-sm md:col-span-2">
             Tags (comma-separated)
             <input
               className="border p-2 w-full"
               value={creating.tags}
               onChange={(e) =>
-                setCreating({ ...creating, tags: e.target.value })
+                setCreating((prev) => ({
+                  ...prev,
+                  tags: e.target.value,
+                }))
               }
               placeholder="safety, onboarding"
             />
@@ -806,13 +811,13 @@ export default function Vault() {
                   className="border p-2 w-full"
                   value={editChannel}
                   onChange={(e) => {
-                    const next = e.target.value;
-                    setEditChannel(next);
+                    const nextChannel = normalizeChannel(e.target.value);
+                    setEditChannel(nextChannel);
 
-                    if (next !== "mobile-library") {
+                    if (nextChannel === "mobile-library") {
+                      setEditFolder((prev) => prev || "policies");
+                    } else {
                       setEditFolder("");
-                    } else if (!editFolder) {
-                      setEditFolder("policies");
                     }
                   }}
                 >
@@ -828,7 +833,11 @@ export default function Vault() {
                 Folder
                 <select
                   className="border p-2 w-full"
-                  value={editChannel === "mobile-library" ? editFolder : ""}
+                  value={
+                    editChannel === "mobile-library"
+                      ? editFolder || "policies"
+                      : ""
+                  }
                   disabled={editChannel !== "mobile-library"}
                   onChange={(e) => setEditFolder(e.target.value)}
                 >
