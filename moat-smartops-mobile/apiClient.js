@@ -142,6 +142,10 @@ export async function apiPostForm(path, formData) {
   return parseResponse(res);
 }
 
+export async function fetchMobileLibraryDocuments() {
+  return apiGet("/api/documents/mobile/library");
+}
+
 // Fetch backend user profile and cache it locally
 export async function refreshCachedMe() {
   try {

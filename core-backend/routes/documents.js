@@ -59,12 +59,15 @@ function normalizeLinkInput(body = {}) {
   const type = (body.type || body.module || "").trim();
   const ref = String(body.refId || "").trim();
   if (!type || !ref) return { error: "type and refId required" };
-  if (!isValidObjectId(ref)) return { error: "refId must be a 24-hex ObjectId" };
+  if (!isValidObjectId(ref))
+    return { error: "refId must be a 24-hex ObjectId" };
   return { type, refId: new mongoose.Types.ObjectId(ref) };
 }
 
 function stripUndef(obj) {
-  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined),
+  );
 }
 
 function toObjectIdOrNull(id) {
@@ -73,6 +76,24 @@ function toObjectIdOrNull(id) {
   } catch {
     return null;
   }
+}
+
+const MOBILE_FOLDERS = new Set(["policies", "safety", "general"]);
+const DOC_CHANNELS = new Set(["mobile-library", "private-user", "vault-only"]);
+
+function normalizeDocChannel(v, fallback = "vault-only") {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+  return DOC_CHANNELS.has(s) ? s : fallback;
+}
+
+function normalizeDocFolder(v, channel = "vault-only") {
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+  if (channel !== "mobile-library") return "";
+  return MOBILE_FOLDERS.has(s) ? s : "";
 }
 
 /* ------------------------------ GridFS (Vault) ------------------------------ */
@@ -86,7 +107,10 @@ function toObjectIdOrNull(id) {
  */
 function getBucket() {
   const db = mongoose.connection?.db;
-  if (!db) throw new Error("MongoDB connection not ready (mongoose.connection.db missing).");
+  if (!db)
+    throw new Error(
+      "MongoDB connection not ready (mongoose.connection.db missing).",
+    );
   return new mongoose.mongo.GridFSBucket(db, { bucketName: "documents" });
 }
 
@@ -99,7 +123,10 @@ async function saveFileToGridFS(req, file, extraMeta = {}) {
   if (!file) throw new Error("No file provided");
   const bucket = getBucket();
 
-  const safeName = String(file.originalname || "file").replace(/[^\w.-]+/g, "_");
+  const safeName = String(file.originalname || "file").replace(
+    /[^\w.-]+/g,
+    "_",
+  );
   const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
 
   const uploadStream = bucket.openUploadStream(filename, {
@@ -109,7 +136,10 @@ async function saveFileToGridFS(req, file, extraMeta = {}) {
       mimetype: file.mimetype,
       size: file.size,
       orgId: req.user?.orgId ? String(req.user.orgId) : undefined,
-      uploadedBy: req.user?.sub || req.user?._id ? String(req.user.sub || req.user._id) : undefined,
+      uploadedBy:
+        req.user?.sub || req.user?._id
+          ? String(req.user.sub || req.user._id)
+          : undefined,
       ...extraMeta,
     }),
   });
@@ -155,7 +185,8 @@ router.get("/files/:fileId", requireAuth, async (req, res, next) => {
 
     const bucket = getBucket();
     const files = await bucket.find({ _id: fileId }).limit(1).toArray();
-    if (!files?.length) return res.status(404).json({ error: "File not found" });
+    if (!files?.length)
+      return res.status(404).json({ error: "File not found" });
 
     const f = files[0];
     res.setHeader("Content-Type", f.contentType || "application/octet-stream");
@@ -163,7 +194,10 @@ router.get("/files/:fileId", requireAuth, async (req, res, next) => {
 
     // Optional: suggest suggest filename
     if (f.filename) {
-      res.setHeader("Content-Disposition", `inline; filename="${String(f.filename).replace(/"/g, "")}"`);
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${String(f.filename).replace(/"/g, "")}"`,
+      );
     }
 
     const dl = bucket.openDownloadStream(fileId);
@@ -181,7 +215,18 @@ router.get("/files/:fileId", requireAuth, async (req, res, next) => {
  */
 router.get("/", requireAuth, async (req, res, next) => {
   try {
-    const { q, tag, folder, linkedTo, module, uploader, from, to, includeDeleted } = req.query;
+    const {
+      q,
+      tag,
+      folder,
+      linkedTo,
+      module,
+      uploader,
+      from,
+      to,
+      includeDeleted,
+      channel,
+    } = req.query;
 
     const find = {
       ...orgScope(req.user?.orgId),
@@ -199,7 +244,8 @@ router.get("/", requireAuth, async (req, res, next) => {
     }
 
     if (tag) find.tags = tag;
-    if (folder) find.folder = folder;
+    if (folder) find.folder = String(folder).trim().toLowerCase();
+    if (channel) find.channel = normalizeDocChannel(channel);
     if (uploader) find["latest.uploadedBy"] = uploader;
     if (from || to) {
       find.createdAt = {
@@ -210,7 +256,10 @@ router.get("/", requireAuth, async (req, res, next) => {
 
     // linking filters (supports links.type or links.module)
     if (module) {
-      find.$or = (find.$or || []).concat([{ "links.type": module }, { "links.module": module }]);
+      find.$or = (find.$or || []).concat([
+        { "links.type": module },
+        { "links.module": module },
+      ]);
     }
     if (linkedTo) {
       const [type, rawId] = String(linkedTo).split(":");
@@ -220,13 +269,13 @@ router.get("/", requireAuth, async (req, res, next) => {
           const oid = new mongoose.Types.ObjectId(rawId);
           clauses.push(
             { links: { $elemMatch: { type, refId: oid } } },
-            { links: { $elemMatch: { module: type, refId: oid } } }
+            { links: { $elemMatch: { module: type, refId: oid } } },
           );
         }
         // legacy string refId support
         clauses.push(
           { links: { $elemMatch: { type, refId: rawId } } },
-          { links: { $elemMatch: { module: type, refId: rawId } } }
+          { links: { $elemMatch: { module: type, refId: rawId } } },
         );
         (find.$and ||= []).push({ $or: clauses });
       }
@@ -241,14 +290,58 @@ router.get("/", requireAuth, async (req, res, next) => {
 
 /* ---------------------------------- READ ------------------------------------ */
 /** GET /documents/:id */
+router.get("/mobile/library", requireAuth, async (req, res) => {
+  try {
+    const docs = await Document.find({
+      ...orgScope(req.user?.orgId),
+      deletedAt: { $exists: false },
+      channel: "mobile-library",
+      folder: { $in: ["policies", "safety", "general"] },
+    })
+      .sort({ folder: 1, updatedAt: -1 })
+      .lean();
+
+    const safe = docs
+      .filter((d) => canReadDoc(req.user, d))
+      .map((d) => ({
+        _id: d._id,
+        id: d.id || String(d._id),
+        title: d.title || "",
+        channel: d.channel || "mobile-library",
+        folder: d.folder || "",
+        tags: Array.isArray(d.tags) ? d.tags : [],
+        updatedAt: d.updatedAt || d.createdAt || null,
+        latest: d.latest
+          ? {
+              filename: d.latest.filename || "",
+              url: d.latest.url || "",
+              mime: d.latest.mime || d.latest.mimeType || "",
+              size: d.latest.size || 0,
+              uploadedAt: d.latest.uploadedAt || null,
+            }
+          : null,
+      }));
+
+    res.json(safe);
+  } catch (e) {
+    console.error("GET /documents/mobile/library failed:", e);
+    res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 router.get("/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) }).lean();
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    }).lean();
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canReadDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canReadDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     res.json(doc);
   } catch (e) {
@@ -262,14 +355,20 @@ router.get("/:id", requireAuth, async (req, res) => {
 router.get("/:id/file", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) }).lean();
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    }).lean();
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canReadDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canReadDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     const latest = doc.latest || computeLatest(doc);
-    if (!latest?.url) return res.status(404).json({ error: "No file for this document" });
+    if (!latest?.url)
+      return res.status(404).json({ error: "No file for this document" });
 
     return res.redirect(latest.url);
   } catch (e) {
@@ -282,8 +381,25 @@ router.get("/:id/file", requireAuth, async (req, res) => {
 /** POST /documents */
 router.post("/", requireAuth, async (req, res, next) => {
   try {
-    const { title, folder = "", tags = [], links = [], access } = req.body || {};
+    const {
+      title,
+      folder = "",
+      channel = "vault-only",
+      tags = [],
+      links = [],
+      access,
+    } = req.body || {};
     if (!title) return res.status(400).json({ error: "title required" });
+
+    const safeChannel = normalizeDocChannel(channel, "vault-only");
+    const safeFolder = normalizeDocFolder(folder, safeChannel);
+
+    if (safeChannel === "mobile-library" && !safeFolder) {
+      return res.status(400).json({
+        error:
+          "Mobile library documents must use folder policies, safety, or general",
+      });
+    }
 
     const normLinks = (Array.isArray(links) ? links : []).map((l) => {
       const type = l.type || l.module;
@@ -291,12 +407,17 @@ router.post("/", requireAuth, async (req, res, next) => {
     });
 
     const now = new Date();
+
     const body = {
       title,
-      folder,
+      channel: safeChannel,
+      folder: safeFolder,
       tags,
       links: normLinks,
-      access: access || { visibility: "org", owners: [req.user.sub || req.user._id] },
+      access: access || {
+        visibility: "org",
+        owners: [req.user.sub || req.user._id],
+      },
       createdAt: now,
       updatedAt: now,
       createdBy: req.user.sub || req.user._id,
@@ -324,55 +445,93 @@ router.post("/", requireAuth, async (req, res, next) => {
  * - stores binary in GridFS
  * - appends a version with {fileId, url, ...}
  */
-router.post("/:id/upload", requireAuth, upload.single("file"), async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+router.post(
+  "/:id/upload",
+  requireAuth,
+  upload.single("file"),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      if (!isValidObjectId(id))
+        return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
-    if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
-    if (!req.file) return res.status(400).json({ error: "file required" });
+      const doc = await Document.findOne({
+        _id: id,
+        ...orgScope(req.user?.orgId),
+      });
+      if (!doc) return res.status(404).json({ error: "Not found" });
+      if (!canEditDoc(req.user, doc))
+        return res.status(403).json({ error: "Forbidden" });
+      if (!req.file) return res.status(400).json({ error: "file required" });
 
-    const meta = await saveFileToGridFS(req, req.file, { documentId: String(id) });
+      const meta = await saveFileToGridFS(req, req.file, {
+        documentId: String(id),
+      });
 
-    const version = {
-      filename: req.file.originalname,
-      url: meta.url,          // /documents/files/:fileId
-      fileId: meta.fileId,    // IMPORTANT: keep the id
-      mime: req.file.mimetype,
-      size: req.file.size,
-      uploadedBy: req.user.sub || req.user._id,
-      uploadedAt: new Date(),
-    };
+      const version = {
+        filename: req.file.originalname,
+        url: meta.url, // /documents/files/:fileId
+        fileId: meta.fileId, // IMPORTANT: keep the id
+        mime: req.file.mimetype,
+        size: req.file.size,
+        uploadedBy: req.user.sub || req.user._id,
+        uploadedAt: new Date(),
+      };
 
-    doc.versions = doc.versions || [];
-    doc.versions.push(version);
-    doc.latest = version;
-    doc.updatedAt = new Date();
-    doc.updatedBy = req.user.sub || req.user._id;
+      doc.versions = doc.versions || [];
+      doc.versions.push(version);
+      doc.latest = version;
+      doc.updatedAt = new Date();
+      doc.updatedBy = req.user.sub || req.user._id;
 
-    await doc.save();
-    res.status(201).json(doc);
-  } catch (e) {
-    next(e);
-  }
-});
+      await doc.save();
+      res.status(201).json(doc);
+    } catch (e) {
+      next(e);
+    }
+  },
+);
 
 /* --------------------------------- UPDATE ---------------------------------- */
 /** PUT /documents/:id */
 router.put("/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
-    const { title, folder, tags, links, access } = req.body || {};
+    const { title, folder, tags, links, access, channel } = req.body || {};
     if (title != null) doc.title = title;
-    if (folder != null) doc.folder = folder;
+
+    if (channel != null) {
+      doc.channel = normalizeDocChannel(channel, doc.channel || "vault-only");
+    }
+
+    if (folder != null || channel != null) {
+      const nextChannel = doc.channel || "vault-only";
+      const nextFolder = normalizeDocFolder(
+        folder != null ? folder : doc.folder,
+        nextChannel,
+      );
+
+      if (nextChannel === "mobile-library" && !nextFolder) {
+        return res.status(400).json({
+          error:
+            "Mobile library documents must use folder policies, safety, or general",
+        });
+      }
+
+      doc.folder = nextFolder;
+    }
+
     if (tags != null) doc.tags = tags;
     if (links != null) {
       const normLinks = (Array.isArray(links) ? links : []).map((l) => {
@@ -399,9 +558,13 @@ router.put("/:id", requireAuth, async (req, res) => {
 router.patch("/:id/restore", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.status(404).json({ error: "Not found" });
 
     if (!canEditDoc(req.user, doc) && !isAdmin(req.user)) {
@@ -428,16 +591,22 @@ router.patch("/:id/restore", requireAuth, async (req, res) => {
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.status(404).json({ error: "Not found" });
     const admin = isAdmin(req.user);
-    if (!admin && !canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!admin && !canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     const hard = String(req.query.hard) === "1";
     if (hard) {
-      if (!admin) return res.status(403).json({ error: "Hard delete requires admin" });
+      if (!admin)
+        return res.status(403).json({ error: "Hard delete requires admin" });
       await Document.deleteOne({ _id: doc._id });
       return res.json({ ok: true, hard: true });
     }
@@ -460,13 +629,19 @@ router.delete("/:id", requireAuth, async (req, res) => {
 router.delete("/:id/versions/:index", requireAuth, async (req, res) => {
   try {
     const { id, index } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
     const i = Number(index);
-    if (!Number.isInteger(i) || i < 0) return res.status(400).json({ error: "Bad version index" });
+    if (!Number.isInteger(i) || i < 0)
+      return res.status(400).json({ error: "Bad version index" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.sendStatus(404);
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     if (!doc.versions || !doc.versions[i]) {
       return res.status(400).json({ error: "Bad version index" });
@@ -481,7 +656,8 @@ router.delete("/:id/versions/:index", requireAuth, async (req, res) => {
       doc.latest &&
       v.uploadedAt &&
       doc.latest.uploadedAt &&
-      String(new Date(doc.latest.uploadedAt).getTime()) === String(new Date(v.uploadedAt).getTime())
+      String(new Date(doc.latest.uploadedAt).getTime()) ===
+        String(new Date(v.uploadedAt).getTime())
     ) {
       doc.latest = computeLatest(doc);
     }
@@ -502,13 +678,19 @@ router.delete("/:id/versions/:index", requireAuth, async (req, res) => {
 router.patch("/:id/versions/:index/restore", requireAuth, async (req, res) => {
   try {
     const { id, index } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
     const i = Number(index);
-    if (!Number.isInteger(i) || i < 0) return res.status(400).json({ error: "Bad version index" });
+    if (!Number.isInteger(i) || i < 0)
+      return res.status(400).json({ error: "Bad version index" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.sendStatus(404);
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     if (!doc.versions || !doc.versions[i]) {
       return res.status(400).json({ error: "Bad version index" });
@@ -540,18 +722,25 @@ router.patch("/:id/versions/:index/restore", requireAuth, async (req, res) => {
 router.post("/:id/links", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     const parsed = normalizeLinkInput(req.body);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
     const { type, refId } = parsed;
     const exists = (doc.links || []).some(
-      (l) => (l.type === type || l.module === type) && String(l.refId) === String(refId)
+      (l) =>
+        (l.type === type || l.module === type) &&
+        String(l.refId) === String(refId),
     );
     if (!exists) {
       doc.links = doc.links || [];
@@ -573,11 +762,16 @@ router.post("/:id/links", requireAuth, async (req, res) => {
 router.delete("/:id/links", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid document id" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid document id" });
 
-    const doc = await Document.findOne({ _id: id, ...orgScope(req.user?.orgId) });
+    const doc = await Document.findOne({
+      _id: id,
+      ...orgScope(req.user?.orgId),
+    });
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (!canEditDoc(req.user, doc)) return res.status(403).json({ error: "Forbidden" });
+    if (!canEditDoc(req.user, doc))
+      return res.status(403).json({ error: "Forbidden" });
 
     const parsed = normalizeLinkInput(req.body || {});
     if (parsed.error) return res.status(400).json({ error: parsed.error });
@@ -585,7 +779,11 @@ router.delete("/:id/links", requireAuth, async (req, res) => {
     const { type, refId } = parsed;
     const before = doc.links || [];
     doc.links = before.filter(
-      (l) => !((l.type === type || l.module === type) && String(l.refId) === String(refId))
+      (l) =>
+        !(
+          (l.type === type || l.module === type) &&
+          String(l.refId) === String(refId)
+        ),
     );
 
     doc.updatedAt = new Date();
