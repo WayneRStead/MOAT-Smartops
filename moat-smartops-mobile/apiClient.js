@@ -1,5 +1,8 @@
-// moat-smartops-mobile/apiClient.js
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as FileSystem from "expo-file-system/legacy";
+import * as IntentLauncher from "expo-intent-launcher";
+import * as Linking from "expo-linking";
+import { Platform } from "react-native";
 
 // Primary keys
 export const TOKEN_KEY = "@moat:token";
@@ -91,6 +94,10 @@ function joinUrl(base, path) {
   return `${b}${p}`;
 }
 
+export function buildApiUrl(path) {
+  return joinUrl(API_BASE_URL, path);
+}
+
 export async function apiGet(path) {
   const { headers } = await getAuthHeaders({ json: true });
   const res = await fetch(joinUrl(API_BASE_URL, path), {
@@ -144,6 +151,233 @@ export async function apiPostForm(path, formData) {
 
 export async function fetchMobileLibraryDocuments() {
   return apiGet("/api/documents/mobile/library");
+}
+
+function sanitizeFilename(name) {
+  return String(name || "document")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+/g, "_")
+    .trim();
+}
+
+function extFromMime(mime) {
+  const m = String(mime || "").toLowerCase();
+
+  if (m.includes("pdf")) return ".pdf";
+  if (m.includes("png")) return ".png";
+  if (m.includes("jpeg")) return ".jpg";
+  if (m.includes("jpg")) return ".jpg";
+  if (m.includes("webp")) return ".webp";
+  if (m.includes("gif")) return ".gif";
+  if (m.includes("mp4")) return ".mp4";
+  if (m.includes("quicktime")) return ".mov";
+  if (m.includes("mpeg")) return ".mp3";
+  if (m.includes("wav")) return ".wav";
+  if (m.includes("msword")) return ".doc";
+  if (m.includes("officedocument.wordprocessingml.document")) return ".docx";
+  if (m.includes("excel")) return ".xls";
+  if (m.includes("officedocument.spreadsheetml.sheet")) return ".xlsx";
+  if (m.includes("json")) return ".json";
+  if (m.includes("csv")) return ".csv";
+  if (m.includes("plain")) return ".txt";
+
+  return "";
+}
+
+function ensureExtension(filename, mime) {
+  const safe = sanitizeFilename(filename || "document");
+  if (/\.[a-z0-9]{2,8}$/i.test(safe)) return safe;
+  const ext = extFromMime(mime);
+  return `${safe}${ext}`;
+}
+
+function guessMimeTypeFromFilename(name = "") {
+  const lower = String(name || "").toLowerCase();
+
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".mp4")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".doc")) return "application/msword";
+  if (lower.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (lower.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".csv")) return "text/csv";
+  if (lower.endsWith(".txt")) return "text/plain";
+
+  return "application/octet-stream";
+}
+
+function normalizeDocumentInput(doc) {
+  const latest = doc?.latest || {};
+  const urlPath = String(latest?.url || "").trim();
+  const filename = ensureExtension(
+    latest?.filename || doc?.title || "document",
+    latest?.mime || "",
+  );
+  const mimeType =
+    String(latest?.mime || "").trim() || guessMimeTypeFromFilename(filename);
+
+  return {
+    urlPath,
+    filename,
+    mimeType,
+    title: String(doc?.title || filename || "document"),
+  };
+}
+
+async function ensureDirectoryExists(dirUri) {
+  const info = await FileSystem.getInfoAsync(dirUri);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true });
+  }
+}
+
+async function fileExists(uri) {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return !!info.exists;
+  } catch {
+    return false;
+  }
+}
+
+async function downloadProtectedFile({
+  urlPath,
+  filename,
+  targetDirectory,
+  forceRedownload = false,
+}) {
+  if (!urlPath) {
+    throw new Error("Document file URL is missing");
+  }
+
+  const { headers } = await getAuthHeaders({ json: false });
+  const absoluteUrl = buildApiUrl(urlPath);
+  const safeFilename = sanitizeFilename(filename || "document");
+  const dirUri = targetDirectory;
+  const fileUri = `${dirUri}${safeFilename}`;
+
+  await ensureDirectoryExists(dirUri);
+
+  if (!forceRedownload) {
+    const exists = await fileExists(fileUri);
+    if (exists) {
+      return fileUri;
+    }
+  }
+
+  const result = await FileSystem.downloadAsync(absoluteUrl, fileUri, {
+    headers,
+  });
+
+  if (!result?.uri) {
+    throw new Error("Download failed");
+  }
+
+  return result.uri;
+}
+
+export async function downloadProtectedDocumentToCache(doc, options = {}) {
+  const normalized = normalizeDocumentInput(doc);
+
+  const uri = await downloadProtectedFile({
+    urlPath: normalized.urlPath,
+    filename: normalized.filename,
+    targetDirectory: `${FileSystem.cacheDirectory}documents/`,
+    forceRedownload: !!options.forceRedownload,
+  });
+
+  return {
+    uri,
+    filename: normalized.filename,
+    mimeType: normalized.mimeType,
+    title: normalized.title,
+  };
+}
+
+export async function saveProtectedDocumentOffline(doc, options = {}) {
+  const normalized = normalizeDocumentInput(doc);
+
+  const uri = await downloadProtectedFile({
+    urlPath: normalized.urlPath,
+    filename: normalized.filename,
+    targetDirectory: `${FileSystem.documentDirectory}offline-documents/`,
+    forceRedownload: !!options.forceRedownload,
+  });
+
+  return {
+    uri,
+    filename: normalized.filename,
+    mimeType: normalized.mimeType,
+    title: normalized.title,
+  };
+}
+
+async function openLocalFile(uri, mimeType) {
+  if (!uri) {
+    throw new Error("Local file URI is missing");
+  }
+
+  if (Platform.OS === "android") {
+    const contentUri = await FileSystem.getContentUriAsync(uri);
+
+    await IntentLauncher.startActivityAsync("android.intent.action.VIEW", {
+      data: contentUri,
+      flags: 1,
+      type: mimeType || "application/octet-stream",
+    });
+
+    return true;
+  }
+
+  const canOpen = await Linking.canOpenURL(uri);
+  if (!canOpen) {
+    throw new Error("No compatible app is available to open this document.");
+  }
+
+  await Linking.openURL(uri);
+  return true;
+}
+
+export async function openProtectedDocument(doc) {
+  const saved = await saveProtectedDocumentOffline(doc);
+  await openLocalFile(saved.uri, saved.mimeType);
+
+  return {
+    ok: true,
+    uri: saved.uri,
+    filename: saved.filename,
+    mimeType: saved.mimeType,
+    title: saved.title,
+    openedOfflineCopy: true,
+  };
+}
+
+export async function getOfflineDocumentUri(doc) {
+  const normalized = normalizeDocumentInput(doc);
+  const uri = `${FileSystem.documentDirectory}offline-documents/${sanitizeFilename(normalized.filename)}`;
+  const exists = await fileExists(uri);
+
+  return {
+    exists,
+    uri,
+    filename: normalized.filename,
+    mimeType: normalized.mimeType,
+    title: normalized.title,
+  };
 }
 
 // Fetch backend user profile and cache it locally

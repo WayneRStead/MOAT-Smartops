@@ -1,4 +1,3 @@
-// database.js
 import * as SQLite from "expo-sqlite";
 
 /**
@@ -14,6 +13,7 @@ async function getDb() {
       const db = await SQLite.openDatabaseAsync("moatSmartOps.db");
       await db.execAsync(`PRAGMA journal_mode = WAL;`);
       await ensureOfflineEventsSchema(db);
+      await ensureDocumentReadsSchema(db);
       return db;
     })();
   }
@@ -92,13 +92,73 @@ async function ensureOfflineEventsSchema(db) {
     await addCol("createdAt", "createdAt TEXT NOT NULL DEFAULT ''");
     await addCol("updatedAt", "updatedAt TEXT NOT NULL DEFAULT ''");
   } catch (e) {
-    console.log("[DB] schema guard warning", e);
+    console.log("[DB] schema guard warning (offline_events)", e);
+  }
+}
+
+async function ensureDocumentReadsSchema(db) {
+  await db.execAsync(`
+  CREATE TABLE IF NOT EXISTS document_reads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    orgId TEXT,
+    userId TEXT,
+    documentId TEXT NOT NULL,
+    categoryId TEXT,
+    title TEXT,
+    type TEXT,
+    docUpdatedAt TEXT,
+    firstReadAt TEXT NOT NULL,
+    lastReadAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    syncStatus TEXT NOT NULL DEFAULT 'pending'
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_document_reads_unique
+    ON document_reads(userId, documentId);
+
+  CREATE INDEX IF NOT EXISTS idx_document_reads_user
+    ON document_reads(userId, firstReadAt);
+
+  CREATE INDEX IF NOT EXISTS idx_document_reads_document
+    ON document_reads(documentId, firstReadAt);
+
+  CREATE INDEX IF NOT EXISTS idx_document_reads_sync
+    ON document_reads(syncStatus, updatedAt);
+`);
+
+  try {
+    const cols = await db.getAllAsync(`PRAGMA table_info(document_reads);`);
+    const colNames = new Set((cols || []).map((c) => c?.name).filter(Boolean));
+
+    const addCol = async (name, ddl) => {
+      if (!colNames.has(name)) {
+        await db.execAsync(`ALTER TABLE document_reads ADD COLUMN ${ddl};`);
+      }
+    };
+
+    await addCol("orgId", "orgId TEXT");
+    await addCol("userId", "userId TEXT");
+    await addCol("documentId", "documentId TEXT");
+    await addCol("categoryId", "categoryId TEXT");
+    await addCol("title", "title TEXT");
+    await addCol("type", "type TEXT");
+    await addCol("docUpdatedAt", "docUpdatedAt TEXT");
+    await addCol("firstReadAt", "firstReadAt TEXT");
+    await addCol("lastReadAt", "lastReadAt TEXT");
+    await addCol("createdAt", "createdAt TEXT");
+    await addCol("updatedAt", "updatedAt TEXT");
+    await addCol("syncStatus", "syncStatus TEXT NOT NULL DEFAULT 'pending'");
+  } catch (e) {
+    console.log("[DB] schema guard warning (document_reads)", e);
   }
 }
 
 export async function initDatabase() {
   await getDb();
-  console.log("[DB] initDatabase complete (offline_events ready)");
+  console.log(
+    "[DB] initDatabase complete (offline_events + document_reads ready)",
+  );
   return true;
 }
 
@@ -134,6 +194,152 @@ async function insertOfflineEvent({
   );
 
   return result?.lastInsertRowId ?? null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  DOCUMENT READS                                                     */
+/* ------------------------------------------------------------------ */
+
+export async function saveDocumentRead(read) {
+  const db = await getDb();
+
+  const orgId = read?.orgId ?? null;
+  const userId = read?.userId ?? null;
+  const documentId = String(read?.documentId || "").trim();
+  const categoryId = read?.categoryId ?? null;
+  const title = read?.title ?? null;
+  const type = read?.type ?? null;
+  const docUpdatedAt = read?.docUpdatedAt ?? null;
+  const readAt = read?.readAt || nowIso();
+  const createdAt = read?.createdAt || nowIso();
+  const updatedAt = read?.updatedAt || nowIso();
+  const syncStatus = read?.syncStatus || "pending";
+
+  if (!documentId) {
+    throw new Error("documentId is required");
+  }
+
+  const existing = await db.getFirstAsync(
+    `SELECT id, firstReadAt FROM document_reads
+     WHERE userId IS ? AND documentId = ?
+     LIMIT 1`,
+    [userId ?? null, documentId],
+  );
+
+  if (existing?.id) {
+    await db.runAsync(
+      `UPDATE document_reads
+       SET orgId = ?,
+           categoryId = ?,
+           title = ?,
+           type = ?,
+           docUpdatedAt = ?,
+           lastReadAt = ?,
+           updatedAt = ?,
+           syncStatus = ?
+       WHERE id = ?`,
+      [
+        orgId,
+        categoryId,
+        title,
+        type,
+        docUpdatedAt,
+        readAt,
+        updatedAt,
+        syncStatus,
+        existing.id,
+      ],
+    );
+
+    return existing.id;
+  }
+
+  const result = await db.runAsync(
+    `INSERT INTO document_reads
+      (orgId, userId, documentId, categoryId, title, type, docUpdatedAt, firstReadAt, lastReadAt, createdAt, updatedAt, syncStatus)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      orgId,
+      userId,
+      documentId,
+      categoryId,
+      title,
+      type,
+      docUpdatedAt,
+      readAt,
+      readAt,
+      createdAt,
+      updatedAt,
+      syncStatus,
+    ],
+  );
+
+  return result?.lastInsertRowId ?? null;
+}
+
+export async function listDocumentReads(userId = null) {
+  const db = await getDb();
+
+  if (userId) {
+    const rows = await db.getAllAsync(
+      `SELECT *
+       FROM document_reads
+       WHERE userId = ?
+       ORDER BY updatedAt DESC`,
+      [String(userId)],
+    );
+    return rows || [];
+  }
+
+  const rows = await db.getAllAsync(
+    `SELECT *
+     FROM document_reads
+     ORDER BY updatedAt DESC`,
+  );
+  return rows || [];
+}
+
+export async function getDocumentReadMap(userId = null) {
+  const rows = await listDocumentReads(userId);
+  const map = {};
+
+  for (const row of rows) {
+    const documentId = String(row?.documentId || "").trim();
+    if (!documentId) continue;
+
+    map[documentId] = {
+      firstReadAt: row?.firstReadAt || null,
+      lastReadAt: row?.lastReadAt || row?.firstReadAt || null,
+    };
+  }
+
+  return map;
+}
+
+export async function getDocumentRead(documentId, userId = null) {
+  const db = await getDb();
+  const safeDocumentId = String(documentId || "").trim();
+  if (!safeDocumentId) return null;
+
+  if (userId) {
+    const row = await db.getFirstAsync(
+      `SELECT *
+       FROM document_reads
+       WHERE userId = ? AND documentId = ?
+       LIMIT 1`,
+      [String(userId), safeDocumentId],
+    );
+    return row || null;
+  }
+
+  const row = await db.getFirstAsync(
+    `SELECT *
+     FROM document_reads
+     WHERE documentId = ?
+     LIMIT 1`,
+    [safeDocumentId],
+  );
+  return row || null;
 }
 
 /* ------------------------------------------------------------------ */

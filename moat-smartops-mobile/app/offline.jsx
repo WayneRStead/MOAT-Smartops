@@ -1,5 +1,3 @@
-// moat-smartops-mobile/app/offline.jsx
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
@@ -11,60 +9,9 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { apiGet, ORG_KEY } from "../apiClient";
-import { syncOutbox } from "../syncOutbox";
+import { loadCachedLists, refreshListsFromServer } from "../refreshLists";
 
 const THEME_COLOR = "#22a6b3";
-
-/**
- * Offline cache keys
- */
-const CACHE_KEYS = {
-  definitions: "@moat:cache:definitions",
-  projects: "@moat:cache:projects",
-  tasks: "@moat:cache:tasks",
-  milestones: "@moat:cache:milestones",
-  milestonesByTask: "@moat:cache:milestonesByTask",
-  assets: "@moat:cache:assets",
-  vehicles: "@moat:cache:vehicles",
-  inspections: "@moat:cache:inspections",
-  documents: "@moat:cache:documents",
-  groups: "@moat:cache:groups",
-  users: "@moat:cache:users",
-  vendors: "@moat:cache:vehicleVendors",
-};
-
-async function safeCacheSet(key, value) {
-  await AsyncStorage.setItem(key, JSON.stringify(value ?? []));
-}
-
-async function safeCacheSetObject(key, value) {
-  await AsyncStorage.setItem(key, JSON.stringify(value ?? {}));
-}
-
-async function safeCacheGet(key) {
-  const raw = await AsyncStorage.getItem(key);
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-async function safeCacheGetObject(key) {
-  const raw = await AsyncStorage.getItem(key);
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : {};
-  } catch {
-    return {};
-  }
-}
 
 function countDefinitions(definitions) {
   if (!definitions || typeof definitions !== "object") return 0;
@@ -80,38 +27,6 @@ function countDefinitions(definitions) {
   }
 
   return Object.keys(definitions).length;
-}
-
-function buildMilestonesByTask(milestones) {
-  const out = {};
-  for (const m of Array.isArray(milestones) ? milestones : []) {
-    const taskId = String(
-      m?.taskId?._id || m?.taskId || m?.parentTaskId || "",
-    ).trim();
-    if (!taskId) continue;
-    if (!Array.isArray(out[taskId])) out[taskId] = [];
-    out[taskId].push(m);
-  }
-  return out;
-}
-
-function normalizeVendors(vendors) {
-  return (Array.isArray(vendors) ? vendors : [])
-    .map((v) => {
-      if (!v) return null;
-      if (typeof v === "string") {
-        return { id: v, label: v };
-      }
-      const id = String(v._id || v.id || v.name || "").trim();
-      const label = String(v.name || v.label || id).trim();
-      if (!label) return null;
-      return {
-        ...v,
-        id: id || label,
-        label,
-      };
-    })
-    .filter(Boolean);
 }
 
 export default function OfflineScreen() {
@@ -133,199 +48,57 @@ export default function OfflineScreen() {
   });
 
   async function loadCounts() {
-    const [
-      definitions,
-      projects,
-      tasks,
-      milestonesByTask,
-      assets,
-      vehicles,
-      inspections,
-      documents,
-      groups,
-      users,
-      vendors,
-    ] = await Promise.all([
-      safeCacheGetObject(CACHE_KEYS.definitions),
-      safeCacheGet(CACHE_KEYS.projects),
-      safeCacheGet(CACHE_KEYS.tasks),
-      safeCacheGetObject(CACHE_KEYS.milestonesByTask),
-      safeCacheGet(CACHE_KEYS.assets),
-      safeCacheGet(CACHE_KEYS.vehicles),
-      safeCacheGet(CACHE_KEYS.inspections),
-      safeCacheGet(CACHE_KEYS.documents),
-      safeCacheGet(CACHE_KEYS.groups),
-      safeCacheGet(CACHE_KEYS.users),
-      safeCacheGet(CACHE_KEYS.vendors),
-    ]);
+    try {
+      const cached = await loadCachedLists();
 
-    setCounts({
-      definitions: countDefinitions(definitions),
-      projects: projects.length,
-      tasks: tasks.length,
-      milestonesTasks: Object.keys(milestonesByTask || {}).length,
-      assets: assets.length,
-      vehicles: vehicles.length,
-      inspections: inspections.length,
-      documents: documents.length,
-      groups: groups.length,
-      users: users.length,
-      vendors: vendors.length,
-    });
+      setCounts({
+        definitions: countDefinitions(cached.definitions),
+        projects: Array.isArray(cached.projects) ? cached.projects.length : 0,
+        tasks: Array.isArray(cached.tasks) ? cached.tasks.length : 0,
+        milestonesTasks: cached.milestonesByTask
+          ? Object.keys(cached.milestonesByTask).length
+          : 0,
+        assets: Array.isArray(cached.assets) ? cached.assets.length : 0,
+        vehicles: Array.isArray(cached.vehicles) ? cached.vehicles.length : 0,
+        inspections: Array.isArray(cached.inspections)
+          ? cached.inspections.length
+          : 0,
+        documents: Array.isArray(cached.documents)
+          ? cached.documents.length
+          : 0,
+        groups: Array.isArray(cached.groups) ? cached.groups.length : 0,
+        users: Array.isArray(cached.users) ? cached.users.length : 0,
+        vendors: Array.isArray(cached.vendors) ? cached.vendors.length : 0,
+      });
+    } catch (e) {
+      console.log("[offline] loadCounts failed", e);
+    }
   }
 
   useEffect(() => {
-    (async () => {
-      await loadCounts();
-    })();
+    loadCounts();
   }, []);
 
   const refreshLists = async () => {
     setLoading(true);
     try {
-      const savedOrg = await AsyncStorage.getItem(ORG_KEY);
-      if (!savedOrg) {
-        Alert.alert("Missing Org", "No orgId found on this device yet.");
-        return;
-      }
-
-      // sanity check
-      await apiGet("/api/mobile/whoami");
-
-      let mobileLists = null;
-      try {
-        mobileLists = await apiGet("/api/mobile/lists");
-      } catch (e) {
-        if (e?.status !== 404) throw e;
-      }
-
-      async function fetchMaybeArray(path) {
-        try {
-          const data = await apiGet(path);
-          if (Array.isArray(data)) return data;
-          if (Array.isArray(data?.items)) return data.items;
-          if (Array.isArray(data?.data)) return data.data;
-          return [];
-        } catch (e) {
-          if (e?.status === 404) return [];
-          throw e;
-        }
-      }
-
-      async function fetchMaybeObject(path) {
-        try {
-          const data = await apiGet(path);
-          if (data?.definitions && typeof data.definitions === "object") {
-            return data.definitions;
-          }
-          return data && typeof data === "object" && !Array.isArray(data)
-            ? data
-            : {};
-        } catch (e) {
-          if (e?.status === 404) return {};
-          throw e;
-        }
-      }
-
-      // PRIMARY: use /api/mobile/lists
-      // FALLBACK: use old endpoints only if missing
-      const projects = Array.isArray(mobileLists?.projects)
-        ? mobileLists.projects
-        : await fetchMaybeArray("/api/projects");
-
-      const tasks = Array.isArray(mobileLists?.tasks)
-        ? mobileLists.tasks
-        : await fetchMaybeArray("/api/tasks");
-
-      const milestones = Array.isArray(mobileLists?.milestones)
-        ? mobileLists.milestones
-        : Array.isArray(mobileLists?.taskMilestones)
-          ? mobileLists.taskMilestones
-          : [];
-
-      const assets = Array.isArray(mobileLists?.assets)
-        ? mobileLists.assets
-        : await fetchMaybeArray("/api/assets");
-
-      const vehicles = Array.isArray(mobileLists?.vehicles)
-        ? mobileLists.vehicles
-        : await fetchMaybeArray("/api/vehicles");
-
-      const inspections = Array.isArray(mobileLists?.inspectionForms)
-        ? mobileLists.inspectionForms
-        : Array.isArray(mobileLists?.inspections)
-          ? mobileLists.inspections
-          : await fetchMaybeArray("/api/inspection/forms");
-
-      const documents = Array.isArray(mobileLists?.documents)
-        ? mobileLists.documents
-        : await fetchMaybeArray("/api/documents");
-
-      const groups = Array.isArray(mobileLists?.groups)
-        ? mobileLists.groups
-        : await fetchMaybeArray("/api/groups");
-
-      const users = Array.isArray(mobileLists?.users)
-        ? mobileLists.users
-        : await fetchMaybeArray("/api/users");
-
-      const vendorsRaw = Array.isArray(mobileLists?.vendors)
-        ? mobileLists.vendors
-        : await fetchMaybeArray("/api/vendors");
-
-      const vendors = normalizeVendors(vendorsRaw);
-
-      const definitions =
-        mobileLists?.definitions && typeof mobileLists.definitions === "object"
-          ? mobileLists.definitions
-          : await fetchMaybeObject("/api/mobile/definitions");
-
-      const milestonesByTask = buildMilestonesByTask(milestones);
-
-      await Promise.all([
-        safeCacheSet(CACHE_KEYS.projects, projects),
-        safeCacheSet(CACHE_KEYS.tasks, tasks),
-        safeCacheSet(CACHE_KEYS.milestones, milestones),
-        safeCacheSetObject(CACHE_KEYS.milestonesByTask, milestonesByTask),
-        safeCacheSet(CACHE_KEYS.assets, assets),
-        safeCacheSet(CACHE_KEYS.vehicles, vehicles),
-        safeCacheSet(CACHE_KEYS.inspections, inspections),
-        safeCacheSet(CACHE_KEYS.documents, documents),
-        safeCacheSet(CACHE_KEYS.groups, groups),
-        safeCacheSet(CACHE_KEYS.users, users),
-        safeCacheSet(CACHE_KEYS.vendors, vendors),
-        safeCacheSetObject(CACHE_KEYS.definitions, definitions),
-      ]);
-
+      const res = await refreshListsFromServer();
       await loadCounts();
 
       Alert.alert(
         "Success",
-        `Lists refreshed.\nProjects: ${projects.length}\nTasks: ${tasks.length}\nMilestones: ${milestones.length}\nVehicles: ${vehicles.length}\nVendors: ${vendors.length}`,
+        `Lists refreshed.
+Projects: ${res.projectsCount}
+Tasks: ${res.tasksCount}
+Milestones: ${res.milestonesCount}
+Vehicles: ${res.vehiclesCount}
+Vendors: ${res.vendorsCount}
+Documents: ${res.documentsCount}
+Offline document files saved: ${res.mobileLibrarySavedOfflineCount}
+Offline document files failed: ${res.mobileLibraryFailedOfflineCount}`,
       );
     } catch (e) {
       Alert.alert("Could not refresh", e?.message || "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const runSync = async () => {
-    setLoading(true);
-    try {
-      const savedOrg = await AsyncStorage.getItem(ORG_KEY);
-      if (!savedOrg) {
-        Alert.alert("Missing Org", "No orgId found on this device yet.");
-        return;
-      }
-
-      const res = await syncOutbox({ limit: 25 });
-      Alert.alert(
-        "Sync complete",
-        `Synced: ${res.synced}\nFailed: ${res.failed}`,
-      );
-    } catch (e) {
-      Alert.alert("Sync failed", e?.message || "Unknown error");
     } finally {
       setLoading(false);
     }
@@ -352,28 +125,13 @@ export default function OfflineScreen() {
 
       <View style={styles.actionsRow}>
         <TouchableOpacity
-          style={[styles.primaryButton, loading && styles.btnDisabled]}
+          style={[styles.primaryButtonSingle, loading && styles.btnDisabled]}
           onPress={refreshLists}
           activeOpacity={0.85}
           disabled={loading}
         >
           <Text style={styles.primaryButtonText}>
-            {loading ? "Working..." : "Refresh lists + definitions"}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[
-            styles.primaryButton,
-            styles.secondaryButton,
-            loading && styles.btnDisabled,
-          ]}
-          onPress={runSync}
-          activeOpacity={0.85}
-          disabled={loading}
-        >
-          <Text style={styles.primaryButtonText}>
-            {loading ? "Working..." : "Sync outbox"}
+            {loading ? "Working..." : "Refresh lists"}
           </Text>
         </TouchableOpacity>
       </View>
@@ -400,9 +158,8 @@ export default function OfflineScreen() {
         <Row label="Users (optional)" value={counts.users} />
 
         <Text style={styles.hint}>
-          This screen refreshes offline dropdown data primarily from
-          /api/mobile/lists. If Tasks stays at 0, the backend is not returning
-          tasks for your org.
+          This screen now uses refreshLists.js as the single source of truth for
+          cached offline lists.
         </Text>
       </View>
     </ScrollView>
@@ -444,23 +201,15 @@ const styles = StyleSheet.create({
     height: 32,
   },
   actionsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
     marginTop: 8,
     marginBottom: 12,
   },
-  primaryButton: {
-    flex: 1,
+  primaryButtonSingle: {
     backgroundColor: THEME_COLOR,
     borderRadius: 10,
     paddingVertical: 12,
     alignItems: "center",
     elevation: 2,
-    marginRight: 8,
-  },
-  secondaryButton: {
-    marginRight: 0,
-    marginLeft: 8,
   },
   primaryButtonText: {
     color: "#fff",

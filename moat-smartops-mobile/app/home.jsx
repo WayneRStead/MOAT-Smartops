@@ -1,7 +1,8 @@
-// app/home.jsx
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
-import { useMemo } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  Animated,
   Image,
   Pressable,
   ScrollView,
@@ -10,24 +11,381 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { getStoredUserId } from "../apiClient";
+import { getDocumentReadMap, listOfflineEvents } from "../database";
+import { CACHE_DOCUMENTS, CACHE_TASKS } from "../refreshLists";
+
+const THEME_COLOR = "#22a6b3";
+
+function safeParseArray(raw) {
+  try {
+    const parsed = JSON.parse(raw || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function extractId(value) {
+  if (!value) return "";
+
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value).trim();
+  }
+
+  if (typeof value === "object") {
+    if (value.$oid) return String(value.$oid).trim();
+    if (value._id) return extractId(value._id);
+    if (value.id) return extractId(value.id);
+    if (value.userId) return extractId(value.userId);
+  }
+
+  return "";
+}
+
+function extractDate(value) {
+  if (!value) return null;
+
+  if (typeof value === "string" || typeof value === "number") {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  if (typeof value === "object") {
+    if (value.$date) {
+      const d = new Date(value.$date);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+  }
+
+  return null;
+}
+
+function isCompletedStatus(status) {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase();
+
+  return s === "finished" || s === "completed" || s === "complete";
+}
+
+function isInProgressStatus(status) {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    s === "started" ||
+    s === "in progress" ||
+    s === "in-progress" ||
+    s === "progress"
+  );
+}
+
+function isPendingStatus(status) {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase();
+
+  return s === "pending";
+}
+
+function isPausedStatus(status) {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    s === "paused" || s === "paused with problem" || s === "paused-with-problem"
+  );
+}
+
+function getDueDate(task) {
+  return (
+    extractDate(task?.dueDate) ||
+    extractDate(task?.dueAt) ||
+    extractDate(task?.plannedEndAt) ||
+    extractDate(task?.plannedEndDate) ||
+    extractDate(task?.deadline) ||
+    extractDate(task?.targetDate) ||
+    null
+  );
+}
+
+function getTaskStatus(task) {
+  return (
+    task?.status ||
+    task?.taskStatus ||
+    task?.workflowStatus ||
+    task?.state ||
+    ""
+  );
+}
+
+function normalizeId(value) {
+  return extractId(value);
+}
+
+function taskAssignedToUser(task, userId) {
+  if (!userId) return false;
+
+  const singleCandidates = [
+    task?.assignee,
+    task?.assigneeId,
+    task?.assignedToUser,
+    task?.assignedToId,
+    task?.userId,
+    task?.ownerId,
+  ];
+
+  for (const candidate of singleCandidates) {
+    if (extractId(candidate) === userId) return true;
+  }
+
+  const arrayCandidates = [
+    task?.assignedTo,
+    task?.assignedUserIds,
+    task?.assignees,
+    task?.assignedUsers,
+  ];
+
+  for (const arr of arrayCandidates) {
+    if (!Array.isArray(arr)) continue;
+    if (arr.some((item) => extractId(item) === userId)) return true;
+  }
+
+  return false;
+}
+
+function ActionTile({ label, icon, onPress, pulse = false }) {
+  const anim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!pulse) {
+      anim.stopAnimation();
+      anim.setValue(1);
+      return;
+    }
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, {
+          toValue: 0.55,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+        Animated.timing(anim, {
+          toValue: 1,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, anim]);
+
+  return (
+    <Animated.View style={{ width: "48%", opacity: anim }}>
+      <TouchableOpacity
+        style={[
+          styles.actionTile,
+          pulse && { borderWidth: 2, borderColor: THEME_COLOR },
+        ]}
+        onPress={onPress}
+        activeOpacity={0.85}
+      >
+        <View style={styles.actionIconWrap}>
+          <Image
+            source={icon}
+            style={styles.actionIconImage}
+            resizeMode="contain"
+          />
+        </View>
+        <Text style={styles.actionLabel}>{label}</Text>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
+function ModuleTile({ label, icon, onPress, pulse = false }) {
+  const anim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!pulse) {
+      anim.stopAnimation();
+      anim.setValue(1);
+      return;
+    }
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, {
+          toValue: 0.55,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+        Animated.timing(anim, {
+          toValue: 1,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, anim]);
+
+  return (
+    <Animated.View style={{ width: "48%", opacity: anim }}>
+      <TouchableOpacity
+        style={[
+          styles.tile,
+          pulse && { borderWidth: 2, borderColor: THEME_COLOR },
+        ]}
+        onPress={onPress}
+        activeOpacity={0.8}
+      >
+        <View style={styles.tileIconPlaceholder}>
+          <Image
+            source={icon}
+            style={styles.tileIconImage}
+            resizeMode="contain"
+          />
+        </View>
+        <Text style={styles.tileLabel}>{label}</Text>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
 
 export default function HomeScreen() {
   const router = useRouter();
 
-  // Later these can come from the backend
-  const myTasks = useMemo(
-    () => ({
-      overdue: 3,
-      inProgress: 7,
-      completed: 12,
-    }),
-    [],
-  );
+  const [historyNeedsAttention, setHistoryNeedsAttention] = useState(false);
+  const [documentsNeedsAttention, setDocumentsNeedsAttention] = useState(false);
 
-  const totalTasks =
-    myTasks.overdue + myTasks.inProgress + myTasks.completed || 1;
+  const [myTasks, setMyTasks] = useState({
+    total: 0,
+    overdue: 0,
+    inProgress: 0,
+    paused: 0,
+    pending: 0,
+    completed: 0,
+  });
 
-  // Module definitions with icons
+  useEffect(() => {
+    loadHomeSummary();
+  }, []);
+
+  const loadHomeSummary = async () => {
+    try {
+      const [storedTasksRaw, storedDocumentsRaw, userId] = await Promise.all([
+        AsyncStorage.getItem(CACHE_TASKS),
+        AsyncStorage.getItem(CACHE_DOCUMENTS),
+        getStoredUserId(),
+      ]);
+
+      const tasks = safeParseArray(storedTasksRaw);
+      const documents = safeParseArray(storedDocumentsRaw);
+
+      const myTaskRows = tasks.filter((task) =>
+        taskAssignedToUser(task, userId),
+      );
+
+      const now = new Date();
+
+      let overdue = 0;
+      let inProgress = 0;
+      let paused = 0;
+      let pending = 0;
+      let completed = 0;
+
+      for (const task of myTaskRows) {
+        const status = getTaskStatus(task);
+        const dueDate = getDueDate(task);
+        const done = isCompletedStatus(status);
+
+        if (done) {
+          completed += 1;
+        } else if (isPausedStatus(status)) {
+          paused += 1;
+        } else if (isPendingStatus(status)) {
+          pending += 1;
+        } else if (isInProgressStatus(status)) {
+          inProgress += 1;
+        }
+
+        if (!done && dueDate && dueDate < now) {
+          overdue += 1;
+        }
+      }
+
+      setMyTasks({
+        total: myTaskRows.length,
+        overdue,
+        inProgress,
+        paused,
+        pending,
+        completed,
+      });
+
+      const offlineEvents = await listOfflineEvents(500);
+      const unsynced = (offlineEvents || []).some(
+        (row) => String(row?.syncStatus || "").toLowerCase() !== "synced",
+      );
+      setHistoryNeedsAttention(unsynced);
+
+      const mobileDocs = documents.filter((d) => {
+        const channel = String(d?.channel || "")
+          .trim()
+          .toLowerCase();
+        const folder = String(d?.folder || "")
+          .trim()
+          .toLowerCase();
+
+        return (
+          channel === "mobile-library" &&
+          ["policies", "safety", "general"].includes(folder)
+        );
+      });
+
+      const readMap = await getDocumentReadMap(userId || null);
+
+      const unreadExists = mobileDocs.some((doc) => {
+        const docId = normalizeId(doc?.id || doc?._id);
+        const record = readMap?.[docId];
+        return !record?.firstReadAt;
+      });
+
+      const newerVersionExists = mobileDocs.some((doc) => {
+        const docId = normalizeId(doc?.id || doc?._id);
+        const record = readMap?.[docId];
+        const lastSeen = record?.docUpdatedAt || null;
+        const currentUpdatedAt = doc?.updatedAt || null;
+
+        if (!currentUpdatedAt || !lastSeen) return false;
+
+        const a = new Date(lastSeen);
+        const b = new Date(currentUpdatedAt);
+
+        if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) {
+          return false;
+        }
+
+        return b > a;
+      });
+
+      setDocumentsNeedsAttention(unreadExists || newerVersionExists);
+    } catch (e) {
+      console.log("Failed to load home summary", e);
+    }
+  };
+
+  const totalTasks = myTasks.total || 0;
+
   const modules = [
     {
       key: "production",
@@ -64,12 +422,12 @@ export default function HomeScreen() {
       label: "Documents",
       icon: require("../assets/documents.png"),
       route: "/documents",
+      pulse: documentsNeedsAttention,
     },
   ];
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      {/* Branding / Header */}
       <View style={styles.header}>
         <View style={styles.logoContainer}>
           <Pressable onPress={() => router.replace("/home")}>
@@ -83,10 +441,9 @@ export default function HomeScreen() {
         <Text style={styles.appTitle}>Smart Operations Suite</Text>
       </View>
 
-      {/* QUICK ACTION TILES (NEW) */}
       <View style={styles.quickRow}>
         <ActionTile
-          label="Offline & Sync"
+          label="Offline Lists"
           icon={require("../assets/offline.png")}
           onPress={() => router.push("/offline")}
         />
@@ -94,22 +451,19 @@ export default function HomeScreen() {
           label="History"
           icon={require("../assets/history.png")}
           onPress={() => router.push("/history")}
+          pulse={historyNeedsAttention}
         />
       </View>
 
-      {/* Task / milestone overview */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>My Tasks Overview</Text>
-        <Text style={styles.cardSubtitle}>Today / This week</Text>
 
         <View style={styles.overviewRow}>
-          {/* Simple placeholder "donut" */}
           <View style={styles.donutPlaceholder}>
             <Text style={styles.donutCenterText}>{totalTasks}</Text>
             <Text style={styles.donutLabel}>Total</Text>
           </View>
 
-          {/* Status breakdown */}
           <View style={styles.statusList}>
             <Text style={styles.statusItem}>
               Overdue:{" "}
@@ -120,19 +474,20 @@ export default function HomeScreen() {
               <Text style={styles.statusInProgress}>{myTasks.inProgress}</Text>
             </Text>
             <Text style={styles.statusItem}>
+              Paused: <Text style={styles.statusPaused}>{myTasks.paused}</Text>
+            </Text>
+            <Text style={styles.statusItem}>
+              Pending:{" "}
+              <Text style={styles.statusPending}>{myTasks.pending}</Text>
+            </Text>
+            <Text style={styles.statusItem}>
               Completed:{" "}
               <Text style={styles.statusCompleted}>{myTasks.completed}</Text>
             </Text>
           </View>
         </View>
-
-        {/* Simple trend placeholder */}
-        <View style={styles.trendPlaceholder}>
-          <Text style={styles.trendText}>Task trend (placeholder)</Text>
-        </View>
       </View>
 
-      {/* Modules grid */}
       <View style={styles.modulesContainer}>
         <Text style={styles.modulesTitle}>Modules</Text>
 
@@ -143,6 +498,7 @@ export default function HomeScreen() {
               label={m.label}
               icon={m.icon}
               onPress={() => router.push(m.route)}
+              pulse={!!m.pulse}
             />
           ))}
         </View>
@@ -150,42 +506,6 @@ export default function HomeScreen() {
     </ScrollView>
   );
 }
-
-function ActionTile({ label, icon, onPress }) {
-  return (
-    <TouchableOpacity
-      style={styles.actionTile}
-      onPress={onPress}
-      activeOpacity={0.85}
-    >
-      <View style={styles.actionIconWrap}>
-        <Image
-          source={icon}
-          style={styles.actionIconImage}
-          resizeMode="contain"
-        />
-      </View>
-      <Text style={styles.actionLabel}>{label}</Text>
-    </TouchableOpacity>
-  );
-}
-
-function ModuleTile({ label, icon, onPress }) {
-  return (
-    <TouchableOpacity style={styles.tile} onPress={onPress} activeOpacity={0.8}>
-      <View style={styles.tileIconPlaceholder}>
-        <Image
-          source={icon}
-          style={styles.tileIconImage}
-          resizeMode="contain"
-        />
-      </View>
-      <Text style={styles.tileLabel}>{label}</Text>
-    </TouchableOpacity>
-  );
-}
-
-const THEME_COLOR = "#22a6b3";
 
 const styles = StyleSheet.create({
   container: {
@@ -210,8 +530,6 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: "500",
   },
-
-  // NEW quick actions row
   quickRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -219,7 +537,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   actionTile: {
-    width: "48%",
+    width: "100%",
     backgroundColor: "#ffffff",
     borderRadius: 10,
     paddingVertical: 14,
@@ -245,7 +563,6 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: "#000000",
   },
-
   card: {
     backgroundColor: "#ffffff",
     borderRadius: 10,
@@ -256,17 +573,11 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 16,
     fontWeight: "600",
-    marginBottom: 4,
-  },
-  cardSubtitle: {
-    fontSize: 12,
-    color: "#666",
     marginBottom: 12,
   },
   overviewRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 12,
   },
   donutPlaceholder: {
     width: 80,
@@ -301,20 +612,17 @@ const styles = StyleSheet.create({
     color: "#f39c12",
     fontWeight: "600",
   },
+  statusPaused: {
+    color: "#8e44ad",
+    fontWeight: "600",
+  },
+  statusPending: {
+    color: "#2980b9",
+    fontWeight: "600",
+  },
   statusCompleted: {
     color: "#27ae60",
     fontWeight: "600",
-  },
-  trendPlaceholder: {
-    height: 40,
-    borderRadius: 6,
-    backgroundColor: "#f0f0f0",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  trendText: {
-    fontSize: 11,
-    color: "#777",
   },
   modulesContainer: {
     marginTop: 8,
@@ -330,7 +638,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   tile: {
-    width: "48%",
+    width: "100%",
     backgroundColor: "#ffffff",
     borderRadius: 10,
     paddingVertical: 16,

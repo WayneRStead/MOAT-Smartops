@@ -1285,7 +1285,37 @@ router.get("/lists", requireOrg, async (req, res) => {
 
     const tasks = Task?.find
       ? await Task.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
-          .select({ _id: 1, title: 1, status: 1, projectId: 1 })
+          .select({
+            _id: 1,
+            title: 1,
+            status: 1,
+            projectId: 1,
+
+            // assignment fields needed by mobile dashboard
+            assignee: 1,
+            assignedTo: 1,
+            assigneeId: 1,
+            assignedToId: 1,
+            assignedUserIds: 1,
+            ownerId: 1,
+            userId: 1,
+
+            // due / schedule fields needed for overdue logic
+            dueDate: 1,
+            dueAt: 1,
+            plannedEndAt: 1,
+            plannedEndDate: 1,
+            deadline: 1,
+            targetDate: 1,
+
+            // optional but useful for future mobile display
+            startDate: 1,
+            plannedStartAt: 1,
+            priority: 1,
+            groupId: 1,
+            assignedGroupIds: 1,
+            updatedAt: 1,
+          })
           .lean()
       : [];
 

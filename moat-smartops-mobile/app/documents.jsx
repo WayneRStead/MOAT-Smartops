@@ -1,6 +1,6 @@
-//moat-smartops-mobile/app/documents.jsx
+// app/documents.js
 import { useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Image,
@@ -16,7 +16,7 @@ import {
   getAuthHeaders,
   getStoredUserId,
 } from "../apiClient";
-import { saveDocumentRead } from "../database";
+import { getDocumentReadMap, saveDocumentRead } from "../database";
 
 const THEME_COLOR = "#22a6b3";
 
@@ -54,14 +54,16 @@ function guessDocType(doc) {
     mime.includes("word") ||
     filename.endsWith(".doc") ||
     filename.endsWith(".docx")
-  )
+  ) {
     return "WORD";
+  }
   if (
     mime.includes("excel") ||
     filename.endsWith(".xls") ||
     filename.endsWith(".xlsx")
-  )
+  ) {
     return "EXCEL";
+  }
   return "FILE";
 }
 
@@ -110,11 +112,17 @@ export default function DocumentsScreen() {
   );
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
+  const [openingDoc, setOpeningDoc] = useState(false);
+  const [savingOfflineDoc, setSavingOfflineDoc] = useState(false);
 
   const selectedCategory =
     documentCategories.find((c) => c.id === selectedCategoryId) ||
     documentCategories[0] ||
     EMPTY_DOCUMENT_CATEGORIES[0];
+
+  const viewedDocHasFile = useMemo(() => {
+    return !!viewDoc?.latest?.url;
+  }, [viewDoc]);
 
   const handleOpenDoc = (doc) => {
     setViewDoc(doc);
@@ -178,21 +186,30 @@ export default function DocumentsScreen() {
 
   useEffect(() => {
     loadDocuments();
+    loadReadHistory();
   }, []);
 
-  // ✅ Now async and wired to DB stub
+  const loadReadHistory = async () => {
+    try {
+      const userId = await getStoredUserId();
+      const readMap = await getDocumentReadMap(userId || null);
+
+      const uiMap = {};
+      for (const [documentId, value] of Object.entries(readMap || {})) {
+        uiMap[documentId] = value?.firstReadAt || value?.lastReadAt || null;
+      }
+
+      setReadTimestamps(uiMap);
+    } catch (e) {
+      console.log("Failed to load document read history", e);
+    }
+  };
+
   const handleMarkAsRead = async () => {
     if (!viewDoc) return;
 
     const timestamp = formatNow();
 
-    // Update local UI state
-    setReadTimestamps((prev) => ({
-      ...prev,
-      [viewDoc.id]: timestamp,
-    }));
-
-    // Build payload for DB / sync
     const nowIso = new Date().toISOString();
     const auth = await getAuthHeaders({ json: true });
     const userId = await getStoredUserId();
@@ -218,10 +235,12 @@ export default function DocumentsScreen() {
         localId,
       );
 
+      await loadReadHistory();
+
       setViewDoc(null);
       Alert.alert(
         "Marked as read",
-        "Your read time has been recorded on this device.",
+        "Reading a document will record a read time for this device.",
       );
     } catch (e) {
       console.log("Failed to save document read", e);
@@ -232,10 +251,63 @@ export default function DocumentsScreen() {
     }
   };
 
+  const handleOpenDocument = async () => {
+    if (!viewDoc) return;
+
+    if (!viewDoc?.latest?.url) {
+      Alert.alert(
+        "No file",
+        "This document does not have a file uploaded yet.",
+      );
+      return;
+    }
+
+    try {
+      setOpeningDoc(true);
+      const { openProtectedDocument } = await import("../apiClient");
+      await openProtectedDocument(viewDoc);
+    } catch (e) {
+      console.log("Failed to open document", e);
+      Alert.alert("Open failed", e?.message || "Could not open this document.");
+    } finally {
+      setOpeningDoc(false);
+    }
+  };
+
+  const handleSaveOffline = async () => {
+    if (!viewDoc) return;
+
+    if (!viewDoc?.latest?.url) {
+      Alert.alert(
+        "No file",
+        "This document does not have a file uploaded yet.",
+      );
+      return;
+    }
+
+    try {
+      setSavingOfflineDoc(true);
+      const { saveProtectedDocumentOffline } = await import("../apiClient");
+      await saveProtectedDocumentOffline(viewDoc);
+
+      Alert.alert(
+        "Saved offline",
+        "This document has been saved to this device for offline use.",
+      );
+    } catch (e) {
+      console.log("Failed to save document offline", e);
+      Alert.alert(
+        "Save failed",
+        e?.message || "Could not save this document offline.",
+      );
+    } finally {
+      setSavingOfflineDoc(false);
+    }
+  };
+
   return (
     <>
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Top bar with Documents logo + home */}
         <View style={styles.topBar}>
           <Image
             source={require("../assets/documents-screen.png")}
@@ -253,7 +325,6 @@ export default function DocumentsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Category selector */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Documents</Text>
           <Text style={styles.cardSubtitle}>
@@ -292,7 +363,6 @@ export default function DocumentsScreen() {
           </View>
         </View>
 
-        {/* Document list for selected category */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>
             {selectedCategory.name} documents
@@ -328,7 +398,7 @@ export default function DocumentsScreen() {
                       {formatDisplayDate(doc.updatedAt)}
                     </Text>
                     {lastRead ? (
-                      <Text style={styles.docRead}>Last read: {lastRead}</Text>
+                      <Text style={styles.docRead}>First read: {lastRead}</Text>
                     ) : (
                       <Text style={styles.docNotRead}>Not read yet</Text>
                     )}
@@ -344,7 +414,6 @@ export default function DocumentsScreen() {
         </View>
       </ScrollView>
 
-      {/* VIEW DOCUMENT MODAL */}
       <Modal
         visible={!!viewDoc}
         transparent
@@ -366,19 +435,48 @@ export default function DocumentsScreen() {
                 </Text>
 
                 <Text style={styles.modalHint}>
-                  This document is now being loaded from the backend mobile
-                  library. The full file open / preview step can be wired next.
+                  Open will fetch the protected backend file. Save offline will
+                  store a copy on the device for offline access.
                 </Text>
 
-                <View style={styles.modalButtonsRow}>
+                <View style={styles.modalButtonsColumn}>
                   <TouchableOpacity
-                    style={[styles.primaryButton, styles.modalButton]}
+                    style={[
+                      styles.primaryButton,
+                      styles.modalButtonFull,
+                      !viewedDocHasFile && styles.buttonDisabled,
+                    ]}
+                    onPress={handleOpenDocument}
+                    disabled={!viewedDocHasFile || openingDoc}
+                  >
+                    <Text style={styles.primaryButtonText}>
+                      {openingDoc ? "Opening..." : "Open"}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.secondaryButton,
+                      styles.modalButtonFull,
+                      !viewedDocHasFile && styles.buttonDisabledSecondary,
+                    ]}
+                    onPress={handleSaveOffline}
+                    disabled={!viewedDocHasFile || savingOfflineDoc}
+                  >
+                    <Text style={styles.secondaryButtonText}>
+                      {savingOfflineDoc ? "Saving..." : "Save offline"}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.primaryButton, styles.modalButtonFull]}
                     onPress={handleMarkAsRead}
                   >
                     <Text style={styles.primaryButtonText}>Mark as read</Text>
                   </TouchableOpacity>
+
                   <TouchableOpacity
-                    style={[styles.secondaryButton, styles.modalButton]}
+                    style={[styles.secondaryButton, styles.modalButtonFull]}
                     onPress={() => setViewDoc(null)}
                   >
                     <Text style={styles.secondaryButtonText}>Close</Text>
@@ -439,7 +537,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#999",
   },
-  // Categories
   categoryRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -477,7 +574,6 @@ const styles = StyleSheet.create({
     color: "#777",
     marginTop: 2,
   },
-  // Docs list
   docRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -521,7 +617,6 @@ const styles = StyleSheet.create({
     height: 24,
     marginLeft: 8,
   },
-  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.35)",
@@ -555,13 +650,12 @@ const styles = StyleSheet.create({
     color: "#777",
     marginBottom: 16,
   },
-  modalButtonsRow: {
-    flexDirection: "row",
+  modalButtonsColumn: {
     marginTop: 4,
   },
-  modalButton: {
-    flex: 1,
-    marginHorizontal: 4,
+  modalButtonFull: {
+    width: "100%",
+    marginBottom: 10,
   },
   primaryButton: {
     backgroundColor: THEME_COLOR,
@@ -587,5 +681,11 @@ const styles = StyleSheet.create({
     color: THEME_COLOR,
     fontSize: 14,
     fontWeight: "600",
+  },
+  buttonDisabled: {
+    backgroundColor: "#9ccfd5",
+  },
+  buttonDisabledSecondary: {
+    borderColor: "#9ccfd5",
   },
 });
