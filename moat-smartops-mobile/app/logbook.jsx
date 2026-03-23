@@ -1,23 +1,4 @@
 // app/logbook.jsx
-// FULL DROP-IN REPLACEMENT (Trips + Purchases + Logs + Reminders)
-//
-// Adds:
-// ✅ Reminder panel above logbook (next reminder for selected vehicle)
-// ✅ Purchase: vendor dropdown + add new vendor, type dropdown from backend, project/task dropdowns
-// ✅ Log: vendor dropdown, type dropdown from backend, reminder dropdown
-// ✅ Slip photo label
-// ✅ Saving guards to prevent duplicate submissions
-//
-// Assumptions:
-// - Cached lists exist:
-//   @moat:cache:projects
-//   @moat:cache:tasks
-// - OrgId is at @moat:cache:orgid
-// - Token is at @moat:cache:token
-// - API base URL is at @moat:api
-// - database.js exports:
-//   saveVehicleCreate, saveVehicleTrip, saveVehiclePurchase, saveVehicleLog
-
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
@@ -42,6 +23,9 @@ import {
   saveVehiclePurchase,
   saveVehicleTrip,
 } from "../database";
+
+import { API_BASE_URL } from "../apiClient";
+import { syncOutbox } from "../syncOutbox";
 
 const THEME_COLOR = "#22a6b3";
 
@@ -180,6 +164,51 @@ function joinUrl(base, path) {
 async function getApiBaseUrl() {
   const v = await AsyncStorage.getItem(API_BASE_URL_KEY);
   return String(v || "").trim();
+}
+
+async function canReachServer(baseUrl) {
+  const root = String(baseUrl || API_BASE_URL || "").trim();
+  if (!root) return false;
+
+  try {
+    const controller =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), 3500)
+      : null;
+
+    const res = await fetch(root, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller ? controller.signal : undefined,
+    }).catch(() => null);
+
+    if (timeoutId) clearTimeout(timeoutId);
+
+    return !!res;
+  } catch {
+    return false;
+  }
+}
+
+async function tryAutoSyncLogbook(baseUrl) {
+  const reachable = await canReachServer(baseUrl);
+  if (!reachable) {
+    return { attempted: false, synced: 0, failed: 0 };
+  }
+
+  try {
+    const result = await syncOutbox({ limit: 50 });
+    return {
+      attempted: true,
+      synced: Number(result?.synced || 0),
+      failed: Number(result?.failed || 0),
+    };
+  } catch (e) {
+    console.log("[LOGBOOK] auto-sync failed", e);
+    return { attempted: true, synced: 0, failed: 1 };
+  }
 }
 
 async function getDeviceLocationSafe() {
@@ -1404,6 +1433,8 @@ export default function VehicleLogScreen() {
       const nextVehicles = buildVehicleListFromSources(map, cachedVehicles);
       setVehiclesList(nextVehicles);
 
+      let queuedCreate = false;
+
       try {
         const rowId = await saveVehicleCreate({
           orgId: asStringOrNull(orgId),
@@ -1418,6 +1449,7 @@ export default function VehicleLogScreen() {
           discRaw: meta.discRaw,
         });
         console.log("[LOGBOOK] vehicle-create saved rowId:", rowId);
+        queuedCreate = true;
       } catch (e) {
         console.log("[LOGBOOK] Failed to queue vehicle-create", e);
       }
@@ -1425,7 +1457,16 @@ export default function VehicleLogScreen() {
       setRegNumber(reg);
       setVehicle(make);
 
-      Alert.alert("Vehicle created", "Vehicle saved on this device.");
+      let message = "Vehicle saved on this device.";
+
+      if (queuedCreate) {
+        const syncResult = await tryAutoSyncLogbook(apiBaseUrl);
+        if (syncResult.attempted && syncResult.synced > 0) {
+          message = "Vehicle saved and synced to server.";
+        }
+      }
+
+      Alert.alert("Vehicle created", message);
       closeCreateVehicleModal();
     } finally {
       setIsSavingVehicleCreate(false);
@@ -1546,7 +1587,13 @@ export default function VehicleLogScreen() {
         await persistOpenTrip(reg, open);
         setOpenTrip(open);
 
-        Alert.alert("Trip started", "Trip start captured (offline-first).");
+        let message = "Trip start saved on this device.";
+        const syncResult = await tryAutoSyncLogbook(apiBaseUrl);
+        if (syncResult.attempted && syncResult.synced > 0) {
+          message = "Trip start saved and synced to server.";
+        }
+
+        Alert.alert("Trip started", message);
       } else {
         if (!openTrip) {
           Alert.alert(
@@ -1588,7 +1635,13 @@ export default function VehicleLogScreen() {
         await persistOpenTrip(reg, null);
         setOpenTrip(null);
 
-        Alert.alert("Trip ended", "Trip end captured (offline-first).");
+        let message = "Trip end saved on this device.";
+        const syncResult = await tryAutoSyncLogbook(apiBaseUrl);
+        if (syncResult.attempted && syncResult.synced > 0) {
+          message = "Trip end saved and synced to server.";
+        }
+
+        Alert.alert("Trip ended", message);
       }
 
       setTripModalVisible(false);
@@ -1695,7 +1748,13 @@ export default function VehicleLogScreen() {
       const rowId = await saveVehiclePurchase(payload);
       console.log("[LOGBOOK] purchase saved rowId:", rowId);
 
-      Alert.alert("Saved", "Purchase captured (offline-first).");
+      let message = "Purchase saved on this device.";
+      const syncResult = await tryAutoSyncLogbook(apiBaseUrl);
+      if (syncResult.attempted && syncResult.synced > 0) {
+        message = "Purchase saved and synced to server.";
+      }
+
+      Alert.alert("Saved", message);
 
       setPurchaseModalVisible(false);
       setPurchaseVendor("");
@@ -1781,7 +1840,13 @@ export default function VehicleLogScreen() {
       const rowId = await saveVehicleLog(payload);
       console.log("[LOGBOOK] log saved rowId:", rowId);
 
-      Alert.alert("Saved", "Log captured (offline-first).");
+      let message = "Log saved on this device.";
+      const syncResult = await tryAutoSyncLogbook(apiBaseUrl);
+      if (syncResult.attempted && syncResult.synced > 0) {
+        message = "Log saved and synced to server.";
+      }
+
+      Alert.alert("Saved", message);
 
       setLogModalVisible(false);
       setLogTypeId("");

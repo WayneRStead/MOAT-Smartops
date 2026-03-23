@@ -1,4 +1,3 @@
-// app/documents.js
 import { useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -14,13 +13,16 @@ import {
 import {
   fetchMobileLibraryDocuments,
   getAuthHeaders,
+  getDocumentOfflineStatus,
   getStoredUserId,
+  openProtectedDocument,
 } from "../apiClient";
 import { getDocumentReadMap, saveDocumentRead } from "../database";
+import { loadCachedLists } from "../refreshLists";
 
 const THEME_COLOR = "#22a6b3";
+const THEME_BG = "#f5f5f5";
 
-// categories & documents
 const EMPTY_DOCUMENT_CATEGORIES = [
   {
     id: "policies",
@@ -43,8 +45,12 @@ const EMPTY_DOCUMENT_CATEGORIES = [
 ];
 
 function guessDocType(doc) {
-  const mime = String(doc?.latest?.mime || "").toLowerCase();
-  const filename = String(doc?.latest?.filename || "").toLowerCase();
+  const mime = String(
+    doc?.latest?.mime || doc?.offlineMimeType || "",
+  ).toLowerCase();
+  const filename = String(
+    doc?.latest?.filename || doc?.offlineFilename || "",
+  ).toLowerCase();
 
   if (mime.includes("pdf") || filename.endsWith(".pdf")) return "PDF";
   if (mime.startsWith("image/")) return "IMAGE";
@@ -67,6 +73,16 @@ function guessDocType(doc) {
   return "FILE";
 }
 
+function normalizeDocId(raw) {
+  return String(raw?.id || raw?._id || raw?.backendId || "").trim();
+}
+
+function normalizeOfflineStatus(raw) {
+  if (raw?.offlineSaved || raw?.offlineUri) return "available";
+  if (raw?.latest?.url) return "not-downloaded";
+  return "no-file";
+}
+
 function buildCategoriesFromBackend(docs = []) {
   const categories = EMPTY_DOCUMENT_CATEGORIES.map((c) => ({
     ...c,
@@ -77,29 +93,98 @@ function buildCategoriesFromBackend(docs = []) {
     const folder = String(raw?.folder || "")
       .trim()
       .toLowerCase();
+
     const bucket = categories.find((c) => c.id === folder);
     if (!bucket) continue;
 
+    const id = normalizeDocId(raw);
+    const offlineStatus = normalizeOfflineStatus(raw);
+
     bucket.documents.push({
-      id: raw?.id || raw?._id,
-      backendId: raw?.id || raw?._id,
+      id,
+      backendId: id,
       title: raw?.title || "Untitled document",
       type: guessDocType(raw),
       updatedAt: raw?.updatedAt || raw?.createdAt || "",
       description:
         Array.isArray(raw?.tags) && raw.tags.length
           ? `Tags: ${raw.tags.join(", ")}`
-          : "Library document",
+          : "Company document",
       latest: raw?.latest || null,
       folder,
       channel: raw?.channel || "mobile-library",
+
+      offlineSaved: !!raw?.offlineSaved,
+      offlineUri: raw?.offlineUri || "",
+      offlineFilename: raw?.offlineFilename || raw?.latest?.filename || "",
+      offlineMimeType: raw?.offlineMimeType || raw?.latest?.mime || "",
+      offlineCheckedAt: raw?.offlineCheckedAt || null,
+      offlineStatus,
     });
   }
 
   return categories;
 }
 
-const THEME_BG = "#f5f5f5";
+function flattenCategories(categories = []) {
+  const out = [];
+  for (const cat of Array.isArray(categories) ? categories : []) {
+    for (const doc of Array.isArray(cat?.documents) ? cat.documents : []) {
+      out.push(doc);
+    }
+  }
+  return out;
+}
+
+function buildStatusMapFromDocs(docs = []) {
+  const map = {};
+  for (const doc of docs) {
+    const id = normalizeDocId(doc);
+    if (!id) continue;
+
+    map[id] = {
+      status: normalizeOfflineStatus(doc),
+      uri: doc?.offlineUri || "",
+      checkedAt: doc?.offlineCheckedAt || null,
+    };
+  }
+  return map;
+}
+
+function mergeDocsWithOfflineStatus(docs = [], statusMap = {}) {
+  return docs.map((doc) => {
+    const id = normalizeDocId(doc);
+    const statusEntry = statusMap[id] || null;
+    const saved = statusEntry?.status === "available";
+
+    return {
+      ...doc,
+      id,
+      _id: id,
+      backendId: id,
+      offlineSaved: saved,
+      offlineUri: statusEntry?.uri || doc?.offlineUri || "",
+      offlineCheckedAt: statusEntry?.checkedAt || new Date().toISOString(),
+      offlineStatus: saved
+        ? "available"
+        : doc?.latest?.url
+          ? "not-downloaded"
+          : "no-file",
+    };
+  });
+}
+
+function getOfflineStatusLabel(status) {
+  if (status === "available") return "Available offline";
+  if (status === "not-downloaded") return "Ready to download";
+  return "No file available";
+}
+
+function getOfflineStatusColor(status) {
+  if (status === "available") return "#27ae60";
+  if (status === "not-downloaded") return "#d68910";
+  return "#999";
+}
 
 export default function DocumentsScreen() {
   const router = useRouter();
@@ -113,7 +198,7 @@ export default function DocumentsScreen() {
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
   const [openingDoc, setOpeningDoc] = useState(false);
-  const [savingOfflineDoc, setSavingOfflineDoc] = useState(false);
+  const [offlineStatusMap, setOfflineStatusMap] = useState({});
 
   const selectedCategory =
     documentCategories.find((c) => c.id === selectedCategoryId) ||
@@ -121,12 +206,10 @@ export default function DocumentsScreen() {
     EMPTY_DOCUMENT_CATEGORIES[0];
 
   const viewedDocHasFile = useMemo(() => {
+    if (!viewDoc) return false;
+    if (viewDoc?.offlineStatus === "available") return true;
     return !!viewDoc?.latest?.url;
   }, [viewDoc]);
-
-  const handleOpenDoc = (doc) => {
-    setViewDoc(doc);
-  };
 
   const formatNow = () => {
     const d = new Date();
@@ -162,6 +245,83 @@ export default function DocumentsScreen() {
     );
   };
 
+  const loadReadHistory = async () => {
+    try {
+      const userId = await getStoredUserId();
+      const readMap = await getDocumentReadMap(userId || null);
+
+      const uiMap = {};
+      for (const [documentId, value] of Object.entries(readMap || {})) {
+        uiMap[documentId] = value?.lastReadAt || value?.firstReadAt || null;
+      }
+
+      setReadTimestamps(uiMap);
+    } catch (e) {
+      console.log("Failed to load document read history", e);
+    }
+  };
+
+  const loadCachedDocuments = async () => {
+    try {
+      const cached = await loadCachedLists();
+      const docs = Array.isArray(cached?.documents) ? cached.documents : [];
+
+      if (docs.length > 0) {
+        const categories = buildCategoriesFromBackend(docs);
+        setDocumentCategories(categories);
+        setOfflineStatusMap(buildStatusMapFromDocs(docs));
+      }
+    } catch (e) {
+      console.log("Failed to load cached documents", e);
+    }
+  };
+
+  const refreshOfflineStatuses = async (docs = []) => {
+    const safeDocs = Array.isArray(docs) ? docs : [];
+    const entries = await Promise.all(
+      safeDocs.map(async (doc) => {
+        const id = normalizeDocId(doc);
+        if (!id) return null;
+
+        try {
+          const check = await getDocumentOfflineStatus(doc);
+          return [
+            id,
+            {
+              status: check?.exists
+                ? "available"
+                : doc?.latest?.url
+                  ? "not-downloaded"
+                  : "no-file",
+              uri: check?.exists ? check.uri || "" : "",
+              checkedAt: new Date().toISOString(),
+            },
+          ];
+        } catch {
+          return [
+            id,
+            {
+              status: doc?.offlineSaved
+                ? "available"
+                : doc?.latest?.url
+                  ? "not-downloaded"
+                  : "no-file",
+              uri: doc?.offlineUri || "",
+              checkedAt: new Date().toISOString(),
+            },
+          ];
+        }
+      }),
+    );
+
+    const nextMap = {};
+    for (const item of entries) {
+      if (!item) continue;
+      nextMap[item[0]] = item[1];
+    }
+    return nextMap;
+  };
+
   const loadDocuments = async () => {
     try {
       setLoadingDocs(true);
@@ -174,42 +334,103 @@ export default function DocumentsScreen() {
           ? data.documents
           : [];
 
-      setDocumentCategories(buildCategoriesFromBackend(rows));
+      const liveCategories = buildCategoriesFromBackend(rows);
+      const flatDocs = flattenCategories(liveCategories);
+      const liveStatusMap = await refreshOfflineStatuses(flatDocs);
+      const mergedRows = mergeDocsWithOfflineStatus(rows, liveStatusMap);
+
+      setDocumentCategories(buildCategoriesFromBackend(mergedRows));
+      setOfflineStatusMap(liveStatusMap);
     } catch (e) {
       console.log("Failed to load mobile library documents", e);
-      setDocumentsError(e?.message || "Failed to load documents");
-      setDocumentCategories(EMPTY_DOCUMENT_CATEGORIES);
+
+      const currentlyShown = flattenCategories(documentCategories);
+      if (currentlyShown.length > 0) {
+        setDocumentsError("Showing saved documents");
+      } else {
+        setDocumentsError(e?.message || "Could not load documents");
+        setDocumentCategories(EMPTY_DOCUMENT_CATEGORIES);
+      }
     } finally {
       setLoadingDocs(false);
     }
   };
 
-  useEffect(() => {
-    loadDocuments();
-    loadReadHistory();
-  }, []);
+  const refreshSingleDocumentStatus = async (doc) => {
+    if (!doc) return null;
 
-  const loadReadHistory = async () => {
     try {
-      const userId = await getStoredUserId();
-      const readMap = await getDocumentReadMap(userId || null);
+      const check = await getDocumentOfflineStatus(doc);
+      const nextStatus = check?.exists
+        ? "available"
+        : doc?.latest?.url
+          ? "not-downloaded"
+          : "no-file";
 
-      const uiMap = {};
-      for (const [documentId, value] of Object.entries(readMap || {})) {
-        uiMap[documentId] = value?.firstReadAt || value?.lastReadAt || null;
-      }
+      const id = normalizeDocId(doc);
 
-      setReadTimestamps(uiMap);
+      setOfflineStatusMap((prev) => ({
+        ...prev,
+        [id]: {
+          status: nextStatus,
+          uri: check?.exists ? check.uri || "" : "",
+          checkedAt: new Date().toISOString(),
+        },
+      }));
+
+      setDocumentCategories((prev) =>
+        prev.map((cat) => ({
+          ...cat,
+          documents: cat.documents.map((item) => {
+            const same = normalizeDocId(item) === id;
+            if (!same) return item;
+
+            return {
+              ...item,
+              offlineSaved: nextStatus === "available",
+              offlineUri: check?.exists ? check.uri || "" : "",
+              offlineCheckedAt: new Date().toISOString(),
+              offlineStatus: nextStatus,
+            };
+          }),
+        })),
+      );
+
+      setViewDoc((prev) => {
+        if (!prev) return prev;
+        if (normalizeDocId(prev) !== id) return prev;
+
+        return {
+          ...prev,
+          offlineSaved: nextStatus === "available",
+          offlineUri: check?.exists ? check.uri || "" : "",
+          offlineCheckedAt: new Date().toISOString(),
+          offlineStatus: nextStatus,
+        };
+      });
+
+      return nextStatus;
     } catch (e) {
-      console.log("Failed to load document read history", e);
+      console.log("Failed to refresh document offline status", e);
+      return null;
     }
   };
+
+  const handleOpenDoc = async (doc) => {
+    setViewDoc(doc);
+    await refreshSingleDocumentStatus(doc);
+  };
+
+  useEffect(() => {
+    loadCachedDocuments();
+    loadReadHistory();
+    loadDocuments();
+  }, []);
 
   const handleMarkAsRead = async () => {
     if (!viewDoc) return;
 
     const timestamp = formatNow();
-
     const nowIso = new Date().toISOString();
     const auth = await getAuthHeaders({ json: true });
     const userId = await getStoredUserId();
@@ -240,13 +461,13 @@ export default function DocumentsScreen() {
       setViewDoc(null);
       Alert.alert(
         "Marked as read",
-        "Reading a document will record a read time for this device.",
+        "This document has been marked as read on this device.",
       );
     } catch (e) {
       console.log("Failed to save document read", e);
       Alert.alert(
         "Error",
-        "Could not record the read time on this device. It will still show as read in this session.",
+        "Could not mark this document as read on this device.",
       );
     }
   };
@@ -254,54 +475,20 @@ export default function DocumentsScreen() {
   const handleOpenDocument = async () => {
     if (!viewDoc) return;
 
-    if (!viewDoc?.latest?.url) {
-      Alert.alert(
-        "No file",
-        "This document does not have a file uploaded yet.",
-      );
+    if (!viewedDocHasFile) {
+      Alert.alert("No file", "There is no file attached to this document yet.");
       return;
     }
 
     try {
       setOpeningDoc(true);
-      const { openProtectedDocument } = await import("../apiClient");
       await openProtectedDocument(viewDoc);
+      await refreshSingleDocumentStatus(viewDoc);
     } catch (e) {
       console.log("Failed to open document", e);
       Alert.alert("Open failed", e?.message || "Could not open this document.");
     } finally {
       setOpeningDoc(false);
-    }
-  };
-
-  const handleSaveOffline = async () => {
-    if (!viewDoc) return;
-
-    if (!viewDoc?.latest?.url) {
-      Alert.alert(
-        "No file",
-        "This document does not have a file uploaded yet.",
-      );
-      return;
-    }
-
-    try {
-      setSavingOfflineDoc(true);
-      const { saveProtectedDocumentOffline } = await import("../apiClient");
-      await saveProtectedDocumentOffline(viewDoc);
-
-      Alert.alert(
-        "Saved offline",
-        "This document has been saved to this device for offline use.",
-      );
-    } catch (e) {
-      console.log("Failed to save document offline", e);
-      Alert.alert(
-        "Save failed",
-        e?.message || "Could not save this document offline.",
-      );
-    } finally {
-      setSavingOfflineDoc(false);
     }
   };
 
@@ -328,9 +515,8 @@ export default function DocumentsScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Documents</Text>
           <Text style={styles.cardSubtitle}>
-            Select a folder to view policies, safety documents or general
-            information. Reading a document will record a last read time for
-            this device.
+            Browse company documents by folder. Documents already opened or
+            refreshed on this device can be used offline.
           </Text>
 
           <View style={styles.categoryRow}>
@@ -379,6 +565,11 @@ export default function DocumentsScreen() {
           ) : (
             selectedCategory.documents.map((doc) => {
               const lastRead = readTimestamps[doc.id];
+              const status =
+                doc?.offlineStatus ||
+                offlineStatusMap[doc.id]?.status ||
+                "not-downloaded";
+
               return (
                 <TouchableOpacity
                   key={doc.id}
@@ -391,18 +582,30 @@ export default function DocumentsScreen() {
                       style={styles.docTypeIcon}
                     />
                   </View>
+
                   <View style={{ flex: 1 }}>
                     <Text style={styles.docTitle}>{doc.title}</Text>
                     <Text style={styles.docMeta}>
                       Type: {doc.type} | Updated:{" "}
                       {formatDisplayDate(doc.updatedAt)}
                     </Text>
+
+                    <Text
+                      style={[
+                        styles.docOffline,
+                        { color: getOfflineStatusColor(status) },
+                      ]}
+                    >
+                      {getOfflineStatusLabel(status)}
+                    </Text>
+
                     {lastRead ? (
-                      <Text style={styles.docRead}>First read: {lastRead}</Text>
+                      <Text style={styles.docRead}>Last read: {lastRead}</Text>
                     ) : (
                       <Text style={styles.docNotRead}>Not read yet</Text>
                     )}
                   </View>
+
                   <Image
                     source={require("../assets/trip.png")}
                     style={styles.docOpenIcon}
@@ -425,6 +628,7 @@ export default function DocumentsScreen() {
             {viewDoc && (
               <>
                 <Text style={styles.modalTitle}>{viewDoc.title}</Text>
+
                 <Text style={styles.modalMeta}>
                   Type: {viewDoc.type} | Updated:{" "}
                   {formatDisplayDate(viewDoc.updatedAt)}
@@ -434,9 +638,25 @@ export default function DocumentsScreen() {
                   {viewDoc.description}
                 </Text>
 
+                <Text
+                  style={[
+                    styles.modalStatus,
+                    {
+                      color: getOfflineStatusColor(
+                        viewDoc?.offlineStatus || "not-downloaded",
+                      ),
+                    },
+                  ]}
+                >
+                  {getOfflineStatusLabel(
+                    viewDoc?.offlineStatus || "not-downloaded",
+                  )}
+                </Text>
+
                 <Text style={styles.modalHint}>
-                  Open will fetch the protected backend file. Save offline will
-                  store a copy on the device for offline access.
+                  When a document is available offline, it will open from this
+                  device. If it is not saved yet, the app will download it when
+                  you open it and keep it for offline use next time.
                 </Text>
 
                 <View style={styles.modalButtonsColumn}>
@@ -450,21 +670,7 @@ export default function DocumentsScreen() {
                     disabled={!viewedDocHasFile || openingDoc}
                   >
                     <Text style={styles.primaryButtonText}>
-                      {openingDoc ? "Opening..." : "Open"}
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[
-                      styles.secondaryButton,
-                      styles.modalButtonFull,
-                      !viewedDocHasFile && styles.buttonDisabledSecondary,
-                    ]}
-                    onPress={handleSaveOffline}
-                    disabled={!viewedDocHasFile || savingOfflineDoc}
-                  >
-                    <Text style={styles.secondaryButtonText}>
-                      {savingOfflineDoc ? "Saving..." : "Save offline"}
+                      {openingDoc ? "Opening..." : "Open document"}
                     </Text>
                   </TouchableOpacity>
 
@@ -602,6 +808,11 @@ const styles = StyleSheet.create({
     color: "#777",
     marginTop: 2,
   },
+  docOffline: {
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: "600",
+  },
   docRead: {
     fontSize: 11,
     color: "#27ae60",
@@ -645,6 +856,11 @@ const styles = StyleSheet.create({
     color: "#333",
     marginBottom: 12,
   },
+  modalStatus: {
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
   modalHint: {
     fontSize: 11,
     color: "#777",
@@ -684,8 +900,5 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     backgroundColor: "#9ccfd5",
-  },
-  buttonDisabledSecondary: {
-    borderColor: "#9ccfd5",
   },
 });

@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
   Image,
@@ -11,7 +12,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { getStoredUserId } from "../apiClient";
+import { getCachedMe, getStoredUserId, refreshCachedMe } from "../apiClient";
 import { getDocumentReadMap, listOfflineEvents } from "../database";
 import { CACHE_DOCUMENTS, CACHE_TASKS } from "../refreshLists";
 
@@ -38,6 +39,8 @@ function extractId(value) {
     if (value._id) return extractId(value._id);
     if (value.id) return extractId(value.id);
     if (value.userId) return extractId(value.userId);
+    if (value.sub) return extractId(value.sub);
+    if (value.uid) return extractId(value.uid);
   }
 
   return "";
@@ -66,7 +69,13 @@ function isCompletedStatus(status) {
     .trim()
     .toLowerCase();
 
-  return s === "finished" || s === "completed" || s === "complete";
+  return (
+    s === "finished" ||
+    s === "completed" ||
+    s === "complete" ||
+    s === "done" ||
+    s === "closed"
+  );
 }
 
 function isInProgressStatus(status) {
@@ -96,7 +105,10 @@ function isPausedStatus(status) {
     .toLowerCase();
 
   return (
-    s === "paused" || s === "paused with problem" || s === "paused-with-problem"
+    s === "paused" ||
+    s === "paused with problem" ||
+    s === "paused-with-problem" ||
+    s === "paused - problem"
   );
 }
 
@@ -157,107 +169,100 @@ function taskAssignedToUser(task, userId) {
   return false;
 }
 
-function ActionTile({ label, icon, onPress, pulse = false }) {
-  const anim = useRef(new Animated.Value(1)).current;
+function PulseWrapper({ active, children, style }) {
+  const anim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (!pulse) {
+    if (!active) {
       anim.stopAnimation();
-      anim.setValue(1);
+      anim.setValue(0);
       return;
     }
 
     const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(anim, {
-          toValue: 0.55,
-          duration: 900,
-          useNativeDriver: true,
+          toValue: 1,
+          duration: 850,
+          useNativeDriver: false,
         }),
         Animated.timing(anim, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
+          toValue: 0,
+          duration: 850,
+          useNativeDriver: false,
         }),
       ]),
     );
 
     loop.start();
     return () => loop.stop();
-  }, [pulse, anim]);
+  }, [active, anim]);
+
+  const borderColor = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [THEME_COLOR, "#d8f3f6"],
+  });
 
   return (
-    <Animated.View style={{ width: "48%", opacity: anim }}>
-      <TouchableOpacity
-        style={[
-          styles.actionTile,
-          pulse && { borderWidth: 2, borderColor: THEME_COLOR },
-        ]}
-        onPress={onPress}
-        activeOpacity={0.85}
-      >
-        <View style={styles.actionIconWrap}>
-          <Image
-            source={icon}
-            style={styles.actionIconImage}
-            resizeMode="contain"
-          />
-        </View>
-        <Text style={styles.actionLabel}>{label}</Text>
-      </TouchableOpacity>
+    <Animated.View
+      style={[
+        style,
+        active && {
+          borderWidth: 2,
+          borderRadius: 10,
+          borderColor,
+          padding: 0,
+        },
+      ]}
+    >
+      {children}
     </Animated.View>
   );
 }
 
-function ModuleTile({ label, icon, onPress, pulse = false }) {
-  const anim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    if (!pulse) {
-      anim.stopAnimation();
-      anim.setValue(1);
-      return;
-    }
-
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, {
-          toValue: 0.55,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-        Animated.timing(anim, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    loop.start();
-    return () => loop.stop();
-  }, [pulse, anim]);
-
+function ActionTile({ label, icon, onPress, pulse = false }) {
   return (
-    <Animated.View style={{ width: "48%", opacity: anim }}>
-      <TouchableOpacity
-        style={[
-          styles.tile,
-          pulse && { borderWidth: 2, borderColor: THEME_COLOR },
-        ]}
-        onPress={onPress}
-        activeOpacity={0.8}
-      >
-        <View style={styles.tileIconPlaceholder}>
-          <Image
-            source={icon}
-            style={styles.tileIconImage}
-            resizeMode="contain"
-          />
-        </View>
-        <Text style={styles.tileLabel}>{label}</Text>
-      </TouchableOpacity>
-    </Animated.View>
+    <View style={{ width: "48%" }}>
+      <PulseWrapper active={pulse}>
+        <TouchableOpacity
+          style={styles.actionTile}
+          onPress={onPress}
+          activeOpacity={0.85}
+        >
+          <View style={styles.actionIconWrap}>
+            <Image
+              source={icon}
+              style={styles.actionIconImage}
+              resizeMode="contain"
+            />
+          </View>
+          <Text style={styles.actionLabel}>{label}</Text>
+        </TouchableOpacity>
+      </PulseWrapper>
+    </View>
+  );
+}
+
+function ModuleTile({ label, icon, onPress, pulse = false }) {
+  return (
+    <View style={{ width: "48%", marginBottom: 12 }}>
+      <PulseWrapper active={pulse}>
+        <TouchableOpacity
+          style={styles.tile}
+          onPress={onPress}
+          activeOpacity={0.8}
+        >
+          <View style={styles.tileIconPlaceholder}>
+            <Image
+              source={icon}
+              style={styles.tileIconImage}
+              resizeMode="contain"
+            />
+          </View>
+          <Text style={styles.tileLabel}>{label}</Text>
+        </TouchableOpacity>
+      </PulseWrapper>
+    </View>
   );
 }
 
@@ -276,24 +281,35 @@ export default function HomeScreen() {
     completed: 0,
   });
 
-  useEffect(() => {
-    loadHomeSummary();
-  }, []);
-
-  const loadHomeSummary = async () => {
+  const loadHomeSummary = useCallback(async () => {
     try {
-      const [storedTasksRaw, storedDocumentsRaw, userId] = await Promise.all([
-        AsyncStorage.getItem(CACHE_TASKS),
-        AsyncStorage.getItem(CACHE_DOCUMENTS),
-        getStoredUserId(),
-      ]);
+      // force backend identity refresh first
+      await refreshCachedMe();
+
+      const [storedTasksRaw, storedDocumentsRaw, userId, cachedMe] =
+        await Promise.all([
+          AsyncStorage.getItem(CACHE_TASKS),
+          AsyncStorage.getItem(CACHE_DOCUMENTS),
+          getStoredUserId(),
+          getCachedMe(),
+        ]);
 
       const tasks = safeParseArray(storedTasksRaw);
       const documents = safeParseArray(storedDocumentsRaw);
 
+      console.log("[HOME] stored userId:", userId);
+      console.log("[HOME] cached me:", cachedMe);
+      console.log("[HOME] cached tasks count:", tasks.length);
+      console.log("[HOME] cached documents count:", documents.length);
+      if (tasks.length) {
+        console.log("[HOME] first cached task sample:", tasks[0]);
+      }
+
       const myTaskRows = tasks.filter((task) =>
         taskAssignedToUser(task, userId),
       );
+
+      console.log("[HOME] matched my tasks:", myTaskRows.length);
 
       const now = new Date();
 
@@ -382,7 +398,17 @@ export default function HomeScreen() {
     } catch (e) {
       console.log("Failed to load home summary", e);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadHomeSummary();
+  }, [loadHomeSummary]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadHomeSummary();
+    }, [loadHomeSummary]),
+  );
 
   const totalTasks = myTasks.total || 0;
 
@@ -643,7 +669,6 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingVertical: 16,
     paddingHorizontal: 8,
-    marginBottom: 12,
     alignItems: "center",
     elevation: 2,
   },

@@ -35,6 +35,10 @@ const USER_ID_KEYS_FALLBACK = [USER_ID_KEY, "@moat:userid", "moat:userid"];
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL || "https://YOUR-RENDER-URL";
 
+function isLikelyMongoId(value) {
+  return /^[a-f0-9]{24}$/i.test(String(value || "").trim());
+}
+
 async function getFirstStorageValue(keys) {
   for (const k of keys) {
     try {
@@ -45,6 +49,72 @@ async function getFirstStorageValue(keys) {
     }
   }
   return { key: null, value: null };
+}
+
+function safeJsonParse(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function decodeBase64Url(input) {
+  try {
+    const s = String(input || "")
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+    const padded = s + "=".repeat((4 - (s.length % 4 || 4)) % 4);
+
+    if (typeof atob === "function") {
+      return atob(padded);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJwtPayload(token) {
+  try {
+    const raw = String(token || "").trim();
+    if (!raw) return null;
+
+    const parts = raw.split(".");
+    if (parts.length < 2) return null;
+
+    const decoded = decodeBase64Url(parts[1]);
+    if (!decoded) return null;
+
+    return safeJsonParse(decoded, null);
+  } catch {
+    return null;
+  }
+}
+
+function extractCandidateIds(source) {
+  if (!source || typeof source !== "object") return [];
+
+  const values = [
+    source._id,
+    source.id,
+    source.userId,
+    source.mongoUserId,
+    source.mongoId,
+    source.sub,
+    source.uid,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  return [...new Set(values)];
+}
+
+function pickBestUserId(candidates) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const mongoId = list.find((v) => isLikelyMongoId(v));
+  if (mongoId) return mongoId;
+  return list.find(Boolean) || "";
 }
 
 export async function getAuthHeaders({ json = true } = {}) {
@@ -220,21 +290,48 @@ function guessMimeTypeFromFilename(name = "") {
   return "application/octet-stream";
 }
 
+function buildDocumentVersionTag(doc) {
+  const source = String(
+    doc?.updatedAt ||
+      doc?.createdAt ||
+      doc?.latest?.updatedAt ||
+      doc?.latest?.createdAt ||
+      "v1",
+  ).trim();
+
+  return source.replace(/[^a-zA-Z0-9]/g, "").slice(0, 40) || "v1";
+}
+
+function buildDocumentStorageFilename(doc, rawFilename, mimeType) {
+  const safeBase = ensureExtension(rawFilename || "document", mimeType);
+  const docId = sanitizeFilename(
+    String(doc?.id || doc?._id || doc?.backendId || "document"),
+  ).slice(0, 40);
+  const versionTag = buildDocumentVersionTag(doc);
+  const prefix = [docId || "document", versionTag || "v1"]
+    .filter(Boolean)
+    .join("_");
+
+  return sanitizeFilename(`${prefix}_${safeBase}`);
+}
+
 function normalizeDocumentInput(doc) {
   const latest = doc?.latest || {};
   const urlPath = String(latest?.url || "").trim();
-  const filename = ensureExtension(
-    latest?.filename || doc?.title || "document",
-    latest?.mime || "",
-  );
+
+  const rawFilename =
+    latest?.filename || doc?.offlineFilename || doc?.title || "document";
   const mimeType =
-    String(latest?.mime || "").trim() || guessMimeTypeFromFilename(filename);
+    String(latest?.mime || doc?.offlineMimeType || "").trim() ||
+    guessMimeTypeFromFilename(rawFilename);
+
+  const filename = buildDocumentStorageFilename(doc, rawFilename, mimeType);
 
   return {
     urlPath,
     filename,
     mimeType,
-    title: String(doc?.title || filename || "document"),
+    title: String(doc?.title || rawFilename || "document"),
   };
 }
 
@@ -326,6 +423,25 @@ export async function saveProtectedDocumentOffline(doc, options = {}) {
   };
 }
 
+export async function ensureProtectedDocumentOffline(doc, options = {}) {
+  const existing = await getOfflineDocumentUri(doc);
+  if (existing?.exists && !options.forceRedownload) {
+    return {
+      uri: existing.uri,
+      filename: existing.filename,
+      mimeType: existing.mimeType,
+      title: existing.title,
+      alreadyExisted: true,
+    };
+  }
+
+  const saved = await saveProtectedDocumentOffline(doc, options);
+  return {
+    ...saved,
+    alreadyExisted: false,
+  };
+}
+
 async function openLocalFile(uri, mimeType) {
   if (!uri) {
     throw new Error("Local file URI is missing");
@@ -352,8 +468,24 @@ async function openLocalFile(uri, mimeType) {
   return true;
 }
 
-export async function openProtectedDocument(doc) {
-  const saved = await saveProtectedDocumentOffline(doc);
+export async function openProtectedDocument(doc, options = {}) {
+  const existing = await getOfflineDocumentUri(doc);
+
+  if (existing?.exists && !options.forceRedownload) {
+    await openLocalFile(existing.uri, existing.mimeType);
+
+    return {
+      ok: true,
+      uri: existing.uri,
+      filename: existing.filename,
+      mimeType: existing.mimeType,
+      title: existing.title,
+      openedOfflineCopy: true,
+      downloadedNow: false,
+    };
+  }
+
+  const saved = await saveProtectedDocumentOffline(doc, options);
   await openLocalFile(saved.uri, saved.mimeType);
 
   return {
@@ -363,6 +495,7 @@ export async function openProtectedDocument(doc) {
     mimeType: saved.mimeType,
     title: saved.title,
     openedOfflineCopy: true,
+    downloadedNow: true,
   };
 }
 
@@ -380,6 +513,23 @@ export async function getOfflineDocumentUri(doc) {
   };
 }
 
+export async function getDocumentOfflineStatus(doc) {
+  const info = await getOfflineDocumentUri(doc);
+
+  return {
+    exists: !!info?.exists,
+    uri: info?.exists ? info.uri || "" : "",
+    filename: info?.filename || "",
+    mimeType: info?.mimeType || "",
+    title: info?.title || "",
+    status: info?.exists
+      ? "available"
+      : doc?.latest?.url
+        ? "not-downloaded"
+        : "no-file",
+  };
+}
+
 // Fetch backend user profile and cache it locally
 export async function refreshCachedMe() {
   try {
@@ -389,8 +539,7 @@ export async function refreshCachedMe() {
     if (user) {
       await AsyncStorage.setItem(CACHE_ME_KEY, JSON.stringify(user));
 
-      const userId = user?._id || user?.id || user?.userId || "";
-
+      const userId = pickBestUserId(extractCandidateIds(user));
       if (userId) {
         await AsyncStorage.setItem(USER_ID_KEY, String(userId));
       }
@@ -413,6 +562,58 @@ export async function getCachedMe() {
 }
 
 export async function getStoredUserId() {
-  const found = await getFirstStorageValue(USER_ID_KEYS_FALLBACK);
-  return found.value ? String(found.value) : "";
+  // 1) cached backend user
+  try {
+    const cachedMe = await getCachedMe();
+    const cachedMeId = pickBestUserId(extractCandidateIds(cachedMe));
+    if (cachedMeId && isLikelyMongoId(cachedMeId)) {
+      return String(cachedMeId);
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2) stored explicit user id
+  try {
+    const found = await getFirstStorageValue(USER_ID_KEYS_FALLBACK);
+    const storedId = String(found.value || "").trim();
+    if (storedId && isLikelyMongoId(storedId)) {
+      return storedId;
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3) token payload
+  try {
+    const tokenFound = await getFirstStorageValue(TOKEN_KEYS_FALLBACK);
+    const payload = parseJwtPayload(tokenFound.value);
+    const tokenId = pickBestUserId(extractCandidateIds(payload));
+    if (tokenId && isLikelyMongoId(tokenId)) {
+      await AsyncStorage.setItem(USER_ID_KEY, String(tokenId));
+      return String(tokenId);
+    }
+  } catch {
+    // ignore
+  }
+
+  // 4) live backend whoami lookup
+  try {
+    const liveUser = await refreshCachedMe();
+    const liveId = pickBestUserId(extractCandidateIds(liveUser));
+    if (liveId && isLikelyMongoId(liveId)) {
+      await AsyncStorage.setItem(USER_ID_KEY, String(liveId));
+      return String(liveId);
+    }
+  } catch {
+    // ignore
+  }
+
+  // 5) final fallback
+  try {
+    const found = await getFirstStorageValue(USER_ID_KEYS_FALLBACK);
+    return found.value ? String(found.value).trim() : "";
+  } catch {
+    return "";
+  }
 }

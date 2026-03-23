@@ -1,10 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   apiGet,
+  ensureProtectedDocumentOffline,
   fetchMobileLibraryDocuments,
   getOfflineDocumentUri,
-  saveProtectedDocumentOffline,
 } from "./apiClient";
+import { upsertOfflineDocumentCacheBatch } from "./database";
 
 export const CACHE_PROJECTS = "@moat:cache:projects";
 export const CACHE_TASKS = "@moat:cache:tasks";
@@ -26,6 +27,14 @@ function safeArray(v) {
 
 function safeObject(v) {
   return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
+function safeJsonParse(raw, fallback) {
+  try {
+    return JSON.parse(raw || "");
+  } catch {
+    return fallback;
+  }
 }
 
 function buildMilestonesByTask(milestones) {
@@ -63,6 +72,8 @@ function filterMobileLibraryDocuments(documents) {
 
 function buildOfflineDocumentCacheRow(doc, offlineInfo = null) {
   const id = docIdOf(doc);
+  const hasFile = !!doc?.latest?.url;
+  const offlineSaved = !!offlineInfo?.uri;
 
   return {
     id,
@@ -79,7 +90,13 @@ function buildOfflineDocumentCacheRow(doc, offlineInfo = null) {
     createdAt: doc?.createdAt || null,
     latest: doc?.latest || null,
 
-    offlineSaved: !!offlineInfo?.uri,
+    hasFile,
+    offlineSaved,
+    offlineStatus: offlineSaved
+      ? "available"
+      : hasFile
+        ? "not-downloaded"
+        : "no-file",
     offlineUri: offlineInfo?.uri || "",
     offlineFilename: offlineInfo?.filename || doc?.latest?.filename || "",
     offlineMimeType: offlineInfo?.mimeType || doc?.latest?.mime || "",
@@ -88,10 +105,23 @@ function buildOfflineDocumentCacheRow(doc, offlineInfo = null) {
   };
 }
 
+async function readExistingCachedDocuments() {
+  try {
+    const raw = await AsyncStorage.getItem(CACHE_DOCUMENTS);
+    const rows = safeJsonParse(raw, []);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
 async function refreshMobileLibraryOfflineDocuments() {
   let mobileDocs = [];
   let savedCount = 0;
   let failedCount = 0;
+  let usedExistingCache = false;
+
+  const existingCachedRows = await readExistingCachedDocuments();
 
   try {
     const data = await fetchMobileLibraryDocuments();
@@ -104,7 +134,15 @@ async function refreshMobileLibraryOfflineDocuments() {
     mobileDocs = filterMobileLibraryDocuments(rows);
   } catch (e) {
     console.log("[refreshLists] failed to fetch mobile library documents", e);
-    mobileDocs = [];
+    usedExistingCache = true;
+
+    return {
+      mobileDocs: [],
+      cachedRows: existingCachedRows,
+      savedCount: 0,
+      failedCount: 0,
+      usedExistingCache,
+    };
   }
 
   const cachedRows = [];
@@ -118,19 +156,31 @@ async function refreshMobileLibraryOfflineDocuments() {
         continue;
       }
 
-      const saved = await saveProtectedDocumentOffline(doc);
-      const check = await getOfflineDocumentUri(doc);
+      const existing = await getOfflineDocumentUri(doc);
 
-      if (check?.exists) {
+      if (existing?.exists) {
         savedCount += 1;
         cachedRows.push(
           buildOfflineDocumentCacheRow(doc, {
-            uri: check.uri || saved?.uri || "",
-            filename:
-              check.filename || saved?.filename || doc?.latest?.filename || "",
-            mimeType:
-              check.mimeType || saved?.mimeType || doc?.latest?.mime || "",
-            title: saved?.title || doc?.title || "",
+            uri: existing.uri || "",
+            filename: existing.filename || doc?.latest?.filename || "",
+            mimeType: existing.mimeType || doc?.latest?.mime || "",
+            title: existing.title || doc?.title || "",
+          }),
+        );
+        continue;
+      }
+
+      const saved = await ensureProtectedDocumentOffline(doc);
+
+      if (saved?.uri) {
+        savedCount += 1;
+        cachedRows.push(
+          buildOfflineDocumentCacheRow(doc, {
+            uri: saved.uri || "",
+            filename: saved.filename || doc?.latest?.filename || "",
+            mimeType: saved.mimeType || doc?.latest?.mime || "",
+            title: saved.title || doc?.title || "",
           }),
         );
       } else {
@@ -140,7 +190,7 @@ async function refreshMobileLibraryOfflineDocuments() {
     } catch (e) {
       failedCount += 1;
       console.log(
-        "[refreshLists] failed to save document offline:",
+        "[refreshLists] failed to cache document offline:",
         doc?.title || doc?.id || doc?._id,
         e?.message || e,
       );
@@ -153,6 +203,7 @@ async function refreshMobileLibraryOfflineDocuments() {
     cachedRows,
     savedCount,
     failedCount,
+    usedExistingCache,
   };
 }
 
@@ -180,6 +231,7 @@ export async function refreshListsFromServer() {
     cachedRows: mobileLibraryDocumentCache,
     savedCount: mobileLibrarySavedCount,
     failedCount: mobileLibraryFailedCount,
+    usedExistingCache,
   } = await refreshMobileLibraryOfflineDocuments();
 
   await AsyncStorage.multiSet([
@@ -198,6 +250,15 @@ export async function refreshListsFromServer() {
     [CACHE_LAST_REFRESH, new Date().toISOString()],
   ]);
 
+  try {
+    await upsertOfflineDocumentCacheBatch(mobileLibraryDocumentCache);
+  } catch (e) {
+    console.log(
+      "[refreshLists] warning: failed to mirror offline docs into sqlite",
+      e,
+    );
+  }
+
   return {
     projectsCount: projects.length,
     tasksCount: tasks.length,
@@ -213,9 +274,12 @@ export async function refreshListsFromServer() {
       ? definitions.vehicleEntryTypes.length
       : 0,
 
-    mobileLibraryDocumentsCount: mobileDocs.length,
+    mobileLibraryDocumentsCount: usedExistingCache
+      ? mobileLibraryDocumentCache.length
+      : mobileDocs.length,
     mobileLibrarySavedOfflineCount: mobileLibrarySavedCount,
     mobileLibraryFailedOfflineCount: mobileLibraryFailedCount,
+    mobileLibraryUsedExistingCache: usedExistingCache,
   };
 }
 

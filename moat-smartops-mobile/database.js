@@ -14,6 +14,7 @@ async function getDb() {
       await db.execAsync(`PRAGMA journal_mode = WAL;`);
       await ensureOfflineEventsSchema(db);
       await ensureDocumentReadsSchema(db);
+      await ensureOfflineDocumentsSchema(db);
       return db;
     })();
   }
@@ -154,10 +155,75 @@ async function ensureDocumentReadsSchema(db) {
   }
 }
 
+async function ensureOfflineDocumentsSchema(db) {
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS offline_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      documentId TEXT NOT NULL,
+      title TEXT,
+      folder TEXT,
+      channel TEXT,
+      updatedAt TEXT,
+      createdAt TEXT,
+      hasFile INTEGER NOT NULL DEFAULT 0,
+      offlineSaved INTEGER NOT NULL DEFAULT 0,
+      offlineStatus TEXT,
+      offlineUri TEXT,
+      offlineFilename TEXT,
+      offlineMimeType TEXT,
+      offlineTitle TEXT,
+      offlineCheckedAt TEXT,
+      latestJson TEXT,
+      tagsJson TEXT,
+      syncedAt TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_documents_unique
+      ON offline_documents(documentId);
+
+    CREATE INDEX IF NOT EXISTS idx_offline_documents_status
+      ON offline_documents(offlineStatus, offlineCheckedAt);
+
+    CREATE INDEX IF NOT EXISTS idx_offline_documents_folder
+      ON offline_documents(folder, title);
+  `);
+
+  try {
+    const cols = await db.getAllAsync(`PRAGMA table_info(offline_documents);`);
+    const colNames = new Set((cols || []).map((c) => c?.name).filter(Boolean));
+
+    const addCol = async (name, ddl) => {
+      if (!colNames.has(name)) {
+        await db.execAsync(`ALTER TABLE offline_documents ADD COLUMN ${ddl};`);
+      }
+    };
+
+    await addCol("documentId", "documentId TEXT");
+    await addCol("title", "title TEXT");
+    await addCol("folder", "folder TEXT");
+    await addCol("channel", "channel TEXT");
+    await addCol("updatedAt", "updatedAt TEXT");
+    await addCol("createdAt", "createdAt TEXT");
+    await addCol("hasFile", "hasFile INTEGER NOT NULL DEFAULT 0");
+    await addCol("offlineSaved", "offlineSaved INTEGER NOT NULL DEFAULT 0");
+    await addCol("offlineStatus", "offlineStatus TEXT");
+    await addCol("offlineUri", "offlineUri TEXT");
+    await addCol("offlineFilename", "offlineFilename TEXT");
+    await addCol("offlineMimeType", "offlineMimeType TEXT");
+    await addCol("offlineTitle", "offlineTitle TEXT");
+    await addCol("offlineCheckedAt", "offlineCheckedAt TEXT");
+    await addCol("latestJson", "latestJson TEXT");
+    await addCol("tagsJson", "tagsJson TEXT");
+    await addCol("syncedAt", "syncedAt TEXT NOT NULL DEFAULT ''");
+  } catch (e) {
+    console.log("[DB] schema guard warning (offline_documents)", e);
+  }
+}
+
 export async function initDatabase() {
   await getDb();
   console.log(
-    "[DB] initDatabase complete (offline_events + document_reads ready)",
+    "[DB] initDatabase complete (offline_events + document_reads + offline_documents ready)",
   );
   return true;
 }
@@ -340,6 +406,160 @@ export async function getDocumentRead(documentId, userId = null) {
     [safeDocumentId],
   );
   return row || null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  OFFLINE DOCUMENT CACHE                                             */
+/* ------------------------------------------------------------------ */
+
+export async function upsertOfflineDocumentCache(row) {
+  const db = await getDb();
+
+  const documentId = String(
+    row?.id || row?._id || row?.documentId || "",
+  ).trim();
+  if (!documentId) return null;
+
+  const syncedAt = nowIso();
+
+  const existing = await db.getFirstAsync(
+    `SELECT id FROM offline_documents WHERE documentId = ? LIMIT 1`,
+    [documentId],
+  );
+
+  const values = [
+    documentId,
+    row?.title ?? null,
+    row?.folder ?? null,
+    row?.channel ?? null,
+    row?.updatedAt ?? null,
+    row?.createdAt ?? null,
+    row?.hasFile ? 1 : 0,
+    row?.offlineSaved ? 1 : 0,
+    row?.offlineStatus ?? null,
+    row?.offlineUri ?? null,
+    row?.offlineFilename ?? null,
+    row?.offlineMimeType ?? null,
+    row?.offlineTitle ?? null,
+    row?.offlineCheckedAt ?? null,
+    safeJson(row?.latest ?? null),
+    safeJsonArray(row?.tags ?? []),
+    syncedAt,
+  ];
+
+  if (existing?.id) {
+    await db.runAsync(
+      `UPDATE offline_documents
+       SET documentId = ?,
+           title = ?,
+           folder = ?,
+           channel = ?,
+           updatedAt = ?,
+           createdAt = ?,
+           hasFile = ?,
+           offlineSaved = ?,
+           offlineStatus = ?,
+           offlineUri = ?,
+           offlineFilename = ?,
+           offlineMimeType = ?,
+           offlineTitle = ?,
+           offlineCheckedAt = ?,
+           latestJson = ?,
+           tagsJson = ?,
+           syncedAt = ?
+       WHERE id = ?`,
+      [...values, existing.id],
+    );
+
+    return existing.id;
+  }
+
+  const result = await db.runAsync(
+    `INSERT INTO offline_documents
+      (documentId, title, folder, channel, updatedAt, createdAt, hasFile, offlineSaved,
+       offlineStatus, offlineUri, offlineFilename, offlineMimeType, offlineTitle,
+       offlineCheckedAt, latestJson, tagsJson, syncedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    values,
+  );
+
+  return result?.lastInsertRowId ?? null;
+}
+
+export async function upsertOfflineDocumentCacheBatch(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const ids = [];
+
+  for (const row of safeRows) {
+    try {
+      const id = await upsertOfflineDocumentCache(row);
+      if (id) ids.push(id);
+    } catch (e) {
+      console.log("[DB] failed to upsert offline document cache row", e);
+    }
+  }
+
+  return ids;
+}
+
+export async function listOfflineDocuments() {
+  const db = await getDb();
+  const rows = await db.getAllAsync(
+    `SELECT *
+     FROM offline_documents
+     ORDER BY folder ASC, title ASC`,
+  );
+
+  return (rows || []).map((row) => {
+    let latest = null;
+    let tags = [];
+
+    try {
+      latest = row?.latestJson ? JSON.parse(row.latestJson) : null;
+    } catch {
+      latest = null;
+    }
+
+    try {
+      tags = row?.tagsJson ? JSON.parse(row.tagsJson) : [];
+    } catch {
+      tags = [];
+    }
+
+    return {
+      id: row?.documentId || "",
+      _id: row?.documentId || "",
+      title: row?.title || "",
+      folder: row?.folder || "",
+      channel: row?.channel || "",
+      updatedAt: row?.updatedAt || null,
+      createdAt: row?.createdAt || null,
+      hasFile: !!row?.hasFile,
+      offlineSaved: !!row?.offlineSaved,
+      offlineStatus: row?.offlineStatus || "not-downloaded",
+      offlineUri: row?.offlineUri || "",
+      offlineFilename: row?.offlineFilename || "",
+      offlineMimeType: row?.offlineMimeType || "",
+      offlineTitle: row?.offlineTitle || "",
+      offlineCheckedAt: row?.offlineCheckedAt || null,
+      latest,
+      tags,
+      syncedAt: row?.syncedAt || null,
+    };
+  });
+}
+
+export async function getOfflineDocumentCacheMap() {
+  const rows = await listOfflineDocuments();
+  const map = {};
+
+  for (const row of rows) {
+    const id = String(row?.id || "").trim();
+    if (!id) continue;
+    map[id] = row;
+  }
+
+  return map;
 }
 
 /* ------------------------------------------------------------------ */
