@@ -1,6 +1,6 @@
 // moat-smartops-mobile/app/index.jsx
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithCustomToken } from "firebase/auth";
 import { auth } from "../firebase";
 
 import { useRouter } from "expo-router";
@@ -17,7 +17,13 @@ import {
   View,
 } from "react-native";
 
-import { ORG_KEY, TOKEN_KEY } from "../apiClient";
+import {
+  API_BASE_URL,
+  CACHE_ME_KEY,
+  ORG_KEY,
+  TOKEN_KEY,
+  USER_ID_KEY,
+} from "../apiClient";
 import { initDatabase } from "../database";
 
 const THEME_COLOR = "#22a6b3";
@@ -40,6 +46,35 @@ function safeTokenPreview(token) {
   const t = String(token);
   if (t.length <= 24) return t;
   return `${t.slice(0, 12)}...${t.slice(-12)} (len=${t.length})`;
+}
+
+async function loginAgainstBackend(email, password) {
+  const base = String(API_BASE_URL || "").replace(/\/+$/, "");
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: String(email || "")
+        .trim()
+        .toLowerCase(),
+      password: String(password || ""),
+    }),
+  });
+
+  const text = await res.text();
+  let json = null;
+
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+
+  if (!res.ok) {
+    throw new Error(json?.error || json?.message || `HTTP ${res.status}`);
+  }
+
+  return json || {};
 }
 
 export default function LoginScreen() {
@@ -66,52 +101,91 @@ export default function LoginScreen() {
       const email = username.trim();
       const pass = password;
 
-      // ✅ Firebase sign-in
-      const cred = await signInWithEmailAndPassword(auth, email, pass);
+      const data = await loginAgainstBackend(email, pass);
 
-      // ✅ Firebase JWT (used for backend Authorization: Bearer <token>)
-      // Force refresh to ensure we always get a current token
-      const token = await cred.user.getIdToken(true);
+      const token = String(data?.token || "").trim();
+      const firebaseCustomToken = String(
+        data?.firebaseCustomToken || "",
+      ).trim();
+      const user = data?.user || null;
+      const currentOrgId = data?.currentOrgId
+        ? String(data.currentOrgId)
+        : null;
 
-      // ✅ Store token in BOTH keys (compat with older code that expects @moat:cache:token)
-      await AsyncStorage.setItem(TOKEN_KEY, token); // @moat:token (apiClient reads this)
-      await AsyncStorage.setItem(TOKEN_KEY_COMPAT, token); // @moat:cache:token (older screens)
+      if (!token) {
+        throw new Error("Login succeeded but no backend token was returned.");
+      }
 
-      // ✅ Store firebase identity for consistent role/user resolution
-      const firebaseUid = String(cred.user.uid || "");
-      const firebaseEmail = String(cred.user.email || email || "");
+      await AsyncStorage.setItem(TOKEN_KEY, token);
+      await AsyncStorage.setItem(TOKEN_KEY_COMPAT, token);
 
-      await AsyncStorage.setItem(FIREBASE_UID_KEY, firebaseUid);
-      await AsyncStorage.setItem(FIREBASE_EMAIL_KEY, firebaseEmail);
+      if (user) {
+        await AsyncStorage.setItem(CACHE_ME_KEY, JSON.stringify(user));
 
-      // ✅ Optional: store a small session object (nice for debugging / future mapping)
+        const mongoUserId = String(
+          user?._id || user?.id || user?.userId || "",
+        ).trim();
+
+        if (mongoUserId) {
+          await AsyncStorage.setItem(USER_ID_KEY, mongoUserId);
+        }
+      }
+
+      const firebaseUid = String(user?.firebaseUid || "").trim();
+      const firebaseEmail = String(user?.email || email || "").trim();
+
+      if (firebaseUid) {
+        await AsyncStorage.setItem(FIREBASE_UID_KEY, firebaseUid);
+      }
+      if (firebaseEmail) {
+        await AsyncStorage.setItem(FIREBASE_EMAIL_KEY, firebaseEmail);
+      }
+
       await AsyncStorage.setItem(
         AUTH_SESSION_KEY,
         JSON.stringify({
+          mode: "backend-first",
           firebaseUid,
           email: firebaseEmail,
           tokenSavedAt: new Date().toISOString(),
+          currentOrgId: currentOrgId || null,
         }),
       );
 
-      // ✅ Clear org so user must select (prevents wrong-org issues during testing)
-      await AsyncStorage.removeItem(ORG_KEY);
+      if (currentOrgId) {
+        await AsyncStorage.setItem(ORG_KEY, currentOrgId);
+      } else {
+        await AsyncStorage.removeItem(ORG_KEY);
+      }
 
-      // ✅ DEBUG LOGS (won’t crash)
-      console.log("[AUTH] login ok:", { firebaseUid, firebaseEmail });
-      console.log("[AUTH] token preview:", safeTokenPreview(token));
+      if (firebaseCustomToken) {
+        try {
+          await signInWithCustomToken(auth, firebaseCustomToken);
+        } catch (e) {
+          console.log("[AUTH] Firebase custom-token sign-in failed", e);
+        }
+      }
 
-      // If you REALLY need the full token printed, uncomment this line:
-      console.log("[AUTH] FULL TOKEN:", token);
+      console.log("[AUTH] backend login ok:", {
+        firebaseUid,
+        firebaseEmail,
+        currentOrgId,
+      });
+      console.log("[AUTH] backend token preview:", safeTokenPreview(token));
 
-      // Go select org (bootstrap endpoint does not require x-org-id)
-      router.replace("/org-select");
+      if (currentOrgId) {
+        router.replace("/home");
+      } else {
+        router.replace("/org-select");
+      }
     } catch (e) {
       console.log("Login error", e);
-      Alert.alert("Login failed", "Check your email/password and try again.");
+      Alert.alert(
+        "Login failed",
+        e?.message || "Check your email/password and try again.",
+      );
     }
   };
-
   const handleForgotPassword = () => {
     console.log("Forgot password pressed for", username);
   };
