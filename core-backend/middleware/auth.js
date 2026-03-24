@@ -1,7 +1,6 @@
-// core-backend/middleware/auth.js
 // Auth middleware that supports:
 // 1) Firebase ID tokens (mobile / new auth)
-// 2) Optional legacy backend JWT tokens (web / temporary fallback)
+// 2) Optional legacy backend JWT tokens (web / backend-first mobile fallback)
 //
 // IMPORTANT CHANGE:
 // - requireAuth() NO LONGER requires x-org-id.
@@ -101,17 +100,14 @@ function resolveOrgContext(req, _res, next) {
 }
 
 function requireOrg(req, res, next) {
-  // FULL PATH (works behind routers like /api/mobile)
   const fullPath = `${req.baseUrl || ""}${req.path || ""}`;
 
-  // ✅ Allow these endpoints to work BEFORE org selection
   const isBootstrap =
     fullPath === "/api/mobile/bootstrap" ||
     fullPath === "/mobile/bootstrap" ||
     fullPath === "/api/mobile/whoami" ||
     fullPath === "/mobile/whoami";
 
-  // 1) If org header/query/body provided, use it normally
   const got = readOrgIdFrom(req);
   if (got?.id) {
     req.orgId = got.id;
@@ -119,27 +115,19 @@ function requireOrg(req, res, next) {
     return next();
   }
 
-  // 2) If no org provided BUT we have an authenticated user with a single orgId,
-  //    we can safely use that (this fixes your bootstrap loop immediately)
   if (req.user?.orgId) {
     const id = String(req.user.orgId);
     req.orgId = id;
     req.orgObjectId = mongoose.isValidObjectId(id)
       ? new mongoose.Types.ObjectId(id)
       : undefined;
-
-    // ✅ For bootstrap/whoami this is exactly what we want.
-    // ✅ For other routes, this also helps if your users only ever have one org.
     return next();
   }
 
-  // 3) If this is bootstrap/whoami and we STILL don't have org, allow it through
-  //    (bootstrap will return empty org list)
   if (isBootstrap) {
     return next();
   }
 
-  // 4) Everything else must have org context
   return res.status(400).json({
     error: 'Missing organization context. Send header "x-org-id: <orgId>".',
   });
@@ -179,7 +167,6 @@ function buildOrgWhereIfProvided(req) {
   const got = readOrgIdFrom(req);
   if (!got?.id) return {};
 
-  // Keep these available for downstream handlers
   req.orgId = got.id;
   req.orgObjectId = got.objectId || undefined;
 
@@ -205,7 +192,6 @@ async function requireAuth(req, res, next) {
   const token = getTokenFrom(req);
   if (!token) return res.status(401).json({ error: "Missing token" });
 
-  // If org is provided, we will scope. If not, allow global lookup.
   let orgWhere = {};
   try {
     orgWhere = buildOrgWhereIfProvided(req);
@@ -229,15 +215,12 @@ async function requireAuth(req, res, next) {
       $or: [{ firebaseUid }, ...(email ? [{ email }] : [])],
     });
 
-    // If orgWhere is present and user wasn't found, do NOT silently fall back.
-    // That protects tenant boundaries on normal requests.
     if (!user && Object.keys(orgWhere).length) {
       return res
         .status(401)
         .json({ error: "User not found in this organisation" });
     }
 
-    // If orgWhere was empty (bootstrap case), allow global match
     if (!user && !Object.keys(orgWhere).length) {
       user = await User.findOne({
         isDeleted: { $ne: true },
@@ -249,7 +232,6 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: "User not found" });
     }
 
-    // Bind firebaseUid once
     if (!user.firebaseUid) {
       user.firebaseUid = firebaseUid;
       await user.save();
@@ -265,7 +247,7 @@ async function requireAuth(req, res, next) {
     // fall through to legacy JWT verification
   }
 
-  // ---------- 2) Fallback: legacy backend JWT ----------
+  // ---------- 2) Fallback: legacy/backend JWT ----------
   try {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -282,9 +264,12 @@ async function requireAuth(req, res, next) {
 
     const or = [];
     if (email) or.push({ email });
-    if (sub && mongoose.isValidObjectId(sub))
+    if (sub && mongoose.isValidObjectId(sub)) {
       or.push({ _id: new mongoose.Types.ObjectId(sub) });
-    if (sub && !mongoose.isValidObjectId(sub)) or.push({ username: sub });
+    }
+    if (sub && !mongoose.isValidObjectId(sub)) {
+      or.push({ username: sub });
+    }
 
     if (or.length === 0) {
       return res.status(401).json({ error: "Invalid or expired token" });
@@ -296,7 +281,11 @@ async function requireAuth(req, res, next) {
       $or: or,
     });
 
-    if (!user && !Object.keys(orgWhere).length) {
+    // Important:
+    // For backend-issued JWTs, allow fallback to a global user lookup if the
+    // org-scoped lookup fails. This supports setups where membership is stored
+    // in UserOrg and not only in User.orgId.
+    if (!user) {
       user = await User.findOne({
         isDeleted: { $ne: true },
         $or: or,
@@ -305,6 +294,15 @@ async function requireAuth(req, res, next) {
 
     if (!user) {
       return res.status(401).json({ error: "User not found" });
+    }
+
+    // Preserve selected org context from the backend JWT for downstream routes.
+    if (payload?.orgId) {
+      user.orgId = String(payload.orgId);
+      req.orgId = String(payload.orgId);
+      req.orgObjectId = mongoose.isValidObjectId(String(payload.orgId))
+        ? new mongoose.Types.ObjectId(String(payload.orgId))
+        : undefined;
     }
 
     if (user.active === false) {
