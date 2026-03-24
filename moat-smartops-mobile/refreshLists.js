@@ -214,6 +214,27 @@ async function refreshMobileLibraryOfflineDocuments() {
 export async function refreshListsFromServer() {
   const data = await apiGet("/api/mobile/lists");
 
+  console.log("[refreshLists] /api/mobile/lists response counts", {
+    projects: Array.isArray(data?.projects) ? data.projects.length : "n/a",
+    tasks: Array.isArray(data?.tasks) ? data.tasks.length : "n/a",
+    milestones: Array.isArray(data?.milestones)
+      ? data.milestones.length
+      : Array.isArray(data?.taskMilestones)
+        ? data.taskMilestones.length
+        : "n/a",
+    users: Array.isArray(data?.users) ? data.users.length : "n/a",
+    vehicles: Array.isArray(data?.vehicles) ? data.vehicles.length : "n/a",
+    assets: Array.isArray(data?.assets) ? data.assets.length : "n/a",
+    groups: Array.isArray(data?.groups) ? data.groups.length : "n/a",
+    inspections: Array.isArray(data?.inspectionForms)
+      ? data.inspectionForms.length
+      : Array.isArray(data?.inspections)
+        ? data.inspections.length
+        : "n/a",
+    vendors: Array.isArray(data?.vendors) ? data.vendors.length : "n/a",
+    definitions: data?.definitions ? Object.keys(data.definitions) : [],
+  });
+
   const projects = safeArray(data?.projects);
   const tasks = safeArray(data?.tasks);
   const milestones = safeArray(data?.milestones || data?.taskMilestones);

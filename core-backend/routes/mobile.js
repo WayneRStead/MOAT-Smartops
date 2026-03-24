@@ -1277,11 +1277,19 @@ router.get("/lists", requireOrg, async (req, res) => {
       return {};
     };
 
+    console.log("[mobile/lists] org debug", {
+      orgIdRaw: orgId,
+      orgIdStr,
+      orgIdObj: orgIdObj ? String(orgIdObj) : null,
+    });
+
     const projects = Project?.find
       ? await Project.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({ _id: 1, name: 1, status: 1 })
           .lean()
       : [];
+
+    console.log("[mobile/lists] projects count", projects.length);
 
     const tasks = Task?.find
       ? await Task.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
@@ -1319,6 +1327,8 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    console.log("[mobile/lists] tasks count", tasks.length);
+
     const milestones = TaskMilestone?.find
       ? await TaskMilestone.find({
           ...makeOrgFilter(),
@@ -1349,6 +1359,8 @@ router.get("/lists", requireOrg, async (req, res) => {
             .lean()
         : [];
 
+    console.log("[mobile/lists] milestones count", milestones.length);
+
     const users = User?.find
       ? await User.find({
           ...makeOrgFilter(),
@@ -1373,6 +1385,8 @@ router.get("/lists", requireOrg, async (req, res) => {
           })
           .lean()
       : [];
+
+    console.log("[mobile/lists] users count", users.length);
 
     const currentUserDoc =
       (Array.isArray(users) ? users : []).find((u) =>
@@ -1401,9 +1415,19 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    console.log(
+      "[mobile/lists] inspectionFormsRaw count",
+      inspectionFormsRaw.length,
+    );
+
     const inspectionForms = mobileFilterInspectionFormsForUser(
       inspectionFormsRaw,
       currentUserDoc,
+    );
+
+    console.log(
+      "[mobile/lists] inspectionForms filtered count",
+      inspectionForms.length,
     );
 
     const vehicles = Vehicle?.find
@@ -1424,6 +1448,8 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    console.log("[mobile/lists] vehicles count", vehicles.length);
+
     const assets = Asset?.find
       ? await Asset.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
           .select({
@@ -1441,11 +1467,15 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    console.log("[mobile/lists] assets count", assets.length);
+
     const documents = Document?.find
       ? await Document.find(makeOrgFilter())
           .select({ _id: 1, title: 1, tags: 1, updatedAt: 1 })
           .lean()
       : [];
+
+    console.log("[mobile/lists] assets count", assets.length);
 
     const groups = Group?.find
       ? await Group.find({ ...makeOrgFilter(), isDeleted: { $ne: true } })
@@ -1453,12 +1483,16 @@ router.get("/lists", requireOrg, async (req, res) => {
           .lean()
       : [];
 
+    console.log("[mobile/lists] groups count", groups.length);
+
     const vendors = Vendor?.find
       ? await Vendor.find(makeOrgFilter())
           .select({ _id: 1, name: 1, contact: 1, email: 1, phone: 1 })
           .sort({ name: 1 })
           .lean()
       : [];
+
+    console.log("[mobile/lists] vendors count", vendors.length);
 
     const vehiclesForMobile = (Array.isArray(vehicles) ? vehicles : []).map(
       (v) => {
@@ -1488,6 +1522,19 @@ router.get("/lists", requireOrg, async (req, res) => {
         { id: "other", label: "Other" },
       ],
     };
+
+    console.log("[mobile/lists] final response counts", {
+      projects: projects.length,
+      tasks: tasks.length,
+      milestones: milestones.length,
+      users: users.length,
+      inspectionForms: inspectionForms.length,
+      vehicles: vehiclesForMobile.length,
+      assets: assets.length,
+      documents: documents.length,
+      groups: groups.length,
+      vendors: vendors.length,
+    });
 
     return res.json({
       ok: true,
