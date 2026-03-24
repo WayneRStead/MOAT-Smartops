@@ -1,4 +1,3 @@
-// core-backend/routes/auth.js
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -125,6 +124,48 @@ async function makeFirebaseCustomToken(user, currentOrgId = null, roles = []) {
   return admin.auth().createCustomToken(firebaseUid, claims);
 }
 
+function sameId(a, b) {
+  return String(a || "").trim() === String(b || "").trim();
+}
+
+function pickLoginOrg({ user, memberships }) {
+  const list = Array.isArray(memberships) ? memberships : [];
+  const userOrgId = String(user?.orgId || "").trim();
+
+  // 1) Prefer the org directly attached to the user record
+  if (userOrgId) {
+    const matchedMembership = list.find((m) => sameId(m?.orgId, userOrgId));
+
+    return {
+      currentOrgId: userOrgId,
+      currentRoles: Array.isArray(matchedMembership?.roles)
+        ? matchedMembership.roles
+        : Array.isArray(user?.roles)
+          ? user.roles
+          : user?.role
+            ? [user.role]
+            : [],
+      source: matchedMembership ? "user.orgId+membership" : "user.orgId",
+    };
+  }
+
+  // 2) If only one membership exists, use it
+  if (list.length === 1) {
+    return {
+      currentOrgId: String(list[0].orgId || "").trim() || null,
+      currentRoles: Array.isArray(list[0].roles) ? list[0].roles : [],
+      source: "single-membership",
+    };
+  }
+
+  // 3) No safe automatic choice
+  return {
+    currentOrgId: null,
+    currentRoles: [],
+    source: "none",
+  };
+}
+
 /* =======================================================================
  *  LOGIN
  *  POST /auth/login
@@ -163,14 +204,22 @@ router.post("/login", async (req, res) => {
       memberships = await UserOrg.find({ userId: user._id }).lean();
     }
 
-    let currentOrgId = null;
-    let currentRoles = [];
-    if (memberships.length === 1) {
-      currentOrgId = memberships[0].orgId;
-      currentRoles = Array.isArray(memberships[0].roles)
-        ? memberships[0].roles
-        : [];
-    }
+    const pickedOrg = pickLoginOrg({ user, memberships });
+
+    let currentOrgId = pickedOrg.currentOrgId;
+    let currentRoles = pickedOrg.currentRoles;
+
+    console.log("[auth/login] org pick", {
+      email: cleanEmail,
+      userId: String(user._id),
+      userOrgId: String(user?.orgId || ""),
+      memberships: memberships.map((m) => ({
+        orgId: String(m?.orgId || ""),
+        roles: Array.isArray(m?.roles) ? m.roles : [],
+      })),
+      pickedCurrentOrgId: currentOrgId,
+      pickedSource: pickedOrg.source,
+    });
 
     const token = makeToken({
       user,
@@ -251,9 +300,6 @@ router.get("/me", requireAuth, async (req, res) => {
       roles: m.roles || [],
     }));
 
-    // ✅ THIS IS THE FIX:
-    // Always include role + roles exactly as middleware computed them.
-    // These are what your UI should trust for gating.
     const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
     const role = req.user?.role || roles[0] || "user";
 
@@ -262,16 +308,10 @@ router.get("/me", requireAuth, async (req, res) => {
         _id: user._id,
         name: user.name,
         email: user.email,
-
-        // include org context & roles for UI permissions
         orgId: req.user.orgId ? String(req.user.orgId) : null,
         roles,
         role,
-
-        // keep existing field for super/global cases
         globalRole: req.user.globalRole || user.globalRole || null,
-
-        // optional flags if present (won't break anything)
         isGlobalSuperadmin: req.user.isGlobalSuperadmin === true,
       },
       orgs,
@@ -367,12 +407,10 @@ router.post("/forgot-password", async (req, res) => {
     const base = FRONTEND_BASE_URL.replace(/\/$/, "");
     const resetUrl = `${base}/reset-password?token=${encodeURIComponent(token)}`;
 
-    // 🔹 Always log the reset URL (especially helpful in dev)
     console.warn("[auth/forgot-password] Password reset link generated:");
     console.warn(`  To: ${user.email}`);
     console.warn(`  URL: ${resetUrl}`);
 
-    // Optional org name for branding
     let orgName = "";
     try {
       if (Org && user.orgId) {
@@ -383,7 +421,6 @@ router.post("/forgot-password", async (req, res) => {
       console.warn("[auth/forgot-password] org lookup failed:", e.message);
     }
 
-    // Try to send email, but NEVER break UX if SMTP fails
     try {
       await sendPasswordResetEmail({ to: user.email, resetUrl, orgName });
     } catch (mailErr) {
@@ -400,7 +437,6 @@ router.post("/forgot-password", async (req, res) => {
     });
   } catch (err) {
     console.error("[auth/forgot-password]", err);
-    // Still don't leak info; generic response
     res.status(200).json({
       ok: true,
       message:
@@ -444,7 +480,6 @@ router.post("/reset-password", async (req, res) => {
 
     const userId = payload.sub;
 
-    // Check that the user still exists and isn't deleted
     const user = await User.findById(userId).lean();
     if (!user || user.isDeleted) {
       return res.status(400).json({ error: "Invalid or expired reset token." });
@@ -452,7 +487,6 @@ router.post("/reset-password", async (req, res) => {
 
     const hash = await bcrypt.hash(String(password), 12);
 
-    // Update only password fields, skip full validation to avoid roles enum issues
     await User.updateOne(
       { _id: userId },
       {
