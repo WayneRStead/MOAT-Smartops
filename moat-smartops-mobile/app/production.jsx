@@ -18,7 +18,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Marker, Polygon } from "react-native-maps";
+import MapView, { Marker, Polygon, Polyline } from "react-native-maps";
 
 import { API_BASE_URL, ORG_KEY, TOKEN_KEY } from "../apiClient";
 import { syncOutbox } from "../syncOutbox";
@@ -959,57 +959,132 @@ export default function ProductionScreen() {
 
   /* -------------------- FENCE CAPTURE -------------------- */
   const handleStartFenceCapture = async () => {
-    const { status: locStatus } =
-      await Location.requestForegroundPermissionsAsync();
-    if (locStatus !== "granted") {
+    try {
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        Alert.alert(
+          "Location disabled",
+          "Please switch on location services on the device and try again.",
+        );
+        return;
+      }
+
+      const { status: existingStatus } =
+        await Location.getForegroundPermissionsAsync();
+
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== "granted") {
+        Alert.alert(
+          "Location permission",
+          "Location access is required to capture an activity fence or point.",
+        );
+        return;
+      }
+
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const lat = Number(loc?.coords?.latitude);
+      const lng = Number(loc?.coords?.longitude);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        Alert.alert(
+          "Location unavailable",
+          "Could not get a valid GPS position. Please try again outdoors or with better signal.",
+        );
+        return;
+      }
+
+      setActivityFencePoints([]);
+      setMapRegion({
+        latitude: lat,
+        longitude: lng,
+        latitudeDelta: 0.005,
+        longitudeDelta: 0.005,
+      });
+
+      setFenceModalVisible(true);
+    } catch (e) {
+      console.error("[Production] handleStartFenceCapture failed", e);
       Alert.alert(
-        "Location permission",
-        "Location access is required to capture an activity fence/point.",
+        "Fence capture failed",
+        e?.message || "Could not start fence capture on this device.",
       );
-      return;
     }
-
-    const loc = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High,
-    });
-
-    setMapRegion({
-      latitude: loc.coords.latitude,
-      longitude: loc.coords.longitude,
-      latitudeDelta: 0.005,
-      longitudeDelta: 0.005,
-    });
-
-    setFenceModalVisible(true);
   };
 
   const startAutoCapture = async () => {
     try {
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        Alert.alert(
+          "Location disabled",
+          "Please switch on location services on the device and try again.",
+        );
+        return;
+      }
+
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert(
+          "Location permission",
+          "Location access is required to capture points.",
+        );
+        return;
+      }
+
       const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+        accuracy: Location.Accuracy.Balanced,
       });
-      const firstPoint = {
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      };
-      setActivityFencePoints((prev) => [...prev, firstPoint]);
-    } catch {}
 
-    const timer = setInterval(async () => {
-      try {
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High,
-        });
-        const point = {
-          latitude: loc.coords.latitude,
-          longitude: loc.coords.longitude,
+      const firstLat = Number(loc?.coords?.latitude);
+      const firstLng = Number(loc?.coords?.longitude);
+
+      if (Number.isFinite(firstLat) && Number.isFinite(firstLng)) {
+        const firstPoint = {
+          latitude: firstLat,
+          longitude: firstLng,
         };
-        setActivityFencePoints((prev) => [...prev, point]);
-      } catch {}
-    }, 2500);
+        setActivityFencePoints((prev) => [...prev, firstPoint]);
+      }
 
-    captureTimerRef.current = timer;
-    setAutoCapturing(true);
+      const timer = setInterval(async () => {
+        try {
+          const nextLoc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+          });
+
+          const lat = Number(nextLoc?.coords?.latitude);
+          const lng = Number(nextLoc?.coords?.longitude);
+
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            const point = {
+              latitude: lat,
+              longitude: lng,
+            };
+            setActivityFencePoints((prev) => [...prev, point]);
+          }
+        } catch (err) {
+          console.log("[Production] auto capture point failed", err);
+        }
+      }, 2500);
+
+      captureTimerRef.current = timer;
+      setAutoCapturing(true);
+    } catch (e) {
+      console.error("[Production] startAutoCapture failed", e);
+      Alert.alert(
+        "Capture failed",
+        e?.message || "Could not start automatic point capture.",
+      );
+    }
   };
 
   const stopAutoCapture = () => {
@@ -1021,7 +1096,10 @@ export default function ProductionScreen() {
   };
 
   const handleConfirmFence = () => {
-    if (activityFencePoints.length === 0) {
+    if (
+      !Array.isArray(activityFencePoints) ||
+      activityFencePoints.length === 0
+    ) {
       Alert.alert(
         "No points",
         "Please capture at least one point for this activity fence.",
@@ -1035,6 +1113,7 @@ export default function ProductionScreen() {
   const handleCloseFenceModal = () => {
     stopAutoCapture();
     setFenceModalVisible(false);
+    setMapRegion(null);
   };
 
   const getFenceSummary = () => {
@@ -1301,7 +1380,7 @@ export default function ProductionScreen() {
             <TextInput
               style={[styles.input, styles.textArea]}
               placeholder="Manager note"
-              placeholderTextColor="#aaa"
+              placeholderTextColor="#888"
               value={managerNote}
               onChangeText={setManagerNote}
               multiline
@@ -1378,7 +1457,7 @@ export default function ProductionScreen() {
             <TextInput
               style={[styles.input, styles.textArea]}
               placeholder="Task note"
-              placeholderTextColor="#aaa"
+              placeholderTextColor="#888"
               value={taskNote}
               onChangeText={setTaskNote}
               multiline
@@ -1443,7 +1522,7 @@ export default function ProductionScreen() {
             <TextInput
               style={[styles.input, styles.textArea]}
               placeholder="Activity note"
-              placeholderTextColor="#aaa"
+              placeholderTextColor="#888"
               value={activityNote}
               onChangeText={setActivityNote}
               multiline
@@ -1631,19 +1710,25 @@ export default function ProductionScreen() {
             <TextInput
               style={styles.input}
               placeholder="Search user by name / email / staff #"
+              placeholderTextColor="#888"
               value={userSearch}
               onChangeText={setUserSearch}
+              autoCapitalize="none"
+              autoCorrect={false}
             />
 
             <TextInput
               style={styles.input}
               placeholder="Title"
+              placeholderTextColor="#888"
               value={attachTitle}
               onChangeText={setAttachTitle}
             />
+
             <TextInput
               style={styles.input}
               placeholder="Tag"
+              placeholderTextColor="#888"
               value={attachTag}
               onChangeText={setAttachTag}
             />
@@ -1699,13 +1784,17 @@ export default function ProductionScreen() {
         onRequestClose={handleCloseFenceModal}
       >
         <View style={styles.fenceContainer}>
-          {mapRegion ? (
+          {mapRegion &&
+          Number.isFinite(mapRegion.latitude) &&
+          Number.isFinite(mapRegion.longitude) ? (
             <MapView
               style={styles.fenceMap}
               initialRegion={mapRegion}
-              region={mapRegion}
-              onRegionChangeComplete={setMapRegion}
+              showsUserLocation={true}
+              showsMyLocationButton={true}
+              toolbarEnabled={false}
             >
+              {/* Existing task/work-area fence */}
               <Polygon
                 coordinates={DUMMY_TASK_FENCE}
                 strokeColor="rgba(34,166,179,1)"
@@ -1713,6 +1802,7 @@ export default function ProductionScreen() {
                 strokeWidth={2}
               />
 
+              {/* Single captured point */}
               {activityFencePoints.length === 1 && (
                 <Marker
                   coordinate={activityFencePoints[0]}
@@ -1721,14 +1811,23 @@ export default function ProductionScreen() {
                 />
               )}
 
+              {/* Captured route / fence path */}
               {activityFencePoints.length >= 2 && (
-                <Polygon
+                <Polyline
                   coordinates={activityFencePoints}
                   strokeColor="rgba(231, 76, 60, 1)"
-                  fillColor="rgba(231, 76, 60, 0.2)"
-                  strokeWidth={2}
+                  strokeWidth={3}
                 />
               )}
+
+              {/* Show markers for all captured points */}
+              {activityFencePoints.map((pt, idx) => (
+                <Marker
+                  key={`activity-point-${idx}`}
+                  coordinate={pt}
+                  title={`Point ${idx + 1}`}
+                />
+              ))}
             </MapView>
           ) : (
             <View style={styles.fenceLoading}>
@@ -1855,6 +1954,7 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 10,
     backgroundColor: "#fafafa",
+    color: "#111",
   },
   textArea: { height: 80, textAlignVertical: "top" },
 

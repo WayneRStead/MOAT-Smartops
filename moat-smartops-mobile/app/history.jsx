@@ -1,6 +1,5 @@
-// moat-smartops-mobile/History.jsx
+// moat-smartops-mobile/app/History.jsx
 import { useRouter } from "expo-router";
-import * as SQLite from "expo-sqlite";
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -12,14 +11,10 @@ import {
   View,
 } from "react-native";
 
-import { resetFailedToPending } from "../database";
+import { initDatabase, openAppDb, resetFailedToPending } from "../database";
 import { syncOutbox } from "../syncOutbox";
 
 const THEME_COLOR = "#22a6b3";
-
-async function getDb() {
-  return await SQLite.openDatabaseAsync("moatSmartOps.db");
-}
 
 function fmtWhen(iso) {
   if (!iso) return "";
@@ -63,37 +58,99 @@ function summarizePayload(eventType, payloadJson) {
 
   if (eventType === "activity-log") {
     return (
-      (p.note ? `Note: ${p.note}` : "") ||
-      (p.taskId ? `Task: ${p.taskId}` : "") ||
-      (p.projectId ? `Project: ${p.projectId}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      (p?.taskId ? `Task: ${p.taskId}` : "") ||
+      (p?.projectId ? `Project: ${p.projectId}` : "") ||
       "Activity log"
     );
   }
 
   if (eventType === "project-update") {
     return (
-      (p.managerNote ? `Note: ${p.managerNote}` : "") ||
-      (p.status ? `Status: ${p.status}` : "") ||
-      (p.projectId ? `Project: ${p.projectId}` : "") ||
+      (p?.managerNote ? `Note: ${p.managerNote}` : "") ||
+      (p?.status ? `Status: ${p.status}` : "") ||
+      (p?.projectId ? `Project: ${p.projectId}` : "") ||
       "Project update"
     );
   }
 
   if (eventType === "task-update") {
     return (
-      (p.note ? `Note: ${p.note}` : "") ||
-      (p.status ? `Status: ${p.status}` : "") ||
-      (p.taskId ? `Task: ${p.taskId}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      (p?.status ? `Status: ${p.status}` : "") ||
+      (p?.taskId ? `Task: ${p.taskId}` : "") ||
       "Task update"
     );
   }
 
   if (eventType === "user-document") {
     return (
-      (p.title ? `Title: ${p.title}` : "") ||
-      (p.tag ? `Tag: ${p.tag}` : "") ||
-      (p.projectId ? `Project: ${p.projectId}` : "") ||
+      (p?.title ? `Title: ${p.title}` : "") ||
+      (p?.tag ? `Tag: ${p.tag}` : "") ||
+      (p?.projectId ? `Project: ${p.projectId}` : "") ||
       "User document"
+    );
+  }
+
+  if (eventType === "inspection-run") {
+    return (
+      (p?.formTitle ? `Inspection: ${p.formTitle}` : "") ||
+      (p?.formId ? `Form: ${p.formId}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      "Inspection run"
+    );
+  }
+
+  if (eventType === "vehicle-log") {
+    return (
+      (p?.regNumber ? `Vehicle: ${p.regNumber}` : "") ||
+      (p?.typeLabel ? `Type: ${p.typeLabel}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      "Vehicle log"
+    );
+  }
+
+  if (eventType === "vehicle-trip") {
+    return (
+      (p?.regNumber ? `Vehicle: ${p.regNumber}` : "") ||
+      (p?.kind ? `Trip: ${p.kind}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      "Vehicle trip"
+    );
+  }
+
+  if (eventType === "vehicle-purchase") {
+    return (
+      (p?.regNumber ? `Vehicle: ${p.regNumber}` : "") ||
+      (p?.vendor ? `Vendor: ${p.vendor}` : "") ||
+      (p?.typeLabel ? `Type: ${p.typeLabel}` : "") ||
+      "Vehicle purchase"
+    );
+  }
+
+  if (eventType === "asset-create") {
+    return (
+      (p?.assetCode ? `Asset: ${p.assetCode}` : "") ||
+      (p?.assetName ? `Name: ${p.assetName}` : "") ||
+      "Asset create"
+    );
+  }
+
+  if (eventType === "asset-log") {
+    return (
+      (p?.assetCode ? `Asset: ${p.assetCode}` : "") ||
+      (p?.note ? `Note: ${p.note}` : "") ||
+      (p?.status ? `Status: ${p.status}` : "") ||
+      "Asset log"
+    );
+  }
+
+  if (eventType === "clock-batch-v2") {
+    const peopleCount = Array.isArray(p?.people) ? p.people.length : 0;
+    return (
+      (peopleCount ? `People: ${peopleCount}` : "") ||
+      (p?.batch?.clockType ? `Type: ${p.batch.clockType}` : "") ||
+      "Clock batch"
     );
   }
 
@@ -101,7 +158,7 @@ function summarizePayload(eventType, payloadJson) {
 }
 
 function normalizeServerStage(row) {
-  const v = row?.serverStage ?? row?.server_stage ?? null;
+  const v = row?.serverStage ?? null;
   if (!v) return "";
   return String(v).toLowerCase();
 }
@@ -111,6 +168,7 @@ function getBadgeStyle(syncStatus) {
   if (syncStatus === "pending") backgroundColor = "#f39c12";
   else if (syncStatus === "failed") backgroundColor = "#e74c3c";
   else if (syncStatus === "synced") backgroundColor = "#27ae60";
+
   return {
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -155,9 +213,9 @@ export default function HistoryScreen() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const db = await getDb();
+      await initDatabase();
+      const db = await openAppDb();
 
-      // Counts
       const countRows = await db.getAllAsync(
         `SELECT syncStatus, COUNT(*) AS c
          FROM offline_events
@@ -165,43 +223,31 @@ export default function HistoryScreen() {
       );
 
       const nextCounts = { all: 0, pending: 0, synced: 0, failed: 0 };
-      for (const r of countRows) {
-        const s = (r.syncStatus || "").toLowerCase();
-        if (s === "pending") nextCounts.pending = r.c || 0;
-        if (s === "synced") nextCounts.synced = r.c || 0;
-        if (s === "failed") nextCounts.failed = r.c || 0;
+
+      for (const r of countRows || []) {
+        const s = String(r?.syncStatus || "").toLowerCase();
+        if (s === "pending") nextCounts.pending = r?.c || 0;
+        if (s === "synced") nextCounts.synced = r?.c || 0;
+        if (s === "failed") nextCounts.failed = r?.c || 0;
       }
+
       nextCounts.all =
         nextCounts.pending + nextCounts.synced + nextCounts.failed;
 
       setCounts(nextCounts);
 
-      // Events list
       const where = filter === "all" ? "" : `WHERE syncStatus='${filter}'`;
 
-      let list = [];
-      try {
-        list = await db.getAllAsync(
-          `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
-                  syncStatus, errorText, createdAt, updatedAt,
-                  serverStage, server_stage
-           FROM offline_events
-           ${where}
-           ORDER BY createdAt DESC
-           LIMIT 250`,
-        );
-      } catch {
-        list = await db.getAllAsync(
-          `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
-                  syncStatus, errorText, createdAt, updatedAt
-           FROM offline_events
-           ${where}
-           ORDER BY createdAt DESC
-           LIMIT 250`,
-        );
-      }
+      const list = await db.getAllAsync(
+        `SELECT id, eventType, orgId, userId, entityRef, payloadJson, fileUrisJson,
+                syncStatus, errorText, createdAt, updatedAt, serverStage
+         FROM offline_events
+         ${where}
+         ORDER BY createdAt DESC
+         LIMIT 250`,
+      );
 
-      setRows(list || []);
+      setRows(Array.isArray(list) ? list : []);
     } catch (e) {
       console.log("[History] load error", e);
       Alert.alert("Error", "Could not load History from SQLite.");
@@ -261,7 +307,8 @@ export default function HistoryScreen() {
 
   const handleClearSynced = async () => {
     try {
-      const db = await getDb();
+      await initDatabase();
+      const db = await openAppDb();
 
       if ((counts.synced || 0) === 0) {
         Alert.alert("Nothing to clear", "No sent items to delete.");
@@ -304,7 +351,6 @@ export default function HistoryScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      {/* Top bar */}
       <View style={styles.topBar}>
         <Image
           source={require("../assets/history-screen.png")}
@@ -322,7 +368,6 @@ export default function HistoryScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Controls */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>History</Text>
         <Text style={styles.cardSubtitle}>
@@ -330,10 +375,9 @@ export default function HistoryScreen() {
           {"\n"}
           Sent to server = successfully uploaded.
           {"\n"}
-          Applied = server confirmed it updated a real record (later).
+          Applied = server confirmed it updated a real record.
         </Text>
 
-        {/* Filter chips */}
         <View style={styles.chipRow}>
           {filterOptions.map((o) => {
             const selected = filter === o.key;
@@ -369,7 +413,7 @@ export default function HistoryScreen() {
             disabled={loading || syncing}
           >
             <Text style={styles.secondaryButtonText}>
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? "Refreshing..." : "Refresh"}
             </Text>
           </TouchableOpacity>
 
@@ -379,7 +423,7 @@ export default function HistoryScreen() {
             disabled={syncing || loading}
           >
             <Text style={styles.primaryButtonText}>
-              {syncing ? "Syncing…" : "Sync now"}
+              {syncing ? "Syncing..." : "Sync now"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -391,7 +435,7 @@ export default function HistoryScreen() {
             disabled={resetting || syncing || loading}
           >
             <Text style={styles.secondaryButtonText}>
-              {resetting ? "Resetting…" : "Retry failed"}
+              {resetting ? "Resetting..." : "Retry failed"}
             </Text>
           </TouchableOpacity>
 
@@ -405,7 +449,6 @@ export default function HistoryScreen() {
         </View>
       </View>
 
-      {/* List */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Recent items</Text>
 
@@ -415,21 +458,21 @@ export default function HistoryScreen() {
           </Text>
         ) : (
           rows.map((r) => {
-            const status = (r.syncStatus || "pending").toLowerCase();
+            const status = String(r?.syncStatus || "pending").toLowerCase();
             const serverStage = normalizeServerStage(r);
-            const summary = summarizePayload(r.eventType, r.payloadJson);
-            const when = fmtWhen(r.createdAt);
+            const summary = summarizePayload(r?.eventType, r?.payloadJson);
+            const when = fmtWhen(r?.createdAt);
 
             return (
-              <View key={String(r.id)} style={styles.row}>
+              <View key={String(r?.id)} style={styles.row}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle}>
-                    {r.eventType || "event"}{" "}
-                    <Text style={styles.rowMeta}>#{r.id}</Text>
+                    {r?.eventType || "event"}{" "}
+                    <Text style={styles.rowMeta}>#{r?.id}</Text>
                   </Text>
 
                   <Text style={styles.rowSub}>
-                    {when} {r.entityRef ? `| Ref: ${r.entityRef}` : ""}
+                    {when} {r?.entityRef ? `| Ref: ${r.entityRef}` : ""}
                   </Text>
 
                   <Text style={styles.rowBody} numberOfLines={2}>
@@ -442,7 +485,7 @@ export default function HistoryScreen() {
                     </Text>
                   ) : null}
 
-                  {status === "failed" && r.errorText ? (
+                  {status === "failed" && r?.errorText ? (
                     <Text style={styles.rowError} numberOfLines={2}>
                       Error: {String(r.errorText)}
                     </Text>
@@ -461,8 +504,8 @@ export default function HistoryScreen() {
       </View>
 
       <Text style={styles.hintText}>
-        Tip: If items fail with “Missing token”, your multipart upload path
-        isn’t sending Authorization. Fix syncOutbox.js, then tap “Retry failed”.
+        Tip: if an item fails, open History and tap Retry failed after fixing
+        the cause.
       </Text>
     </ScrollView>
   );

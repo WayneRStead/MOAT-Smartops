@@ -32,9 +32,16 @@ const ORG_KEYS_FALLBACK = [
 
 const USER_ID_KEYS_FALLBACK = [USER_ID_KEY, "@moat:userid", "moat:userid"];
 
-// Example: https://moat-smartops.onrender.com
+// actual render url: https://moat-smartops.onrender.com
+const ENV_API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || "",
+).trim();
+const FALLBACK_API_BASE_URL = "https://moat-smartops.onrender.com";
+
 export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_BASE_URL || "https://YOUR-RENDER-URL";
+  ENV_API_BASE_URL && !ENV_API_BASE_URL.includes("YOUR-RENDER-URL")
+    ? ENV_API_BASE_URL
+    : FALLBACK_API_BASE_URL;
 
 function isLikelyMongoId(value) {
   return /^[a-f0-9]{24}$/i.test(String(value || "").trim());
@@ -167,6 +174,20 @@ function joinUrl(base, path) {
 
 export function buildApiUrl(path) {
   return joinUrl(API_BASE_URL, path);
+}
+
+export function validateApiBaseUrl() {
+  const base = String(API_BASE_URL || "").trim();
+
+  if (!base) {
+    throw new Error("API base URL is missing.");
+  }
+
+  if (base.includes("YOUR-RENDER-URL") || !/^https?:\/\//i.test(base)) {
+    throw new Error(`API base URL is invalid: ${base}`);
+  }
+
+  return base;
 }
 
 export async function apiGet(path) {

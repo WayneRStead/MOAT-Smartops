@@ -21,6 +21,10 @@ async function getDb() {
   return dbPromise;
 }
 
+export async function openAppDb() {
+  return await getDb();
+}
+
 function nowIso() {
   return new Date().toISOString();
 }

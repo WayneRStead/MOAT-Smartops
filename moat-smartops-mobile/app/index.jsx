@@ -6,6 +6,7 @@ import { auth } from "../firebase";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Image,
   Modal,
@@ -23,21 +24,21 @@ import {
   ORG_KEY,
   TOKEN_KEY,
   USER_ID_KEY,
+  validateApiBaseUrl,
 } from "../apiClient";
 import { initDatabase } from "../database";
 
 const THEME_COLOR = "#22a6b3";
 
 /**
- * ✅ Stable auth/session keys (used by onboarding/debug and other screens)
- * These do NOT replace Mongo userId; they store Firebase identity so we can map reliably.
+ * Stable auth/session keys
  */
 const FIREBASE_UID_KEY = "@moat:auth:firebaseUid";
 const FIREBASE_EMAIL_KEY = "@moat:auth:email";
 const AUTH_SESSION_KEY = "@moat:auth:session";
 
 /**
- * ✅ Compatibility token key (some screens previously read this)
+ * Compatibility token key
  */
 const TOKEN_KEY_COMPAT = "@moat:cache:token";
 
@@ -49,17 +50,26 @@ function safeTokenPreview(token) {
 }
 
 async function loginAgainstBackend(email, password) {
-  const base = String(API_BASE_URL || "").replace(/\/+$/, "");
-  const res = await fetch(`${base}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      email: String(email || "")
-        .trim()
-        .toLowerCase(),
-      password: String(password || ""),
-    }),
-  });
+  const base = validateApiBaseUrl().replace(/\/+$/, "");
+  const url = `${base}/api/auth/login`;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: String(email || "")
+          .trim()
+          .toLowerCase(),
+        password: String(password || ""),
+      }),
+    });
+  } catch (_e) {
+    throw new Error(
+      `Could not reach server at ${base}. Check internet connection and API URL.`,
+    );
+  }
 
   const text = await res.text();
   let json = null;
@@ -80,6 +90,11 @@ async function loginAgainstBackend(email, password) {
 export default function LoginScreen() {
   const router = useRouter();
 
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [registerVisible, setRegisterVisible] = useState(false);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
@@ -90,16 +105,21 @@ export default function LoginScreen() {
     })();
   }, []);
 
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [registerVisible, setRegisterVisible] = useState(false);
-
   const handleLogin = async () => {
+    if (isSigningIn) return;
+
     try {
-      if (!username || !password) return;
+      if (!username || !password) {
+        Alert.alert("Missing details", "Enter your email and password.");
+        return;
+      }
+
+      setIsSigningIn(true);
 
       const email = username.trim();
       const pass = password;
+
+      console.log("[AUTH] API_BASE_URL:", API_BASE_URL);
 
       const data = await loginAgainstBackend(email, pass);
 
@@ -184,8 +204,11 @@ export default function LoginScreen() {
         "Login failed",
         e?.message || "Check your email/password and try again.",
       );
+    } finally {
+      setIsSigningIn(false);
     }
   };
+
   const handleForgotPassword = () => {
     console.log("Forgot password pressed for", username);
   };
@@ -213,30 +236,63 @@ export default function LoginScreen() {
           value={username}
           onChangeText={setUsername}
           autoCapitalize="none"
+          editable={!isSigningIn}
         />
+
         <TextInput
-          style={styles.input}
+          style={[styles.input, { color: "#111" }]}
           placeholder="Password"
           placeholderTextColor="#aaa"
           value={password}
           onChangeText={setPassword}
-          secureTextEntry
+          secureTextEntry={true}
+          autoCapitalize="none"
+          autoCorrect={false}
+          textContentType="password"
+          editable={!isSigningIn}
         />
 
         <TouchableOpacity
           onPress={handleForgotPassword}
           style={styles.forgotContainer}
+          disabled={isSigningIn}
         >
-          <Text style={styles.forgotText}>Forgotten password?</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.primaryButton} onPress={handleLogin}>
-          <Text style={styles.primaryButtonText}>Sign in</Text>
+          <Text style={[styles.forgotText, isSigningIn && styles.disabledText]}>
+            Forgotten password?
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.primaryButton, styles.secondaryButton]}
+          style={[
+            styles.primaryButton,
+            isSigningIn && styles.primaryButtonDisabled,
+          ]}
+          onPress={handleLogin}
+          disabled={isSigningIn}
+          activeOpacity={0.8}
+        >
+          <View style={styles.signInButtonContent}>
+            {isSigningIn ? (
+              <>
+                <ActivityIndicator size="small" color="#fff" />
+                <Text style={[styles.primaryButtonText, styles.signingInText]}>
+                  Signing in...
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.primaryButtonText}>Sign in</Text>
+            )}
+          </View>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.primaryButton,
+            styles.secondaryButton,
+            isSigningIn && styles.primaryButtonDisabled,
+          ]}
           onPress={() => setRegisterVisible(true)}
+          disabled={isSigningIn}
         >
           <Text style={styles.primaryButtonText}>Not yet registered</Text>
         </TouchableOpacity>
@@ -339,6 +395,9 @@ const styles = StyleSheet.create({
     textDecorationLine: "underline",
     color: "#555",
   },
+  disabledText: {
+    color: "#999",
+  },
   primaryButton: {
     backgroundColor: THEME_COLOR,
     paddingVertical: 12,
@@ -346,10 +405,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 12,
   },
+  primaryButtonDisabled: {
+    opacity: 0.7,
+  },
   primaryButtonText: {
     color: "#fff",
     fontSize: 14,
     fontWeight: "600",
+  },
+  signInButtonContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 20,
+  },
+  signingInText: {
+    marginLeft: 10,
   },
   secondaryButton: {
     marginTop: 8,
